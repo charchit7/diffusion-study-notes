@@ -1,0 +1,289 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flow Matching From Zero</title><style>
+  :root { --ground:#F7F8FA; --ink:#1D2634; --muted:#5F6E80;
+          --accent:#31599B; --rule:#DDE3EA; --card:#EEF1F5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ground:#12161D; --ink:#D9DEE6; --muted:#8B99AB;
+            --accent:#8FB3E2; --rule:#28303C; --card:#1A202A; } }
+  html { background: var(--ground); }
+  body { margin:0; color:var(--ink);
+    font-family: Charter, Georgia, 'Times New Roman', serif;
+    font-size:1.05rem; line-height:1.66; }
+  .wrap { max-width:72ch; margin:0 auto; padding:2.2rem 1.25rem 4rem; }
+  .eyebrow { font-family:system-ui,sans-serif; font-size:.72rem; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--muted); margin:0 0 .6rem; }
+  h1 { font-size:1.75rem; line-height:1.22; margin:0 0 1.2rem; }
+  h2 { font-size:1.28rem; margin:2.4rem 0 .7rem; padding-top:1.2rem;
+       border-top:1px solid var(--rule); }
+  h3 { font-size:1.08rem; margin:1.8rem 0 .5rem; color:var(--accent); }
+  p, li { margin:0 0 .95rem; } ul, ol { padding-left:1.3rem; }
+  blockquote { border-left:3px solid var(--accent); background:var(--card);
+    margin:1.2rem 0; padding:.7rem 1rem; border-radius:0 6px 6px 0; }
+  pre { background:var(--card); border-radius:6px; padding:.9rem 1rem;
+    overflow-x:auto; font-size:.82rem; line-height:1.5; }
+  code { font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+    font-size:.86em; background:var(--card); padding:.08em .3em; border-radius:4px; }
+  pre code { background:none; padding:0; }
+  .tablewrap { overflow-x:auto; margin:1.2rem 0; }
+  table { border-collapse:collapse; width:100%;
+    font-family:system-ui,sans-serif; font-size:.86rem; }
+  th, td { text-align:left; padding:.45rem .65rem; border-bottom:1px solid var(--rule); }
+  th { font-size:.7rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
+  a { color:var(--accent); }
+</style></head><body>
+<div class="wrap"><p class="eyebrow">Theory 4/7 · <a href="index.html">index</a></p>
+<h1>Flow Matching From Zero</h1>
+<p><em>Same rules as <code>05_math_from_zero.md</code>: nothing used before it is built, every step
+expanded, numeric sanity checks throughout. Read that file's Part A first (mean,
+variance, reparameterization) — we reuse it. New tools needed here: just one —
+"velocity," built below without assuming calculus.</em></p>
+<p>As before, we work with ONE pixel (a single number); images are many pixels and
+every formula applies to each independently.</p>
+<p>⚠ Convention flip vs DDPM: flow matching runs time <strong>from 0 = noise to 1 = data</strong>
+(DDPM ran T = noise down to 0 = data). Also t is now a <em>continuous</em> number in
+[0, 1], not an integer step count.</p>
+<hr />
+<h2>Part A — The tools</h2>
+<h3>A1. Velocity (all the "calculus" we need)</h3>
+<p>If a particle's position at time t is x(t), its <strong>velocity</strong> at time t is:</p>
+<pre><code>v(t) ≈ ( x(t + Δ) − x(t) ) / Δ        for a tiny time-step Δ
+</code></pre>
+<p>"Distance moved divided by time taken," measured over an instant. That is the
+entire definition of a derivative that we need. Two facts, checkable by plugging
+into the formula:</p>
+<p><strong>Fact 1 (constant motion):</strong> if x(t) = a + b·t, then
+    v = ((a + b(t+Δ)) − (a + bt))/Δ = bΔ/Δ = <strong>b</strong>, at every t.
+Straight-line motion has constant velocity. (Exact — no approximation needed;
+the Δ's cancel perfectly because the path is straight.)</p>
+<p><strong>Fact 2 (Euler's method — driving by GPS):</strong> if you know the velocity everywhere,
+you can reconstruct the path by taking small steps:</p>
+<pre><code>x(t + Δ) ≈ x(t) + v(x(t), t) · Δ
+</code></pre>
+<p>"Where you'll be = where you are + how fast you're going × how long you go."
+Smaller Δ = more accurate. If the true motion is a straight line, Euler is EXACT
+even with one giant step (Fact 1: v never changes, so no error accumulates).
+This one sentence is the entire flow-matching sampler.</p>
+<h3>A2. Velocity field</h3>
+<p>A <strong>velocity field</strong> v(x, t) is an arrow attached to every location x at every
+time t: "if you are standing here at this time, move this way at this speed."
+Think weather-map wind arrows. Release a dust particle anywhere; the field
+carries it along a path. Release a whole CLOUD of dust and the field carries the
+entire cloud — reshaping the cloud's density as it goes.</p>
+<p>That reshaping is the punchline: <strong>a velocity field is a machine that transforms
+one probability distribution into another over time.</strong> Start the cloud shaped
+like N(0, 1) at t=0; if the field is chosen well, the cloud at t=1 is shaped
+like the data distribution. Generation = drop a random dust grain at t=0, follow
+the arrows to t=1, read off where it landed.</p>
+<p>So the whole game is: <strong>learn the arrows.</strong> A neural network v_θ(x, t) takes
+(position, time) and outputs an arrow — exactly the same interface as DDPM's
+ε_θ(x_t, t), just a different meaning for the output.</p>
+<h3>A3. One tool from statistics: "the best guess is the average"</h3>
+<p>Claim: the number c that minimizes E[(Y − c)²] (average squared error against a
+random Y) is c = E[Y], the mean.
+<em>Proof by completing the square (05 file, A5):</em>
+E[(Y − c)²] = E[Y²] − 2c·E[Y] + c² . As a function of c this is a parabola;
+write it as (c − E[Y])² + (E[Y²] − E[Y]²). The first term is the only part
+containing c, and it is smallest (zero) at c = E[Y]. ∎</p>
+<p>Upgraded version we'll need: if the guess may DEPEND on some observed
+information (here: your position x and time t), the best guesser outputs the
+<strong>conditional average</strong> E[Y | what you observed]. Same proof, applied separately
+at each observed value. Remember this — it is the entire "trick" of flow
+matching (Part D).</p>
+<hr />
+<h2>Part B — The big idea, before any formulas</h2>
+<p>DDPM learned to <em>undo noise</em> step by step, with fresh randomness injected at
+every step (a drunkard stumbling from static toward a face). Flow matching asks
+a cleaner question:</p>
+<blockquote>
+<p>Find a velocity field so that dust shaped like pure noise at t=0 flows into
+dust shaped like the data at t=1.</p>
+</blockquote>
+<p>Differences from DDPM worth internalizing now:</p>
+<ol>
+<li><strong>Deterministic ride.</strong> After the ONE random draw at t=0 (your starting dust
+   grain), the trip is pure arrow-following. No noise re-injection. All the
+   diversity of generation lives in the starting point.</li>
+<li><strong>We get to DESIGN the route.</strong> DDPM's route was dictated by the noising
+   process (curved, wiggly). Flow matching lets us declare "particles travel in
+   straight lines" — and straight lines are exactly what Euler's method
+   integrates with the fewest steps (Fact 1/2). This is why flow-matching models
+   sample well with 10–50 steps while vanilla DDPM needs ~1000.</li>
+<li><strong>Same training cost.</strong> Despite the fancy "transport" language, training will
+   collapse to: pick a noise, pick an image, pick a time, do one MSE. Just like
+   DDPM.</li>
+</ol>
+<p>The apparent obstacle: the arrows we need are a property of the <em>entire data
+distribution</em> — how could we ever know the correct arrow at some random midpoint?
+Part C+D dissolve this with one lovely observation.</p>
+<hr />
+<h2>Part C — Conditional paths: pretend there is only ONE image</h2>
+<p>Fix one noise sample x₀ ~ N(0,1) and one dataset image x₁. If the world
+contained only this pair, the natural route between them is the straight line:</p>
+<pre><code>x_t = (1 − t)·x₀ + t·x₁ ,    t ∈ [0, 1]          (Eq. ▲, "the interpolant")
+</code></pre>
+<p>Check endpoints: t=0 → x₀ ✓ ; t=1 → x₁ ✓. At t=0.3 you're 30% of the way to
+the image. (This straight-line choice is the "rectified flow" / "conditional
+optimal transport" path — Liu et al. 2022, Lipman et al. 2023. Other curved
+choices exist; straight is best for fast sampling and is what modern systems
+like Stable Diffusion 3 / Flux / Meta MovieGen use.)</p>
+<p>What velocity does this path have? It's of the form a + b·t with a = x₀ and
+b = x₁ − x₀, so by Fact 1:</p>
+<pre><code>v = x₁ − x₀ ,  constant along the whole trip        (Eq. ▲▲, "the target")
+</code></pre>
+<p>The arrow just points from your noise straight at your image, always. Given the
+pair, the correct answer is trivial. This is called the <strong>conditional</strong> velocity
+("conditional" = computed while knowing which pair you committed to).</p>
+<p>Note it can be rewritten using Eq. ▲: since x₀ = (x_t − t·x₁)/(1−t), knowing
+any two of (x_t, x₀, x₁, v) gives the others — the same three-numbers-one-
+equation structure as DDPM's (x_t, x₀, ε).</p>
+<hr />
+<h2>Part D — The marginalization problem, and the trick that solves it</h2>
+<h3>D1. The problem</h3>
+<p>At generation time the network stands at position x at time t and does NOT know
+which (x₀, x₁) pair it belongs to — because it belongs to MANY. Different
+noise-image pairs' straight lines cross the same point:</p>
+<pre><code>pair A: noise −2 → image +4:  at t=0.5, x = 1, arrow = +6
+pair B: noise  0 → image +2:  at t=0.5, x = 1, arrow = +2
+</code></pre>
+<p>Standing at (x=1, t=0.5), which arrow is correct? For the CLOUD to flow
+correctly, the field must use the average of all arrows passing through that
+point, weighted by how likely each pair is to be there — the <strong>marginal</strong>
+velocity:</p>
+<pre><code>v*(x, t) = E[ x₁ − x₀ | x_t = x ]        ("average arrow through here")
+</code></pre>
+<p>(That this average is exactly what transports the whole cloud correctly is the
+continuity-equation theorem of Lipman et al. 2023, Thm 1 — the one result we
+cite without proof, as with Gaussian stability in the DDPM notes. Intuition:
+each conditional line correctly transports its own two-point "mini-cloud"; a
+density is a weighted mixture of mini-clouds; averaging the arrows transports
+the mixture.)</p>
+<p>This v* looks uncomputable — it averages over the whole dataset at every point.</p>
+<h3>D2. The trick: MSE against the EASY target already learns the HARD one</h3>
+<p>Train the network by regression against the <em>conditional</em> arrow, which costs
+nothing to compute:</p>
+<pre><code>L = E over (x₀, x₁, t) of  ( v_θ(x_t, t) − (x₁ − x₀) )²      (Eq. ▲▲▲)
+</code></pre>
+<p>Now recall tool A3 (upgraded form): the function that minimizes a squared error
+against a random target, given observed (x, t), is the conditional average of
+that target:</p>
+<pre><code>best v_θ(x, t) = E[ x₁ − x₀ | x_t = x ]  =  v*(x, t).
+</code></pre>
+<p><strong>The minimizer of the trivial loss IS the intractable marginal field.</strong> We never
+compute the average over the dataset; the optimizer performs it for us, because
+that is simply what least-squares does when the target is noisy. (Same logic in
+DDPM, where ε_θ silently learns E[ε | x_t] — flow matching just makes the trick
+the headline.)</p>
+<p>One more comfort: expanding the square shows the trivial loss and the true loss
+E(v_θ − v*)² differ by a constant that does not contain θ (the variance of the
+arrows around their mean), so even their gradients agree. Nothing is lost.</p>
+<h3>D3. Why this is the whole paper</h3>
+<p>That's flow matching. No forward-process derivation, no Bayes posterior, no
+ELBO, no KL chain — the three-page pipeline of the DDPM notes is replaced by:
+(1) pick straight lines, (2) note their velocity is x₁ − x₀,
+(3) least-squares learns conditional means. Everything else is engineering.</p>
+<hr />
+<h2>Part E — The algorithms</h2>
+<h3>Training (compare DDPM Algorithm 1 line by line)</h3>
+<pre><code>repeat:
+  x₁  ~ dataset                     # clean image        (DDPM: same)
+  x₀  ~ N(0, I)                     # noise              (DDPM: ε)
+  t   ~ Uniform[0, 1]               # continuous!        (DDPM: integer 0..T−1)
+  x_t = (1−t)·x₀ + t·x₁             # interpolate        (DDPM: √ᾱ x₀ + √(1−ᾱ) ε)
+  loss = ( v_θ(x_t, t) − (x₁−x₀) )² # regress the arrow  (DDPM: MSE on ε)
+</code></pre>
+<p>Same shape-bug traps as DDPM: t must broadcast as (B,1,1,1) against images, the
+network takes t through the same sinusoidal embedding (it accepts floats — check
+<code>blocks.py</code>: <code>t.float()[:, None] * freqs</code>), and the U-Net is reused unchanged.</p>
+<h3>Sampling = Euler (Fact 2), driving from noise to data</h3>
+<pre><code>x = randn()                         # t = 0: drop a dust grain
+for i in 0 .. N−1:                  # N ≈ 10–100 steps
+    t = i / N
+    x = x + v_θ(x, t) · (1/N)       # one Euler step of size Δ = 1/N
+return x                            # t = 1: an image
+</code></pre>
+<p>No noise inside the loop, no special last step, no posterior variance — compare
+with DDPM Algorithm 2 and enjoy. If the learned field were perfectly straight,
+N = 1 would already work (Fact 1: constant velocity ⇒ Euler exact); in practice
+the <em>marginal</em> field is curved even though each conditional line is straight
+(averaging straight arrows with different directions bends the flow), so a few
+dozen steps are used. Making the marginal flow actually straight by re-training
+on the model's own (start, end) pairs is <strong>Reflow / rectified flow distillation</strong>
+(Liu et al. 2022) — the road to 1-step generation, and cousin of consistency
+models.</p>
+<hr />
+<h2>Part F — The bridge back to DDPM (both are one family)</h2>
+<p>Put the DDPM forward shortcut and the FM interpolant side by side (time reversed
+so both run noise → data):</p>
+<pre><code>DDPM:  x = √(1−ᾱ)·noise + √ᾱ·image      coefficients on a CIRCLE  (a²+b²=1)
+FM:    x = (1−t)·noise + t·image        coefficients on a LINE    (a+b=1)
+</code></pre>
+<p>Both are "slide from noise to image along some schedule"; they differ only in
+the path of the mixing coefficients. Consequences:</p>
+<ul>
+<li>The variance-preserving circle made DDPM's algebra heavy (ᾱ products, β̃'s);
+  the straight line makes FM's algebra trivial. Same idea, better coordinates.</li>
+<li>ε-prediction, x₀-prediction (HW1 Q6!), v-prediction, and FM's velocity are all
+  linear re-labelings of the same learned information: given x_t and any one of
+  them, the others follow from the one mixing equation. FM's "velocity" target
+  v = x₁ − x₀ is precisely the flow-matching analogue of DDPM's v-prediction.</li>
+<li>DDPM sampling ≈ stochastic path-following (noise re-injected each step);
+  FM sampling = deterministic path-following. DDIM sits exactly in between:
+  it is DDPM's <em>deterministic</em> sampler — historically the first hint that the
+  arrows were all that mattered. Score-SDE makes this formal: every diffusion
+  has a "probability flow ODE" whose velocity field generates the same
+  distributions; FM just learns such a field directly, for a straighter path.
+  <strong>Both DDIM and that ODE (plus the DPM-Solver that solves it fast) are
+  derived from scratch in <code>10_ddim_dpmsolver_from_zero.md</code>.</strong></li>
+</ul>
+<h2>Part G — Cheat sheet</h2>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>Formula</th>
+<th>Meaning</th>
+<th>Where</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>v ≈ (x(t+Δ)−x(t))/Δ</td>
+<td>velocity = distance/time over an instant</td>
+<td>A1</td>
+</tr>
+<tr>
+<td>2</td>
+<td>x ← x + v·Δ</td>
+<td>Euler step: the entire sampler</td>
+<td>A1</td>
+</tr>
+<tr>
+<td>3</td>
+<td>x_t = (1−t)x₀ + t·x₁</td>
+<td>straight path from noise to one image</td>
+<td>C</td>
+</tr>
+<tr>
+<td>4</td>
+<td>v = x₁ − x₀</td>
+<td>its (constant) velocity: the training target</td>
+<td>C</td>
+</tr>
+<tr>
+<td>5</td>
+<td>L = E(v_θ(x_t,t) − (x₁−x₀))²</td>
+<td>the entire training loss</td>
+<td>D2</td>
+</tr>
+<tr>
+<td>6</td>
+<td>argmin = E[x₁−x₀ | x_t]</td>
+<td>least-squares learns the marginal field free</td>
+<td>A3+D2</td>
+</tr>
+</tbody>
+</table></div>
+<p>Total math used: distance/time, one substitution, and "the best guess is the
+average." Even less than DDPM needed.</p></div></body></html>

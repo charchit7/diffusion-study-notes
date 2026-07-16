@@ -1,0 +1,433 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MIT Lab 1, Line by Line — ODEs &amp; SDEs</title><style>
+  :root { --ground:#F7F8FA; --ink:#1D2634; --muted:#5F6E80;
+          --accent:#31599B; --rule:#DDE3EA; --card:#EEF1F5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ground:#12161D; --ink:#D9DEE6; --muted:#8B99AB;
+            --accent:#8FB3E2; --rule:#28303C; --card:#1A202A; } }
+  html { background: var(--ground); }
+  body { margin:0; color:var(--ink);
+    font-family: Charter, Georgia, 'Times New Roman', serif;
+    font-size:1.05rem; line-height:1.66; }
+  .wrap { max-width:72ch; margin:0 auto; padding:2.2rem 1.25rem 4rem; }
+  .eyebrow { font-family:system-ui,sans-serif; font-size:.72rem; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--muted); margin:0 0 .6rem; }
+  h1 { font-size:1.75rem; line-height:1.22; margin:0 0 1.2rem; }
+  h2 { font-size:1.28rem; margin:2.4rem 0 .7rem; padding-top:1.2rem;
+       border-top:1px solid var(--rule); }
+  h3 { font-size:1.08rem; margin:1.8rem 0 .5rem; color:var(--accent); }
+  p, li { margin:0 0 .95rem; } ul, ol { padding-left:1.3rem; }
+  blockquote { border-left:3px solid var(--accent); background:var(--card);
+    margin:1.2rem 0; padding:.7rem 1rem; border-radius:0 6px 6px 0; }
+  pre { background:var(--card); border-radius:6px; padding:.9rem 1rem;
+    overflow-x:auto; font-size:.82rem; line-height:1.5; }
+  code { font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+    font-size:.86em; background:var(--card); padding:.08em .3em; border-radius:4px; }
+  pre code { background:none; padding:0; }
+  .tablewrap { overflow-x:auto; margin:1.2rem 0; }
+  table { border-collapse:collapse; width:100%;
+    font-family:system-ui,sans-serif; font-size:.86rem; }
+  th, td { text-align:left; padding:.45rem .65rem; border-bottom:1px solid var(--rule); }
+  th { font-size:.7rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
+  a { color:var(--accent); }
+</style></head><body>
+<div class="wrap"><p class="eyebrow">Lab study 1/3 · <a href="index.html">index</a></p>
+<h1>MIT Lab 1, Line by Line — Simulating ODEs and SDEs</h1>
+<p><em>A beginner's reading companion to <code>solutions/lab_one_complete.ipynb</code>. Every
+line of code: what it does, why it's there, and what breaks without it.
+Concepts link to our notes: Euler = <code>06 §A1</code>, score = <code>10 §3</code>.</em></p>
+<p><strong>The lab in one sentence:</strong> before any neural networks, learn to <em>simulate</em> —
+follow deterministic arrows (ODEs), follow arrows plus random kicks (SDEs),
+and watch how doing so moves entire <em>distributions</em> of points around. Every
+diffusion sampler you'll ever write is one of these two loops.</p>
+<hr />
+<h2>Cell 0 — Imports and device</h2>
+<pre><code class="language-python">from abc import ABC, abstractmethod
+</code></pre>
+<p>Python's tools for <strong>abstract base classes</strong>. <code>ABC</code> marks a class as "a
+template, not a thing you can build"; <code>@abstractmethod</code> marks a method as
+"every child class MUST provide this." The lab uses them as enforceable
+contracts: an <code>SDE</code> <em>is</em> anything with a drift and a diffusion — nothing more.</p>
+<pre><code class="language-python">from typing import Optional
+</code></pre>
+<p>Type-hint helper: <code>Optional[Axes]</code> means "an Axes object, or None." Purely
+documentation — Python doesn't enforce it — but it tells readers which
+arguments may be omitted.</p>
+<pre><code class="language-python">import numpy as np
+</code></pre>
+<p>NumPy. Used sparingly here (e.g., <code>np.pi</code>); PyTorch does the heavy lifting.</p>
+<pre><code class="language-python">from matplotlib import pyplot as plt
+from matplotlib.axes._axes import Axes
+</code></pre>
+<p>Plotting. <code>plt</code> is the canvas-level interface; <code>Axes</code> is imported only so
+function signatures can <em>name</em> the type of the <code>ax</code> argument.</p>
+<pre><code class="language-python">import torch
+import torch.distributions as D
+</code></pre>
+<p>PyTorch, and its probability-distributions toolbox <code>D</code> — ready-made Gaussian
+and mixture objects with correct <code>sample()</code> and <code>log_prob()</code> methods, so the
+lab doesn't hand-roll densities.</p>
+<pre><code class="language-python">from torch.func import vmap, jacrev
+</code></pre>
+<p>The two pieces of PyTorch's <em>function-transform</em> API used later to get scores
+for free: <code>jacrev(f)</code> returns a new function computing the <strong>Jacobian</strong>
+(all derivatives) of <code>f</code>; <code>vmap</code> makes any function operate <strong>per-batch-item</strong>
+without a Python loop. Together: exact ∇log p for every sample, no math done
+by hand. (More at Cell 11.)</p>
+<pre><code class="language-python">from tqdm import tqdm
+import seaborn as sns
+</code></pre>
+<p><code>tqdm</code> wraps any loop in a progress bar (you'll see it around simulation
+steps). <code>seaborn</code> = prettier statistical plots (line plots, histograms, KDE).</p>
+<pre><code class="language-python">device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+</code></pre>
+<p>Pick the GPU if one exists, else CPU. Every tensor created later is moved
+<code>.to(device)</code>; forgetting one produces the classic
+"expected device cuda but got cpu" error.</p>
+<hr />
+<h2>Cell 1 — The ODE and SDE contracts</h2>
+<pre><code class="language-python">class ODE(ABC):
+    @abstractmethod
+    def drift_coefficient(self, xt, t) -&gt; torch.Tensor:
+</code></pre>
+<p>An ODE, to this lab, is JUST a drift function: the arrow field
+u(x, t) in dx/dt = u(x_t, t) (our notes 06 §A2 — "arrow attached to every
+location and time"). Declaring it abstract means "any concrete ODE must say
+what its arrows are"; there is no other requirement.</p>
+<p>The docstring pins the <strong>shape contract</strong>, which is the real content here:
+- <code>xt: (batch_size, dim)</code> — a whole <em>population</em> of points is simulated at
+  once; batch = many independent particles.
+- <code>t: ()</code> — a scalar (0-dimensional tensor): every particle shares one clock.
+- returns <code>(batch_size, dim)</code> — one arrow per particle.</p>
+<pre><code class="language-python">class SDE(ABC):
+    @abstractmethod
+    def drift_coefficient(self, xt, t) -&gt; torch.Tensor: ...
+    @abstractmethod
+    def diffusion_coefficient(self, xt, t) -&gt; torch.Tensor: ...
+</code></pre>
+<p>An SDE is an ODE <strong>plus a randomness dial</strong>:
+dx = u(x_t, t)dt + σ(x_t, t)dW. <code>drift_coefficient</code> is the deterministic
+part (same as ODE); <code>diffusion_coefficient</code> says <em>how loud the random kicks
+are</em> at each place and time. Note what is absent: no <code>step</code>, no <code>simulate</code> —
+the equation object only <em>describes</em> dynamics; HOW to simulate them is a
+separate concern (next cell). This separation is the lab's main software
+lesson: swap equations and simulators independently.</p>
+<hr />
+<h2>Cell 2 — The Simulator contract and the two loops</h2>
+<pre><code class="language-python">class Simulator(ABC):
+    @abstractmethod
+    def step(self, xt, t, dt):
+</code></pre>
+<p>A simulator is anything that knows how to advance the world by one tick:
+given the state at time t and a step size dt, produce the state at t+dt.
+Abstract, because Euler is only one choice (midpoint, Heun, DPM-Solver…
+are all just different <code>step</code>s — see our notes 10).</p>
+<pre><code class="language-python">    @torch.no_grad()
+    def simulate(self, x, ts):
+</code></pre>
+<p><code>@torch.no_grad()</code>: simulation is <em>inference</em>, not training — no gradients
+are needed through hundreds of steps. Without this decorator PyTorch would
+record every step in the autograd graph and memory would balloon.</p>
+<pre><code class="language-python">        for t_idx in range(len(ts) - 1):
+</code></pre>
+<p>March through the time grid. <code>len(ts) - 1</code> because each iteration consumes a
+<em>pair</em> (ts[i], ts[i+1]) — N timestamps define N−1 steps. Off-by-one here is
+the classic sampler bug.</p>
+<pre><code class="language-python">            t = ts[t_idx]
+            h = ts[t_idx + 1] - ts[t_idx]
+</code></pre>
+<p>Current time, and step size <em>derived from the grid</em> (h = next − current)
+rather than assumed constant — so non-uniform time grids work for free
+(exactly what fancy samplers exploit).</p>
+<pre><code class="language-python">            x = self.step(x, t, h)
+        return x
+</code></pre>
+<p>Overwrite the state each tick; return only the endpoint. Memory: O(1) in
+time — nothing but the current state is kept.</p>
+<pre><code class="language-python">    @torch.no_grad()
+    def simulate_with_trajectory(self, x, ts):
+        xs = [x.clone()]
+</code></pre>
+<p>Same loop, but keep the whole movie. <code>x.clone()</code> matters: <code>step</code> returns new
+tensors here, but cloning defends against any future in-place <code>step</code> —
+without it every list entry could point at the same mutated memory and the
+"trajectory" would be N copies of the final frame.</p>
+<pre><code class="language-python">        for t_idx in tqdm(range(len(ts) - 1)):
+</code></pre>
+<p>Identical loop wrapped in a progress bar (this is the version humans watch).</p>
+<pre><code class="language-python">            xs.append(x.clone())
+        return torch.stack(xs, dim=1)
+</code></pre>
+<p>Collect each frame; <code>torch.stack(xs, dim=1)</code> turns a list of
+(batch, dim) frames into one (batch, num_timesteps, dim) tensor — dim=1 so
+that index order reads "particle, time, coordinate."</p>
+<hr />
+<h2>Cell 3 — Q1.1a: Euler simulator (three lines that matter)</h2>
+<pre><code class="language-python">class EulerSimulator(Simulator):
+    def __init__(self, ode: ODE):
+        self.ode = ode
+</code></pre>
+<p>Composition: the simulator <em>holds</em> an equation. Any ODE object plugs in.</p>
+<pre><code class="language-python">    def step(self, xt, t, h):
+        return xt + self.ode.drift_coefficient(xt,t) * h
+</code></pre>
+<p>Euler's method, verbatim from our notes (06 §A1 Fact 2): <strong>where you'll be =
+where you are + arrow × time</strong>. <code>drift_coefficient</code> returns (batch, dim),
+<code>h</code> is scalar; broadcasting scales every particle's arrow at once. That's
+the entire deterministic sampler family in one line.</p>
+<h2>Cell 4 — Q1.1b: Euler–Maruyama (the stochastic sibling)</h2>
+<pre><code class="language-python">        return xt + self.sde.drift_coefficient(xt,t) * h \
+                  + self.sde.diffusion_coefficient(xt,t) * torch.sqrt(h) * torch.randn_like(xt)
+</code></pre>
+<p>Euler plus one new term: a fresh Gaussian kick per particle
+(<code>randn_like(xt)</code> = right shape, right device), scaled by the local noise
+level σ <strong>and by √h — not h.</strong> Why the square root: over a step of length h,
+Brownian noise accumulates <em>variance</em> h (variances add over time — our notes
+05 §A1 Rule 2), so its <em>standard deviation</em> is √h. Scale by h instead and
+noise vanishes too fast as you refine the grid; your "SDE" silently becomes
+an ODE. This √h is the single most-tested fact about SDE simulation.
+Compare with our DDPM ancestral step (05 Part E): mean move + σ·z — same
+skeleton, different clothes.</p>
+<hr />
+<h2>Cell 5 — Q2.1: Brownian motion, the hydrogen atom of SDEs</h2>
+<pre><code class="language-python">class BrownianMotion(SDE):
+    def __init__(self, sigma: float):
+        self.sigma = sigma
+</code></pre>
+<p>One knob: the noise volume σ.</p>
+<pre><code class="language-python">    def drift_coefficient(self, xt, t):
+        return torch.zeros_like(xt)
+</code></pre>
+<p>NO arrows — pure randomness. <code>zeros_like</code> (not the scalar 0) keeps the
+shape/device contract: downstream code can always add drift to noise
+blindly. Also note the object ignores <code>t</code>: time-independence expressed by
+simply not using the argument.</p>
+<pre><code class="language-python">    def diffusion_coefficient(self, xt, t):
+        return self.sigma * torch.ones_like(xt)
+</code></pre>
+<p>Constant noise everywhere: σ·1, again shaped like the state. dx = σ·dW is
+the textbook Wiener process: expect trajectories that wander with spread
+growing like √t (variance σ²t) — which is exactly what the plot next cell
+confirms.</p>
+<h2>Cell 6 — Trajectory plotting utility (read once, then trust)</h2>
+<p>The one <em>conceptual</em> line:</p>
+<pre><code class="language-python">        trajectories = simulator.simulate_with_trajectory(x0, timesteps)
+</code></pre>
+<p>runs the actual simulation → (num_trajectories, num_timesteps, 1).</p>
+<p>Everything else is presentation, in five groups:
+- <code>if ax is None: ax = plt.gca()</code> — draw on the caller's axes if given, else
+  grab the current one; makes the function composable into subplot grids.
+- The <code>for trajectory_idx ...</code> loop slices one particle's path
+  <code>trajectories[i, :, 0]</code>, moves it <code>.detach().cpu().numpy()</code> (matplotlib
+  can't eat GPU tensors), and draws a thin translucent line — 500
+  overlapping ghost-lines is what makes the <em>distribution</em> visible.
+- Labels/ticks/grid lines: font sizes and a faint grid; cosmetics.
+- <code>if show_hist:</code> block — takes the FINAL time-slice
+  <code>trajectories[:, -1, 0]</code> and draws a sideways histogram on a small child
+  axes to the right (<code>make_axes_locatable ... append_axes</code>), sharing the
+  y-axis so trajectory endpoints and histogram bars line up. <code>binwidth</code> is
+  chosen from the data range (~25 bins, floor 0.05) so the histogram isn't
+  jagged for tight distributions. <code>decouple_hist_axis</code> exists for later
+  plots where the endpoint spread differs wildly from the trajectory range.
+- The final <code>fig.text(...)</code> block re-draws the title centered over BOTH the
+  main axes and the histogram (a plain <code>ax.set_title</code> would center it over
+  the trajectories only). Pure typography.</p>
+<h2>Cell 7 — Driving Brownian motion</h2>
+<pre><code class="language-python">sigma = 1.0
+n_traj = 500
+brownian_motion = BrownianMotion(sigma)
+simulator = EulerMaruyamaSimulator(sde=brownian_motion)
+</code></pre>
+<p>Build equation, plug into simulator — the composition pattern in action.</p>
+<pre><code class="language-python">x0 = torch.zeros(n_traj,1).to(device)
+</code></pre>
+<p>All 500 particles start at 0 — so any spread you see was <em>created by noise</em>.</p>
+<pre><code class="language-python">ts = torch.linspace(0.0,5.0,500).to(device)
+</code></pre>
+<p>500 evenly spaced timestamps on [0, 5] ⇒ 499 steps of h≈0.01.</p>
+<p>The rest sets up a figure and calls the Cell 6 utility with
+<code>show_hist=True</code>. What you should see and why: a fan of paths opening like
+√t, ending in a bell-shaped histogram of spread √5·σ ≈ 2.24 — Gaussian
+noise added over time stays Gaussian (05 §A4), variance = σ²t.</p>
+<hr />
+<h2>Cell 8 — Q2.2: Ornstein–Uhlenbeck — noise vs a restoring spring</h2>
+<pre><code class="language-python">    def drift_coefficient(self, xt, t):
+        return - self.theta * xt
+</code></pre>
+<p>The new ingredient vs Brownian motion: an arrow pointing BACK TOWARD ZERO,
+stronger the further out you are (magnitude θ|x|). A spring. Diffusion is
+constant σ as before. The whole process: dx = −θx dt + σ dW — tug-of-war
+between a spring pulling in and noise kicking out.</p>
+<h2>Cell 9 — OU side-by-side experiments</h2>
+<p>Three (θ, σ) pairs at fixed θ=0.25: σ=0 (pure spring: all trajectories decay
+smoothly to 0 — an ODE in disguise), σ=0.5 (small jitter around the decay),
+σ=2.0 (noise dominates; wide stationary band).</p>
+<p>Line notes beyond Cell 7's pattern:</p>
+<pre><code class="language-python">x0 = torch.linspace(-10.0,10.0,n_traj).view(-1,1).to(device)
+</code></pre>
+<p>Start the particles SPREAD OUT (−10…10) rather than at a point — so you can
+watch initial conditions being <em>forgotten</em>: whatever x0 was, trajectories
+converge into the same statistical band. <code>view(-1,1)</code> reshapes the flat
+(n,) linspace into the (n, 1) = (batch, dim) contract.</p>
+<p>Top row plots 10 trajectories (individual behavior), bottom row 500 with
+histograms (distributional behavior) — same system, two lenses; the
+<code>decouple_hist_axis=True</code> on the bottom row lets the histogram zoom to the
+narrow stationary band.</p>
+<h2>Cell 10 — The punchline grid: what does OU converge TO?</h2>
+<pre><code class="language-python">theta = sigma**2 / 2 / d
+</code></pre>
+<p>The key line. It <em>inverts</em> the stationary-variance formula: an OU process
+settles into N(0, σ²/2θ) — a permanent tug-of-war standoff. Fixing
+d := σ²/2θ and choosing θ from it builds a grid where <strong>every cell in a row
+has the same destination distribution</strong> but different noise levels.</p>
+<pre><code class="language-python">time_scale = sigma**2
+ts = torch.linspace(0.0, simulation_time / time_scale, 1000).to(device)
+</code></pre>
+<p>Bigger σ ⇒ faster convergence ⇒ shorten the simulated window by σ² so every
+panel shows a comparable stage of its journey.</p>
+<p>What the grid teaches (and why it's in a diffusion course): totally
+different dynamics, same endpoint distribution — a first taste of "many
+processes share marginals," the idea behind DDIM (notes 10 §1). And an OU
+process run long enough is exactly DDPM's forward process: it forgets its
+initial condition into a fixed Gaussian.</p>
+<hr />
+<h2>Cell 11 — Density and Sampleable: the two faces of a distribution</h2>
+<pre><code class="language-python">class Density(ABC):
+    @abstractmethod
+    def log_density(self, x): ...
+</code></pre>
+<p>Contract #1: "I can tell you how likely any point is" (log p(x), returned as
+(batch, 1)). Log, not raw p: densities underflow float precision; sums of
+logs are stable (same reason as 09 §A1).</p>
+<pre><code class="language-python">    def score(self, x):
+        x = x.unsqueeze(1)
+        score = vmap(jacrev(self.log_density))(x)
+        return score.squeeze((1, 2, 3))
+</code></pre>
+<p>The score ∇log p — the "which way is uphill in probability" arrow (notes 10
+§3) — obtained WITHOUT any hand math:
+- <code>jacrev(self.log_density)</code> builds a function returning derivatives of
+  log-density w.r.t. its input;
+- <code>vmap(...)</code> applies it per sample without a loop;
+- the <code>unsqueeze</code>/<code>squeeze</code> dance: <code>jacrev</code> computes the Jacobian of a
+  (1, dim)→(1, 1) map, producing shape (batch, 1, 1, 1, dim)-ish; adding the
+  dummy axis first and squeezing axes (1,2,3) after collapses it back to a
+  clean (batch, dim). Bookkeeping, not math.
+This is autodiff used as a <em>calculus engine</em>: define log p once, get scores
+exactly, for any density.</p>
+<pre><code class="language-python">class Sampleable(ABC):
+    @abstractmethod
+    def sample(self, num_samples): ...
+</code></pre>
+<p>Contract #2: "I can hand you points drawn from myself." Kept SEPARATE from
+Density on purpose: real datasets are Sampleable but not Density (you can
+draw photos; you cannot evaluate p(photo)) — the entire reason generative
+modeling is hard, encoded as a class design.</p>
+<h2>Cell 12 — 2D plotting helpers (four small functions)</h2>
+<p><code>hist2d_sampleable</code> / <code>scatter_sampleable</code>: draw <code>num_samples</code> points and
+show them as a 2D histogram / scatter. One subtlety: <code>.cpu()</code> on each
+coordinate — matplotlib again.</p>
+<p><code>imshow_density</code> / <code>contour_density</code>: evaluate log-density on a grid —
+<code>linspace</code> each axis, <code>meshgrid</code> to a lattice, <code>stack(...).reshape(-1, 2)</code>
+to a (bins², 2) batch of query points, one <code>log_density</code> call, reshape back
+to (bins, bins). The <code>.T</code> and <code>origin='lower'</code>: matplotlib's image
+convention (row = y, origin top-left) vs math convention (x right, y up) —
+transpose + origin flip aligns them. Same grid feeds <code>imshow</code> (heatmap) or
+<code>contour</code> (level lines).</p>
+<h2>Cell 13 — Concrete distributions: Gaussian and GaussianMixture</h2>
+<pre><code class="language-python">class Gaussian(torch.nn.Module, Sampleable, Density):
+</code></pre>
+<p>Triple inheritance, each with a job: <code>nn.Module</code> gives <code>register_buffer</code> and
+<code>.to(device)</code>; the other two are our contracts.</p>
+<pre><code class="language-python">        self.register_buffer(&quot;mean&quot;, mean)
+        self.register_buffer(&quot;cov&quot;, cov)
+</code></pre>
+<p>Buffers = "constants that travel with the module" — same pattern (and same
+reason) as our DDPM schedule buffers (02 §3.2): move with <code>.to(device)</code>,
+saved in state_dict, no gradients.</p>
+<pre><code class="language-python">    @property
+    def distribution(self):
+        return D.MultivariateNormal(self.mean, self.cov, validate_args=False)
+</code></pre>
+<p>Build the torch distribution <em>on demand</em> — a <code>@property</code> so it always uses
+the buffers' current device. <code>validate_args=False</code> skips input checking for
+speed. <code>sample</code>/<code>log_density</code> then delegate to it (<code>.view(-1, 1)</code> enforcing
+the (batch, 1) contract).</p>
+<p><code>GaussianMixture</code> is the same wrapper around <code>D.MixtureSameFamily</code>:
+- <code>D.Categorical(probs=weights)</code> picks WHICH bump each sample comes from;
+- <code>D.MultivariateNormal(means, covs)</code> is the batch of bumps;
+- torch composes them into one distribution with correct log_prob (a
+  log-sum-exp over components) and sampling.</p>
+<p>The two constructors are just scenery generators:
+<code>random_2D</code> — nmodes bumps at uniform-random locations in a
+<code>scale</code>-sized box (<code>(rand−0.5)*scale</code>), equal spherical covariances via
+<code>diag_embed(ones)·std²</code>, fixed <code>seed</code> so everyone's figures match.
+<code>symmetric_2D</code> — bumps equally spaced on a circle: angles from linspace
+(dropping the duplicate 2π endpoint with <code>[:nmodes]</code>), means =
+(cos, sin)·scale.</p>
+<h2>Cell 14 — Visualizing the three targets</h2>
+<p>Builds one Gaussian and the two mixtures, then per density: heatmap +
+faint contour lines overlaid. <code>vmin=-15</code> clips the colormap: log-densities
+plunge to −∞ in empty regions; without a floor the interesting structure
+compresses into one color band.</p>
+<hr />
+<h2>Cell 15 — Q3.1: Langevin dynamics — the star of the lab</h2>
+<pre><code class="language-python">class LangevinSDE(SDE):
+    def __init__(self, sigma: float, density: Density):
+</code></pre>
+<p>An SDE built FROM a density — the object that turns "I know the target's
+shape" into "I can generate from it."</p>
+<pre><code class="language-python">    def drift_coefficient(self, xt, t):
+        return 0.5 * self.sigma ** 2 * self.density.score(xt)
+</code></pre>
+<p>Drift = climb the probability landscape (score = uphill arrow), with
+strength σ²/2. The ½σ² is not style — it is the unique coefficient
+for which the climb and the noise below <em>balance</em> so the stationary
+distribution is exactly p (Fokker–Planck fact; the lab verifies it
+empirically instead of proving it — our axiom-flavored move).</p>
+<pre><code class="language-python">    def diffusion_coefficient(self, xt, t):
+        return self.sigma * torch.ones_like(xt)
+</code></pre>
+<p>Constant exploration noise. Intuition for the pair: pure climbing collapses
+all points onto the peaks (mode-seeking); pure noise wanders anywhere;
+climb + noise in the ½σ²-ratio makes points settle into p and <em>stay</em>
+distributed as p. Connection: OU (Cell 8) is Langevin for a Gaussian target
+— check: score of N(0, σ²/2θ) is −(2θ/σ²)x, times ½σ² gives −θx, the OU
+drift. That is Q3.2's whole answer, and it's why diffusion models
+(learned score + Langevin-style samplers, notes 10 §3) work at all.</p>
+<h2>Cell 16 — Snapshot utilities</h2>
+<p><code>every_nth_index(N, n)</code>: indices 0, n, 2n, … plus ALWAYS the last index
+(<code>cat</code> with <code>[N−1]</code>) — endpoint matters most; the <code>n == 1</code> early return
+avoids duplicating it.</p>
+<p><code>graph_dynamics(...)</code>: simulate once with trajectory, pick snapshot columns
+(<code>xts[:, indices_to_plot]</code>), then per snapshot draw two rows: scatter of
+particles over a faint target heatmap (are the points where the mass is?)
+and a seaborn KDE contour of the SAME points (does their <em>density</em> match
+the target's shape?). Scatter shows individuals, KDE shows the
+distribution — the lab's recurring double-lens.</p>
+<h2>Cell 17 — The experiment</h2>
+<p>Wide Gaussian start (cov 20·I — deliberately too spread out), 5-mode target,
+σ=0.6, 1000 steps over t∈[0,5], plotted every 334 steps → 3 snapshots:
+blob → blob draped over the modes → points sitting in the bumps with KDE
+matching the target contours. <strong>This picture is generative modeling</strong>: a
+known distribution transported onto a complicated one by simulating a
+process — Labs 2–3 merely replace the exact score with a learned network.</p>
+<h2>Cells 18–19 (optional) — Animation</h2>
+<p><code>Camera(fig)</code> from <code>celluloid</code>: after drawing each frame, <code>camera.snap()</code>
+stores it; <code>camera.animate()</code> compiles frames to an animation, saved as mp4
+and returned as an inline HTML5 video. The plotting body is identical to
+Cell 16's, minus subplots-per-time (one pair of axes reused per frame).
+Nothing conceptually new — the same dynamics as a movie.</p>
+<hr />
+<h2>What to carry forward (Lab 1 → everything else)</h2>
+<ol>
+<li>Equation objects (drift/diffusion) vs simulator objects (step/loop) —
+   diffusion samplers are just <code>step</code> functions.</li>
+<li><strong>√h on the noise</strong> — variances add; std does not.</li>
+<li>Sampleable vs Density — the split that defines the generative problem.</li>
+<li>Score = ∇log p = uphill arrow; autodiff can compute it when the density
+   is known; Lab 2 learns it when the density is a dataset.</li>
+<li>Langevin: drift ½σ²·score + noise σ ⇒ stationary distribution p.</li>
+<li>Different processes, same destination (OU grid) — foreshadows DDIM.</li>
+</ol></div></body></html>

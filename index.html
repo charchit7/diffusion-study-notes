@@ -1,0 +1,47 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diffusion From Zero — Study Notes</title><style>
+  :root { --ground:#F7F8FA; --ink:#1D2634; --muted:#5F6E80;
+          --accent:#31599B; --rule:#DDE3EA; --card:#EEF1F5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ground:#12161D; --ink:#D9DEE6; --muted:#8B99AB;
+            --accent:#8FB3E2; --rule:#28303C; --card:#1A202A; } }
+  html { background: var(--ground); }
+  body { margin:0; color:var(--ink);
+    font-family: Charter, Georgia, 'Times New Roman', serif;
+    font-size:1.05rem; line-height:1.66; }
+  .wrap { max-width:72ch; margin:0 auto; padding:2.2rem 1.25rem 4rem; }
+  .eyebrow { font-family:system-ui,sans-serif; font-size:.72rem; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--muted); margin:0 0 .6rem; }
+  h1 { font-size:1.75rem; line-height:1.22; margin:0 0 1.2rem; }
+  h2 { font-size:1.28rem; margin:2.4rem 0 .7rem; padding-top:1.2rem;
+       border-top:1px solid var(--rule); }
+  h3 { font-size:1.08rem; margin:1.8rem 0 .5rem; color:var(--accent); }
+  p, li { margin:0 0 .95rem; } ul, ol { padding-left:1.3rem; }
+  blockquote { border-left:3px solid var(--accent); background:var(--card);
+    margin:1.2rem 0; padding:.7rem 1rem; border-radius:0 6px 6px 0; }
+  pre { background:var(--card); border-radius:6px; padding:.9rem 1rem;
+    overflow-x:auto; font-size:.82rem; line-height:1.5; }
+  code { font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+    font-size:.86em; background:var(--card); padding:.08em .3em; border-radius:4px; }
+  pre code { background:none; padding:0; }
+  .tablewrap { overflow-x:auto; margin:1.2rem 0; }
+  table { border-collapse:collapse; width:100%;
+    font-family:system-ui,sans-serif; font-size:.86rem; }
+  th, td { text-align:left; padding:.45rem .65rem; border-bottom:1px solid var(--rule); }
+  th { font-size:.7rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
+  a { color:var(--accent); }
+</style></head><body>
+<div class="wrap"><p class="eyebrow">Study library · <a href="index.html">index</a></p>
+<h1>Diffusion &amp; Flow Matching — From-Zero Study Notes</h1>
+<p>A self-contained curriculum: every derivation from first principles (no
+calculus assumed until it is built), plus line-by-line reading companions to
+the MIT IAP diffusion labs. Written while solving the CMU 10-799 homeworks,
+four KAIST CS492 assignments, and the MIT 6.S184 labs end to end.</p>
+<h2>Theory — the from-zero series (read in order)</h2><ol><li><a href="01-mental-model.html">What Is Actually Happening?</a></li><li><a href="02-ddpm-math.html">DDPM Math From Zero</a></li><li><a href="03-elbo.html">The ELBO From Zero</a></li><li><a href="04-flow-matching.html">Flow Matching From Zero</a></li><li><a href="05-ddim-dpmsolver.html">DDIM &amp; DPM-Solver From Zero</a></li><li><a href="06-guidance.html">Guidance From Zero</a></li><li><a href="07-rebuild-checklist.html">Rebuild-From-Scratch Checklist</a></li></ol>
+<h2>MIT lab companions (line-by-line)</h2><ol><li><a href="lab1-line-by-line.html">MIT Lab 1, Line by Line — ODEs &amp; SDEs</a></li><li><a href="lab2-line-by-line.html">MIT Lab 2, Line by Line — Flow &amp; Score Matching</a></li><li><a href="lab3-line-by-line.html">MIT Lab 3, Line by Line — CFG, DiT, VAE, Latent Diffusion</a></li></ol>
+<h2>Sources</h2>
+<p>Markdown sources live in <code>md/</code>. Companion code:
+CMU <a href="https://github.com/KellyYutongHe/cmu-10799-diffusion">cmu-10799-diffusion</a>,
+MIT <a href="https://github.com/eje24/iap-diffusion-labs">iap-diffusion-labs</a>,
+KAIST <a href="https://github.com/KAIST-Visual-AI-Group">KAIST-Visual-AI-Group</a>.</p></div></body></html>

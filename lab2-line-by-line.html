@@ -1,0 +1,1346 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MIT Lab 2, Line by Line — Flow &amp; Score Matching</title><style>
+  :root { --ground:#F7F8FA; --ink:#1D2634; --muted:#5F6E80;
+          --accent:#31599B; --rule:#DDE3EA; --card:#EEF1F5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ground:#12161D; --ink:#D9DEE6; --muted:#8B99AB;
+            --accent:#8FB3E2; --rule:#28303C; --card:#1A202A; } }
+  html { background: var(--ground); }
+  body { margin:0; color:var(--ink);
+    font-family: Charter, Georgia, 'Times New Roman', serif;
+    font-size:1.05rem; line-height:1.66; }
+  .wrap { max-width:72ch; margin:0 auto; padding:2.2rem 1.25rem 4rem; }
+  .eyebrow { font-family:system-ui,sans-serif; font-size:.72rem; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--muted); margin:0 0 .6rem; }
+  h1 { font-size:1.75rem; line-height:1.22; margin:0 0 1.2rem; }
+  h2 { font-size:1.28rem; margin:2.4rem 0 .7rem; padding-top:1.2rem;
+       border-top:1px solid var(--rule); }
+  h3 { font-size:1.08rem; margin:1.8rem 0 .5rem; color:var(--accent); }
+  p, li { margin:0 0 .95rem; } ul, ol { padding-left:1.3rem; }
+  blockquote { border-left:3px solid var(--accent); background:var(--card);
+    margin:1.2rem 0; padding:.7rem 1rem; border-radius:0 6px 6px 0; }
+  pre { background:var(--card); border-radius:6px; padding:.9rem 1rem;
+    overflow-x:auto; font-size:.82rem; line-height:1.5; }
+  code { font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+    font-size:.86em; background:var(--card); padding:.08em .3em; border-radius:4px; }
+  pre code { background:none; padding:0; }
+  .tablewrap { overflow-x:auto; margin:1.2rem 0; }
+  table { border-collapse:collapse; width:100%;
+    font-family:system-ui,sans-serif; font-size:.86rem; }
+  th, td { text-align:left; padding:.45rem .65rem; border-bottom:1px solid var(--rule); }
+  th { font-size:.7rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
+  a { color:var(--accent); }
+</style></head><body>
+<div class="wrap"><p class="eyebrow">Lab study 2/3 · <a href="index.html">index</a></p>
+<h1>MIT Lab 2, Line by Line — Flow Matching and Score Matching</h1>
+<p><em>A beginner's reading companion to <code>solutions/lab_two_complete.ipynb</code>. Every
+line of code: what it does, why it's there, and what breaks without it.
+Concepts link to our notes: interpolant/target velocity = <code>06 §C</code>,
+least-squares-learns-the-mean = <code>06 §A3/D2</code>, reparameterization = <code>05 §A3</code>,
+score = −ε/σ = <code>10</code> (notation header + §3). Builds directly on the Lab 1
+companion (<code>lab1_line_by_line.md</code>) — the ODE/SDE/Simulator machinery returns
+almost verbatim.</em></p>
+<p><strong>The lab in one sentence:</strong> design a <em>conditional</em> probability path p_t(x|z)
+from noise (t=0) to one data point z (t=1), write down its exact conditional
+vector field and score, regress two MLPs onto those per-sample targets — and
+discover that the trained networks are the <em>marginal</em> vector field and score,
+good enough to carry an entire noise cloud onto the data distribution with the
+Lab 1 simulators.</p>
+<p>⚠ Time convention, once and for all: in this lab <strong>t = 0 is noise
+(p_simple), t = 1 is data (p_data)</strong> — the flow-matching convention of our
+notes 06, and the <em>opposite</em> of DDPM's T=noise → 0=data. Every formula below
+silently assumes it.</p>
+<hr />
+<h2>Part 0 — Recycled machinery (Cells 0–4)</h2>
+<h2>Cell 0 — Imports and device</h2>
+<pre><code class="language-python">from abc import ABC, abstractmethod
+from typing import Optional, List, Type, Tuple, Dict
+import math
+</code></pre>
+<p>Abstract-base-class tools (same enforceable-contract role as Lab 1 Cell 0),
+a wider set of type-hint helpers (<code>List[int]</code> for MLP layer sizes, <code>Type[...]</code>
+to pass a <em>class</em> like <code>torch.nn.SiLU</code> as an argument), and <code>math</code> (stdlib —
+imported but essentially unused; harmless).</p>
+<pre><code class="language-python">import numpy as np
+from matplotlib import pyplot as plt
+import matplotlib.cm as cm
+from matplotlib.axes._axes import Axes
+</code></pre>
+<p>NumPy (this lab actually uses it: <code>np.histogram2d</code>, <code>np.percentile</code> in Cell 2),
+matplotlib, matplotlib's colormap module <code>cm</code> (needed for
+<code>cm.colors.Normalize</code>, the color-scaling object in Cell 2), and the <code>Axes</code>
+type imported purely for signatures.</p>
+<pre><code class="language-python">import torch
+import torch.distributions as D
+from torch.func import vmap, jacrev
+</code></pre>
+<p>PyTorch, its distributions toolbox (ready-made Gaussians/mixtures with correct
+<code>sample()</code>/<code>log_prob()</code>), and the function-transform pair from Lab 1:
+<code>jacrev(f)</code> = "function that returns f's derivatives," <code>vmap</code> = "apply it per
+batch item without a Python loop." Lab 1 used them for scores; this lab uses
+them for <strong>time derivatives</strong> α̇_t, β̇_t (Cell 8).</p>
+<pre><code class="language-python">from tqdm import tqdm
+import seaborn as sns
+from sklearn.datasets import make_moons, make_circles
+</code></pre>
+<p>Progress bars, statistical plotting, and — new — two scikit-learn toy-data
+generators. <code>make_moons</code>/<code>make_circles</code> return 2D point clouds shaped like
+interlocking crescents / concentric rings; they become non-Gaussian
+<code>p_data</code> (and even <code>p_simple</code>!) targets in Part 4.</p>
+<pre><code class="language-python">device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+</code></pre>
+<p>Pick GPU if available. Everything downstream is <code>.to(device)</code>-ed; a missed one
+gives the classic "expected cuda but got cpu" error.</p>
+<h2>Cell 1 — Sampleable, Density, Gaussian, GaussianMixture (Lab 1's Cells 11+13, consolidated)</h2>
+<pre><code class="language-python">class Sampleable(ABC):
+    @property
+    @abstractmethod
+    def dim(self) -&gt; int: ...
+    @abstractmethod
+    def sample(self, num_samples: int) -&gt; torch.Tensor: ...
+</code></pre>
+<p>Contract #1: "I can hand you points drawn from myself." <code>sample(n)</code> returns
+<code>(n, dim)</code>. New versus Lab 1: the abstract <strong><code>dim</code> property</strong> — later code
+(e.g. <code>GaussianConditionalProbabilityPath.__init__</code>) must build a matching
+Gaussian source without being told the dimensionality, so every distribution
+now has to announce its own. <code>@property</code> stacked over <code>@abstractmethod</code> means
+children expose it as an attribute (<code>p.dim</code>), not a method call.</p>
+<pre><code class="language-python">class Density(ABC):
+    @abstractmethod
+    def log_density(self, x: torch.Tensor) -&gt; torch.Tensor: ...
+</code></pre>
+<p>Contract #2: "I can tell you how likely any point is," <code>(batch, dim)</code> in,
+<code>(batch, 1)</code> out. Log, not raw density — raw densities underflow float
+precision. Note what was <em>dropped</em> relative to Lab 1: the autodiff <code>score</code>
+method. This lab computes scores analytically (Cell 10) or learns them
+(Cell 22); it never differentiates a log-density again.</p>
+<p>The split matters as much as in Lab 1: <strong>real datasets are Sampleable but not
+Density</strong> — and Part 4's moons/checkerboard classes are exactly that, which is
+why the linear path there will have no usable <code>conditional_score</code>.</p>
+<pre><code class="language-python">class Gaussian(torch.nn.Module, Sampleable, Density):
+    def __init__(self, mean, cov):
+        super().__init__()
+        self.register_buffer(&quot;mean&quot;, mean)
+        self.register_buffer(&quot;cov&quot;, cov)
+</code></pre>
+<p>Triple inheritance, each with a job: <code>nn.Module</code> supplies <code>register_buffer</code>
+and <code>.to(device)</code>; the other two are our contracts. Buffers = constants that
+travel with the module (move on <code>.to(device)</code>, saved in <code>state_dict</code>, no
+gradients) — the same pattern as our DDPM schedule buffers.</p>
+<pre><code class="language-python">    @property
+    def dim(self) -&gt; int:
+        return self.mean.shape[0]
+</code></pre>
+<p>Dimensionality read off the mean vector <code>(dim,)</code> — the new contract, fulfilled
+for free.</p>
+<pre><code class="language-python">    @property
+    def distribution(self):
+        return D.MultivariateNormal(self.mean, self.cov, validate_args=False)
+</code></pre>
+<p>Build the torch distribution <em>on demand</em> — a <code>@property</code> so it always uses the
+buffers' <strong>current</strong> device (build it once in <code>__init__</code> and a later
+<code>.to(device)</code> would strand it on CPU). <code>validate_args=False</code> skips input
+checks for speed.</p>
+<pre><code class="language-python">    def sample(self, num_samples):
+        return self.distribution.sample((num_samples,))
+    def log_density(self, x):
+        return self.distribution.log_prob(x).view(-1, 1)
+</code></pre>
+<p>Delegate both contracts to torch. <code>.view(-1, 1)</code> re-imposes the <code>(batch, 1)</code>
+shape (torch returns <code>(batch,)</code>).</p>
+<pre><code class="language-python">    @classmethod
+    def isotropic(cls, dim: int, std: float) -&gt; &quot;Gaussian&quot;:
+        mean = torch.zeros(dim)
+        cov = torch.eye(dim) * std ** 2
+        return cls(mean, cov)
+</code></pre>
+<p>Convenience constructor for N(0, std²·I) — note <code>std ** 2</code>: the constructor
+takes a <em>covariance</em>, so the standard deviation must be squared (mixing up σ
+and σ² is the classic Gaussian API bug). This is the <code>p_simple</code> factory used
+everywhere.</p>
+<pre><code class="language-python">class GaussianMixture(torch.nn.Module, Sampleable, Density):
+</code></pre>
+<p>Same wrapper pattern around <code>D.MixtureSameFamily</code>: <code>means (nmodes, 2)</code>,
+<code>covs (nmodes, 2, 2)</code>, <code>weights (nmodes,)</code> registered as buffers;
+<code>D.Categorical(probs=weights)</code> picks WHICH bump each sample comes from,
+<code>D.MultivariateNormal(means, covs)</code> is the batch of bumps, and torch composes
+them into one distribution whose <code>log_prob</code> is the correct log-sum-exp over
+components. <code>dim</code> reads <code>means.shape[1]</code>.</p>
+<p>The two constructors are scenery generators:
+- <code>random_2D</code> — <code>torch.manual_seed(seed)</code> for reproducible figures; means at
+  uniform-random positions in a <code>scale</code>-sized box (<code>(rand−0.5)*scale</code>), plus an
+  optional <code>x_offset</code> shift along x; equal spherical covariances via
+  <code>diag_embed(ones)·std²</code>; equal (unnormalized — torch normalizes) weights.
+- <code>symmetric_2D</code> — the one this lab actually uses: <code>nmodes</code> bumps equally
+  spaced on a circle of radius <code>scale</code>. <code>linspace(0, 2π, nmodes+1)[:nmodes]</code>
+  drops the duplicate 2π endpoint; means = <code>stack([cos, sin], dim=1)·scale</code>;
+  weights <code>ones/nmodes</code>.</p>
+<h2>Cell 2 — Plotting utilities (six small functions)</h2>
+<pre><code class="language-python">def hist2d_samples(samples, ax=None, bins=200, scale=5.0, percentile=99, **kwargs):
+    H, xedges, yedges = np.histogram2d(samples[:, 0], samples[:, 1], bins=bins,
+                                       range=[[-scale, scale], [-scale, scale]])
+</code></pre>
+<p>Bin a <code>(n, 2)</code> cloud of points into a <code>bins × bins</code> count grid over the square
+[−scale, scale]². The fixed <code>range</code> matters: without it numpy fits the bins to
+the data, and panels at different times would use different coordinate systems.</p>
+<pre><code class="language-python">    cmax = np.percentile(H, percentile)
+    norm = cm.colors.Normalize(vmax=cmax, vmin=0.0)
+</code></pre>
+<p>The subtlety of this function. Color-scale ceiling = the 99th-percentile <em>bin
+count</em>, not the max. Near t=1 a conditional path concentrates thousands of
+points into a couple of bins; scaling colors by the true max would render
+everything else invisibly dark. Clipping at a percentile keeps the bulk of the
+structure visible. (Part 4's Cell 31 tweaks <code>percentile</code> per frame for exactly
+this reason.)</p>
+<pre><code class="language-python">    extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
+    ax.imshow(H.T, extent=extent, origin='lower', norm=norm, **kwargs)
+</code></pre>
+<p>Draw the counts as an image. The <code>.T</code> + <code>origin='lower'</code> pair reconciles
+matplotlib's image convention (row = y, origin top-left) with math convention
+(x right, y up) — drop either and the picture is flipped/transposed.</p>
+<p><code>hist2d_sampleable</code>, <code>scatter_sampleable</code>, <code>kdeplot_sampleable</code>: draw
+<code>num_samples</code> fresh points from a Sampleable and hand them to
+histogram / scatter / seaborn-KDE respectively. Shared boilerplate per
+function: <code>assert sampleable.dim == 2</code> (these are strictly 2D visualizers),
+<code>if ax is None: ax = plt.gca()</code> (composable into subplot grids), and
+<code>.detach().cpu()</code> on samples — matplotlib cannot eat GPU tensors; forgetting
+<code>.cpu()</code> is the #1 plotting crash.</p>
+<p><code>imshow_density</code> / <code>contour_density</code>: evaluate a <code>Density</code> on a lattice —
+<code>linspace</code> each axis (moved <code>.to(device)</code>, since <code>log_density</code> runs on the
+model's device), <code>meshgrid</code> to a grid, <code>stack(...).reshape/-flatten</code> into a
+<code>(bins², 2)</code> batch of query points, ONE <code>log_density</code> call, reshape back to
+<code>(bins, bins)</code>, transpose, and <code>imshow</code>/<code>contour</code>. Same <code>.T</code>/<code>origin='lower'</code>
+story as above. These paint the faint red (source) and blue (target) heatmaps
+under every figure in the lab.</p>
+<h2>Cell 3 — The ODE and SDE contracts (Lab 1 Cell 1, one shape changed)</h2>
+<pre><code class="language-python">class ODE(ABC):
+    @abstractmethod
+    def drift_coefficient(self, xt, t) -&gt; torch.Tensor: ...
+</code></pre>
+<p>An ODE <em>is</em> a drift function u(x,t) — the arrow field of dx = u dt (notes 06
+§A2). <code>SDE</code> adds <code>diffusion_coefficient</code> — the loudness of the random kicks in
+dx = u dt + σ dW. No <code>step</code>, no <code>simulate</code>: equations describe dynamics,
+simulators advance them — Lab 1's separation lesson, unchanged.</p>
+<p>The one <strong>real change is in the docstring shape contract: <code>t: (batch_size, 1)</code></strong>
+— in Lab 1 <code>t</code> was a scalar <code>()</code>. Why: everything downstream
+(α_t, β_t, the MLPs) consumes a per-sample time column, because training draws
+a <em>different</em> t for every batch element and <code>torch.cat([x, t], dim=-1)</code>
+(Cell 16) needs t as a <code>(bs, 1)</code> column. Simulation uses one shared clock, but
+it is stored per-sample anyway so the same networks work in both modes.</p>
+<h2>Cell 4 — Simulator, Euler, Euler–Maruyama, record_every</h2>
+<pre><code class="language-python">class Simulator(ABC):
+    @abstractmethod
+    def step(self, xt, t, dt): ...
+</code></pre>
+<p>Same contract as Lab 1: advance the world one tick, <code>(bs, dim)</code> state, <code>(bs,1)</code>
+time, <code>(bs,1)</code> dt.</p>
+<pre><code class="language-python">    @torch.no_grad()
+    def simulate(self, x, ts):
+        for t_idx in range(len(ts) - 1):
+            t = ts[:, t_idx]
+            h = ts[:, t_idx + 1] - ts[:, t_idx]
+            x = self.step(x, t, h)
+        return x
+</code></pre>
+<p><code>@torch.no_grad()</code>: simulation is inference; without it autograd would record
+hundreds of steps and memory balloons. <code>len(ts) - 1</code> because each iteration
+consumes a pair of timestamps — N stamps define N−1 steps. <strong>The indexing is
+the change from Lab 1</strong>: <code>ts</code> is now <code>(bs, num_timesteps, 1)</code> — a clock <em>per
+sample</em> — so the current time is the column <code>ts[:, t_idx]</code>, shape <code>(bs, 1)</code>,
+and h likewise. (Note the small wart: <code>len(ts)</code> is <code>ts.shape[0]</code> = batch size,
+not the number of timesteps — the code only works because every caller happens
+to pass <code>num_samples ≥ num_timesteps</code>... actually no: <code>len(ts)-1</code> <em>is</em> wrong
+reading, but callers pass <code>ts</code> expanded to <code>(num_samples, nts, 1)</code> where
+<code>len(ts) = num_samples</code>. Compare <code>simulate_with_trajectory</code> below, which
+correctly uses <code>nts = ts.shape[1]</code>. <code>simulate</code> is never called in this
+notebook — only <code>simulate_with_trajectory</code> is — so the latent bug never fires.
+Good catch-the-bug exercise.)</p>
+<pre><code class="language-python">    @torch.no_grad()
+    def simulate_with_trajectory(self, x, ts):
+        xs = [x.clone()]
+        nts = ts.shape[1]
+        for t_idx in tqdm(range(nts - 1)):
+            ...
+            xs.append(x.clone())
+        return torch.stack(xs, dim=1)
+</code></pre>
+<p>Keep the whole movie: clone each frame (defends against in-place <code>step</code>
+implementations mutating every stored frame), stack along <code>dim=1</code> →
+<code>(bs, num_timesteps, dim)</code>, index order "particle, time, coordinate."
+<code>nts = ts.shape[1]</code> — the correct timestep count under the new convention.</p>
+<pre><code class="language-python">class EulerSimulator(Simulator):
+    def step(self, xt, t, h):
+        return xt + self.ode.drift_coefficient(xt,t) * h
+</code></pre>
+<p>Notes 06 §A1 Fact 2 verbatim: where you'll be = where you are + arrow × time.
+<code>h</code> is <code>(bs,1)</code>, drift is <code>(bs,dim)</code>; broadcasting scales each particle's
+arrow.</p>
+<pre><code class="language-python">class EulerMaruyamaSimulator(Simulator):
+    def step(self, xt, t, h):
+        return xt + self.sde.drift_coefficient(xt,t) * h \
+                  + self.sde.diffusion_coefficient(xt,t) * torch.sqrt(h) * torch.randn_like(xt)
+</code></pre>
+<p>Euler plus a fresh Gaussian kick per particle, scaled by σ and <strong>√h, not h</strong> —
+over a step of length h Brownian noise accumulates <em>variance</em> h (variances
+add, 05 §A1 Rule 2), so its standard deviation is √h. The single
+most-tested fact about SDE simulation (see Lab 1 Cell 4 for the full story).</p>
+<pre><code class="language-python">def record_every(num_timesteps: int, record_every: int) -&gt; torch.Tensor:
+    if record_every == 1:
+        return torch.arange(num_timesteps)
+    return torch.cat([
+        torch.arange(0, num_timesteps - 1, record_every),
+        torch.tensor([num_timesteps - 1]),
+    ])
+</code></pre>
+<p>Which trajectory frames to plot: indices 0, n, 2n, … plus ALWAYS the last one
+(the endpoint is the sample; missing it would be silly). The <code>== 1</code> early
+return avoids appending a duplicate last index. Two nits worth noticing:
+the parameter <code>record_every</code> shadows the function's own name (legal, ugly);
+and calling it with <code>record_every = num_timesteps // num_marginals</code> yields
+<code>num_marginals + 1</code> frames unless the division is exact — e.g. 1000 steps,
+<code>num_marginals=3</code> → indices {0, 333, 666, 999}, i.e. <strong>four</strong> scatter colors
+in the "3-marginal" plots. Part 4's Cell 31 adds an <code>assert</code> to force exact
+divisibility; the Part 2–3 plot cells just live with the extra frame.</p>
+<hr />
+<h2>Part 1 — The central contract (Cell 5)</h2>
+<p>The markdown before this cell states the lab's premise (our notes 06 Parts
+C–D, in the authors' notation): pick a conditional path p_t(x|z) with
+p_0(·|z) = p_simple and p_1(·|z) = δ_z; its known conditional field
+u_t^ref(x|z) generates it; the <em>marginal</em> field u_t^ref(x) — the average of
+conditional fields over z — carries p_simple to p_data but is unknowable;
+regressing against the conditional field secretly learns the marginal one
+(least-squares learns conditional means, notes 06 §A3/D2).</p>
+<h2>Cell 5 — <code>ConditionalProbabilityPath</code>, the lab's main interface</h2>
+<pre><code class="language-python">class ConditionalProbabilityPath(torch.nn.Module, ABC):
+    def __init__(self, p_simple: Sampleable, p_data: Sampleable):
+        super().__init__()
+        self.p_simple = p_simple
+        self.p_data = p_data
+</code></pre>
+<p>A path object owns its two endpoints. <code>torch.nn.Module</code> as a base means that
+if the endpoints are Modules (Gaussian, GaussianMixture), assigning them as
+attributes auto-registers them as submodules — so ONE <code>.to(device)</code> on the
+path moves the endpoint distributions too. That's why every construction later
+reads <code>GaussianConditionalProbabilityPath(...).to(device)</code>.</p>
+<pre><code class="language-python">    def sample_marginal_path(self, t: torch.Tensor) -&gt; torch.Tensor:
+        num_samples = t.shape[0]
+        z = self.sample_conditioning_variable(num_samples) # (num_samples, dim)
+        x = self.sample_conditional_path(z, t)             # (num_samples, dim)
+        return x
+</code></pre>
+<p>The only <em>concrete</em> method, and it is one line of probability theory:
+to sample the marginal p_t(x) = ∫ p_t(x|z) p(z) dz, sample z ~ p(z), then
+x ~ p_t(x|z), then <strong>throw z away</strong>. Marginalization = hierarchical sampling.
+Note the shape convention: <code>t</code> is <code>(num_samples, 1)</code> — a (possibly different)
+time per sample — and the batch size is <em>read off t</em>. This method paints all
+the "Ground-Truth Marginal" panels later.</p>
+<pre><code class="language-python">    @abstractmethod
+    def sample_conditioning_variable(self, num_samples: int) -&gt; torch.Tensor: ...
+    @abstractmethod
+    def sample_conditional_path(self, z, t) -&gt; torch.Tensor: ...
+    @abstractmethod
+    def conditional_vector_field(self, x, z, t) -&gt; torch.Tensor: ...
+    @abstractmethod
+    def conditional_score(self, x, z, t) -&gt; torch.Tensor: ...
+</code></pre>
+<p>The four things a concrete path must know how to do, with uniform shapes —
+z, x: <code>(num_samples, dim)</code>, t: <code>(num_samples, 1)</code>, all returns
+<code>(num_samples, dim)</code> (except z's sampler). Read them as the four faces of one
+object:
+1. <em>where do conditioning points come from</em> (in practice: the training set —
+   the notebook's later markdown note says exactly this),
+2. <em>simulate the corruption analytically</em> (training data generator),
+3. <em>the regression target for flow matching</em> (Cell 18),
+4. <em>the regression target for score matching</em> (Cell 22).
+Everything else in the lab is either an implementation of this interface or a
+consumer of it.</p>
+<hr />
+<h2>Part 2 — Gaussian conditional probability paths (Cells 6–15)</h2>
+<p>The markdown defines the object of study:
+<strong>p_t(x|z) = N(x; α_t z, β_t² I_d)</strong> with p_simple = N(0, I_d), where
+α, β: [0,1] → ℝ are monotonic, continuously differentiable,
+α_1 = β_0 = 1 and α_0 = β_1 = 0. So t=0 gives N(0, I) (pure noise), t=1 gives
+δ_z (the data point). This is DDPM's forward shortcut
+x_t = √ᾱ·x₀ + √(1−ᾱ)·ε (05 §B2) with time reversed and the schedule freed
+from the circle constraint — compare notes 06 Part F's circle-vs-line table.</p>
+<h2>Cell 6 — PARAMS</h2>
+<pre><code class="language-python">PARAMS = {
+    &quot;scale&quot;: 15.0,        # half-width of every plot window
+    &quot;target_scale&quot;: 10.0, # radius of the circle the mixture modes sit on
+    &quot;target_std&quot;: 1.0,    # std of each mixture bump
+}
+</code></pre>
+<p>Plot/experiment constants in one dict "to avoid polluting the namespace" (the
+authors' comment). Not config machinery — just three numbers reused by ~10
+cells, so the figures all agree.</p>
+<h2>Cell 7 — Meet p_simple and p_data</h2>
+<pre><code class="language-python">p_simple = Gaussian.isotropic(dim=2, std = 1.0).to(device)
+p_data = GaussianMixture.symmetric_2D(nmodes=5, std=PARAMS[&quot;target_std&quot;],
+                                      scale=PARAMS[&quot;target_scale&quot;]).to(device)
+</code></pre>
+<p>The two endpoints for all of Parts 2–3: a unit Gaussian at the origin, and
+five unit-std bumps on a circle of radius 10. These two module-level globals
+are quietly reused by later plotting cells (e.g. Cell 21) — a notebook-ism to
+be aware of if you run cells out of order.</p>
+<p>The rest is a 1×3 figure: heatmap of p_simple (red), of p_data (blue), and
+both overlaid. Per panel: a title, <code>set_xticks([])/set_yticks([])</code> to remove
+ticks, and an <code>imshow_density(..., vmin=-10, alpha=0.25, cmap='Reds'/'Blues')</code>
+call — <code>vmin=-10</code> floors the log-density colormap (log p plunges to −∞ in
+empty space; without a floor all structure compresses into one color band),
+<code>alpha=0.25</code> keeps the maps faint so later scatters read on top. Note the
+third panel's two calls omit <code>ax=</code> and land on the current axes — it works
+because it is the most recently created axes, another notebook-ism.</p>
+<h2>Cell 8 — <code>Alpha</code> and <code>Beta</code>: schedules as verified contracts</h2>
+<pre><code class="language-python">class Alpha(ABC):
+    def __init__(self):
+        assert torch.allclose(self(torch.zeros(1,1)), torch.zeros(1,1))
+        assert torch.allclose(self(torch.ones(1,1)), torch.ones(1,1))
+</code></pre>
+<p>The base constructor <em>tests its own subclass</em>: any concrete Alpha must map
+t=0 → 0 and t=1 → 1, and violating the boundary contract crashes at
+construction time rather than producing silently wrong paths. (The probe
+tensors are <code>(1,1)</code> — the standard time shape with batch 1 — and live on CPU;
+fine, because construction happens before any <code>.to(device)</code>.)
+<code>torch.allclose</code> rather than <code>==</code>: float schedules may only hit the endpoints
+to within rounding.</p>
+<pre><code class="language-python">    @abstractmethod
+    def __call__(self, t: torch.Tensor) -&gt; torch.Tensor: ...
+</code></pre>
+<p>Subclasses supply the actual α_t, <code>(num_samples, 1)</code> in and out. Implementing
+<code>__call__</code> makes schedule objects usable like functions: <code>self.alpha(t)</code>.</p>
+<pre><code class="language-python">    def dt(self, t: torch.Tensor) -&gt; torch.Tensor:
+        t = t.unsqueeze(1)              # (num_samples, 1, 1)
+        dt = vmap(jacrev(self))(t)      # (num_samples, 1, 1, 1, 1)
+        return dt.view(-1, 1)
+</code></pre>
+<p>α̇_t <strong>for free, via autodiff</strong> — the same <code>vmap(jacrev(...))</code> recipe Lab 1
+used for spatial scores, now aimed at time. <code>jacrev(self)</code> differentiates the
+<code>(1,1) → (1,1)</code> map, producing a <code>(1,1,1,1)</code> Jacobian per sample; <code>vmap</code>
+runs it per batch item; the <code>unsqueeze</code>/<code>view(-1,1)</code> dance adds the dummy
+per-sample axis first and flattens the Jacobian clutter after. Bookkeeping,
+not math. Because this default exists, a subclass only <em>must</em> provide α_t
+itself — its derivative is optional. <code>Beta</code> is the mirror image with the
+flipped boundary contract β_0 = 1, β_1 = 0.</p>
+<p>Why derivatives at all: the conditional vector field formula (Cell 10) is
+built from α̇ and β̇ — the <em>velocity</em> of the schedule is what moves particles.</p>
+<h2>Cell 9 — <code>LinearAlpha</code> and <code>SquareRootBeta</code></h2>
+<p>The section fixes <strong>α_t = t, β_t = √(1−t)</strong>. Check the contracts: α_0=0, α_1=1
+✓; β_0=1, β_1=0 ✓. (Aside for DDPM eyes: then x = t·z + √(1−t)·ε has
+α² + β² = t² + 1 − t ≠ 1 — this is <em>not</em> the variance-preserving circle;
+the lab's point is that any legal (α, β) pair works.)</p>
+<pre><code class="language-python">class LinearAlpha(Alpha):
+    def __call__(self, t): return t
+    def dt(self, t): return torch.ones_like(t)
+</code></pre>
+<p>α_t = t and its hand-written derivative α̇_t = 1 (overriding the autodiff
+default — cheaper and exact). <code>ones_like(t)</code> keeps shape <code>(num_samples,1)</code>,
+device, and dtype; returning the scalar <code>1.0</code> would break the shape contract.</p>
+<pre><code class="language-python">class SquareRootBeta(Beta):
+    def __call__(self, t): return torch.sqrt(1-t)
+    def dt(self, t): return - 0.5 / (torch.sqrt(1 - t) + 1e-4)
+</code></pre>
+<p>β_t = √(1−t), and β̇_t = −1/(2√(1−t)) by the chain rule — negative
+(noise shrinks over time) and <strong>diverging as t → 1</strong>. The <code>+ 1e-4</code> in the
+denominator is a numerical guard: at exactly t=1 the true derivative is −∞ and
+the division would return <code>-inf</code>, which would poison every tensor it touches
+downstream (<code>inf * 0 = nan</code>). The epsilon caps the blow-up at about −5000.
+This divergence is not an implementation flaw — it is the honest geometry of a
+path that must crush a Gaussian into a point, and it resurfaces twice below
+(the SDE explosion note before Cell 15, and the t=0.9999 dodge in Cell 27).</p>
+<h2>Cell 10 — <code>GaussianConditionalProbabilityPath</code>: the answer key</h2>
+<pre><code class="language-python">class GaussianConditionalProbabilityPath(ConditionalProbabilityPath):
+    def __init__(self, p_data: Sampleable, alpha: Alpha, beta: Beta):
+        p_simple = Gaussian.isotropic(p_data.dim, 1.0)
+        super().__init__(p_simple, p_data)
+        self.alpha = alpha
+        self.beta = beta
+</code></pre>
+<p>For Gaussian paths the source is not a choice — the construction <em>requires</em>
+p_simple = N(0, I_d) (that's what β_0 = 1, α_0 = 0 delivers at t=0) — so the
+constructor builds it itself, using the <code>dim</code> property contract from Cell 1.
+The path is fully specified by (p_data, α, β).</p>
+<pre><code class="language-python">    def sample_conditioning_variable(self, num_samples: int):
+        return self.p_data.sample(num_samples)
+</code></pre>
+<p>z ~ p_data: the conditioning variable IS a data point. (The notebook's
+markdown addresses the apparent circularity — "aren't we trying to learn to
+sample p_data?" — with: in practice this line returns items from a finite
+<em>training set</em>; only here, with a synthetic p_data, can it sample the true
+distribution. The learned model must still turn <em>noise</em> into data at test
+time; using data during training is exactly what "training" means.)</p>
+<pre><code class="language-python">    def sample_conditional_path(self, z, t):
+        return self.alpha(t) * z + self.beta(t) * torch.randn_like(z)
+</code></pre>
+<p><strong>Problem 2.2's answer, and it is one reparameterization</strong> (notes 05 §A3:
+X = μ + σ·Z is exactly N(μ, σ²)): mean α_t z, std β_t, fresh unit noise with
+z's shape/device via <code>randn_like</code>. Shapes: <code>alpha(t)</code> is <code>(ns,1)</code>, z is
+<code>(ns,dim)</code> — broadcasting stretches the per-sample scalar across dims. This
+line is this lab's Eq. ★★ (05 §B2): corrupt to ANY time in one shot, no
+step-by-step simulation. It is also the training-data generator for both
+trainers later.</p>
+<pre><code class="language-python">    def conditional_vector_field(self, x, z, t):
+        alpha_t = self.alpha(t)        # (num_samples, 1)
+        beta_t = self.beta(t)          # (num_samples, 1)
+        dt_alpha_t = self.alpha.dt(t)  # (num_samples, 1)
+        dt_beta_t = self.beta.dt(t)    # (num_samples, 1)
+        return (dt_alpha_t - dt_beta_t / beta_t * alpha_t) * z + dt_beta_t / beta_t * x
+</code></pre>
+<p><strong>Problem 2.3's answer</strong>: the lecture formula
+u_t(x|z) = (α̇_t − (β̇_t/β_t)·α_t)·z + (β̇_t/β_t)·x, transcribed with the four
+schedule values pulled once each (readability + one autodiff call each, not
+two). Where the formula comes from, in our notes' no-calculus style: a
+particle riding the path stays at x_t = α_t z + β_t ε for its FIXED ε, so its
+velocity is ẋ_t = α̇_t z + β̇_t ε; eliminate the unobservable ε using
+ε = (x − α_t z)/β_t and collect terms in z and x — you get exactly the two
+brackets above. (Same eliminate-and-collect move as notes 10 §3 for the
+probability-flow ODE.) Sanity check with this lab's schedule (α=t, β=√(1−t)):
+at t=0, α=0, α̇=1, β̇/β = −1/2, so u = z − x/2 — head toward your data point
+while gently relaxing the noise; as t→1, β̇/β → −∞ and the field pulls x
+violently onto z — that is δ_z forming (and the numerical trouble brewing).
+All shapes: <code>(ns,1)</code> schedule columns broadcast against <code>(ns,dim)</code> states →
+<code>(ns,dim)</code> out.</p>
+<pre><code class="language-python">    def conditional_score(self, x, z, t):
+        alpha_t = self.alpha(t)
+        beta_t = self.beta(t)
+        return (z * alpha_t - x) / beta_t ** 2
+</code></pre>
+<p><strong>Problem 2.4's answer</strong>: ∇_x log N(x; α_t z, β_t² I) = (α_t z − x)/β_t².
+Derivation you can do in your head: log N = −‖x−μ‖²/(2σ²) + const, gradient
+= −(x−μ)/σ², here μ = α_t z, σ = β_t. Two readings worth internalizing:
+(1) the score is an arrow pointing from x back toward the mean α_t z, with
+strength 1/β_t² — "uphill in probability" (Lab 1 Cell 15);
+(2) substituting x = α_t z + β_t ε gives score = <strong>−ε/β_t</strong> — the
+score/noise identity from our notes 10 (there written −ε/σ_t in the notation
+header, powering §3's PF-ODE): learning the score and learning the noise are
+the same job up to a known scale. Note also <code>beta_t ** 2</code> → this divides by
+(1−t), which → 0 as t→1: the score, like β̇/β, explodes near the data end.</p>
+<h2>Cell 11 — Visualizing one conditional path</h2>
+<pre><code class="language-python">path = GaussianConditionalProbabilityPath(
+    p_data = GaussianMixture.symmetric_2D(...).to(device),
+    alpha = LinearAlpha(),
+    beta = SquareRootBeta()
+).to(device)
+</code></pre>
+<p>Assemble the path (the constructors run the Cell 8 boundary asserts right
+here). The outer <code>.to(device)</code> moves p_simple, p_data — everything registered
+through the <code>nn.Module</code> machinery of Cell 5.</p>
+<pre><code class="language-python">z = path.sample_conditioning_variable(1) # (1,2)
+ts = torch.linspace(0.0, 1.0, 7).to(device)
+</code></pre>
+<p>ONE conditioning point (this whole figure is about a single z — that is what
+"conditional" means), and 7 snapshot times including both endpoints.</p>
+<pre><code class="language-python">plt.scatter(z[:,0].cpu(), z[:,1].cpu(), marker='*', color='red', s=75, label='z')
+</code></pre>
+<p>Mark z as a red star. <code>.cpu()</code> — matplotlib again.</p>
+<pre><code class="language-python">num_samples = 1000
+for t in ts:
+    zz = z.expand(num_samples, 2)
+    tt = t.unsqueeze(0).expand(num_samples, 1) # (samples, 1)
+    samples = path.sample_conditional_path(zz, tt) # (samples, 2)
+    plt.scatter(samples[:,0].cpu(), samples[:,1].cpu(), alpha=0.25, s=8, label=f't={t.item():.1f}')
+</code></pre>
+<p>Per snapshot time: broadcast the single z to a <code>(1000, 2)</code> batch
+(<code>expand</code> creates a view, no copy — safe because nothing writes to it),
+broadcast the scalar t to the <code>(1000, 1)</code> time-column contract
+(<code>unsqueeze(0)</code> makes the 0-dim scalar a <code>(1,)</code> vector so <code>expand</code> has an axis
+to stretch), draw 1000 conditional samples, scatter them translucently. What
+you should see: a unit blob at the origin at t=0 marching toward z while
+shrinking — mean α_t z slides 0 → z, std β_t shrinks 1 → 0 — collapsing onto
+the star at t=1. Remaining lines (figure size, axis limits, title, tick
+removal, the two <code>imshow_density</code> underlays, legend sizing) are the Cell 7
+styling pattern.</p>
+<h2>Cell 12 — Wrapping the conditional field as an <code>ODE</code></h2>
+<pre><code class="language-python">class ConditionalVectorFieldODE(ODE):
+    def __init__(self, path: ConditionalProbabilityPath, z: torch.Tensor):
+        super().__init__()
+        self.path = path
+        self.z = z
+</code></pre>
+<p>Adapter: the Lab 1 simulators speak <code>ODE</code>; the path speaks
+<code>conditional_vector_field(x, z, t)</code>. This class freezes one z and exposes the
+rest as a drift. Composition again — nothing is re-derived.</p>
+<pre><code class="language-python">    def drift_coefficient(self, x, t):
+        bs = x.shape[0]
+        z = self.z.expand(bs, *self.z.shape[1:])
+        return self.path.conditional_vector_field(x,z,t)
+</code></pre>
+<p>Per step: read the batch size off the state, broadcast the stored <code>(1, dim)</code> z
+to <code>(bs, dim)</code> (<code>*self.z.shape[1:]</code> keeps it shape-agnostic — the docstring's
+<code>(1, ...)</code> hints this adapter would survive image-shaped z), and delegate.
+Without the expand, the path's <code>(ns,1)</code>-vs-<code>(ns,dim)</code> broadcasting would
+still <em>happen</em> to work for z of batch 1 — but only by accident; being explicit
+is the point.</p>
+<h2>Cell 13 — Problem 2.3's three-panel check (samples vs trajectories vs ground truth)</h2>
+<p>The conceptual skeleton (everything else is the Cell 7/11 styling pattern —
+axis limits, tick removal, red star for z, red/blue density underlays, legend
+props — grouped and skipped from here on):</p>
+<pre><code class="language-python">num_samples = 1000; num_timesteps = 1000; num_marginals = 3
+</code></pre>
+<p>Knobs: how many particles ride the ODE, how many Euler steps, how many
+snapshot times get scatter-plotted.</p>
+<pre><code class="language-python">torch.cuda.manual_seed(1)
+z = path.sample_conditioning_variable(1) # (1,2)
+</code></pre>
+<p>Seed the <strong>GPU</strong> RNG so the figure picks the same mixture mode every run
+(note: on a CPU-only machine this seeds nothing and z varies — a small
+portability gotcha), then draw the single conditioning point.</p>
+<pre><code class="language-python">ode = ConditionalVectorFieldODE(path, z)
+simulator = EulerSimulator(ode)
+x0 = path.p_simple.sample(num_samples) # (num_samples, 2)
+ts = torch.linspace(0.0, 1.0, num_timesteps).view(1,-1,1).expand(num_samples,-1,1).to(device)
+xts = simulator.simulate_with_trajectory(x0, ts) # (bs, nts, dim)
+</code></pre>
+<p>The lab's simulation idiom, worth reading carefully once:
+- build equation, plug into simulator (Lab 1's composition pattern);
+- start the whole population at p_simple = N(0, I) — the corruption process
+  run <em>forward in the lab's clock</em> is the generation direction;
+- the time grid: <code>linspace → (nts,)</code>, <code>view(1,-1,1) → (1, nts, 1)</code>,
+  <code>expand(num_samples,-1,1) → (num_samples, nts, 1)</code> — the per-sample-clock
+  contract of Cell 4. <code>expand</code> again: a view, zero memory for 1000 copies;
+- simulate keeping every frame: <code>(1000, 1000, 2)</code>.</p>
+<pre><code class="language-python">every_n = record_every(num_timesteps=num_timesteps, record_every=num_timesteps // num_marginals)
+xts_every_n = xts[:,every_n,:]  # (bs, nts // n, dim)
+ts_every_n = ts[0,every_n]      # (nts // n, 1)
+for plot_idx in range(xts_every_n.shape[1]):
+    tt = ts_every_n[plot_idx].item()
+    ax.scatter(xts_every_n[:,plot_idx,0].detach().cpu(), xts_every_n[:,plot_idx,1].detach().cpu(), ...)
+</code></pre>
+<p>Middle panel ("Samples from Conditional ODE"): pick snapshot columns
+(1000//3 = every 333rd step → frames {0, 333, 666, 999}; four colors despite
+<code>num_marginals = 3</code>, the Cell 4 off-by-one), slice time index 0 of <code>ts</code> for
+the labels (all rows share the clock, row 0 is as good as any), scatter each
+snapshot. <code>.detach().cpu()</code> before plotting — <code>detach</code> is redundant under
+<code>no_grad</code> but harmless and habitual.</p>
+<pre><code class="language-python">for traj_idx in range(15):
+    ax.plot(xts[traj_idx,:,0].detach().cpu(), xts[traj_idx,:,1].detach().cpu(), alpha=0.5, color='black')
+</code></pre>
+<p>Right panel ("Trajectories"): the first 15 particles' full paths as thin black
+curves — individual behavior, complementing the middle panel's population
+snapshots. The lab's recurring double lens (Lab 1 Cell 16).</p>
+<pre><code class="language-python">for plot_idx in range(xts_every_n.shape[1]):
+    tt = ts_every_n[plot_idx].unsqueeze(0).expand(num_samples, 1)
+    zz = z.expand(num_samples, 2)
+    marginal_samples = path.sample_conditional_path(zz, tt)
+    ax.scatter(...)
+</code></pre>
+<p>Left panel ("Ground-Truth Conditional Probability Path"): at the SAME snapshot
+times, draw fresh analytic samples via Cell 10's one-liner. <strong>This is the
+correctness check for Problems 2.2+2.3 in one picture</strong>: the middle panel got
+its points by <em>integrating the vector field</em>; the left panel by <em>sampling the
+Gaussian directly</em>; if your <code>conditional_vector_field</code> is right, the two
+clouds match at every time. (Different random points — compare shapes, not
+individual dots.)</p>
+<h2>Cell 14 — Adding Langevin: the conditional SDE</h2>
+<p>The markdown premise: the SDE
+dX_t = [u_t(X_t|z) + ½σ² ∇log p_t(X_t|z)] dt + σ dW_t has the SAME
+time-marginals as the ODE — inject noise, then add ½σ²·score of drift to
+clean it back up, and the distribution never notices. This is Lab 1's
+Langevin fact (Cell 15: drift ½σ²·score + noise σ preserves p) <em>added on top
+of</em> a moving reference field, and it's the template for every
+diffusion-model sampler (notes 10 §1's η-dial lives on exactly this axis).</p>
+<pre><code class="language-python">class ConditionalVectorFieldSDE(SDE):
+    def __init__(self, path, z, sigma):
+        super().__init__()
+        self.path = path
+        self.z = z
+        self.sigma = sigma
+</code></pre>
+<p>Same adapter as Cell 12 plus the noise dial σ. (Copy-paste artifact: the
+docstring still describes only <code>path</code> and <code>z</code>.)</p>
+<pre><code class="language-python">    def drift_coefficient(self, x, t):
+        bs = x.shape[0]
+        z = self.z.expand(bs, *self.z.shape[1:])
+        return self.path.conditional_vector_field(x,z,t) + 0.5 * self.sigma**2 * self.path.conditional_score(x,z,t)
+</code></pre>
+<p>The formula verbatim: reference arrows + ½σ² × uphill-in-probability arrows.
+Both terms <code>(bs, dim)</code>. This is where Problem 2.4's <code>conditional_score</code> gets
+consumed.</p>
+<pre><code class="language-python">    def diffusion_coefficient(self, x, t):
+        return self.sigma
+</code></pre>
+<p>Constant noise level — but note it returns the <em>Python float</em>, not a
+<code>(bs, dim)</code> tensor as the SDE contract's docstring demands. It works anyway:
+in Euler–Maruyama the float multiplies <code>torch.sqrt(h) * randn_like(xt)</code> and
+scalar-times-tensor broadcasts. A tensor-shaped
+<code>self.sigma * torch.ones_like(x)</code> (Lab 1's style) would honor the contract;
+keep the discrepancy in mind if you ever write a state-dependent σ.</p>
+<p>The markdown after poses the numerical warning: substituting the score makes
+the drift contain ½σ²(α_t z − X_t)/β_t², and <strong>β_t → 0 as t → 1 makes the
+drift explode, quadratically in σ</strong> — a finite-step Euler–Maruyama cannot
+follow it, so big σ produces visible artifacts. The stated practical fix:
+let the noise decay too (σ_t = β_t), so the explosion cancels. File this
+away — real diffusion samplers all shape their noise schedule for exactly
+this reason.</p>
+<h2>Cell 15 — Problem 2.4's three-panel check (SDE edition)</h2>
+<p>Structurally identical to Cell 13 — same knobs plus <code>sigma = 2.5</code>, same
+seeding, same three panels — with exactly three substantive differences:</p>
+<pre><code class="language-python">sde = ConditionalVectorFieldSDE(path, z, sigma)
+simulator = EulerMaruyamaSimulator(sde)
+</code></pre>
+<p>The equation is the Cell 14 SDE and the simulator is stochastic (√h·noise per
+step, Cell 4).</p>
+<pre><code class="language-python">for traj_idx in range(5):
+</code></pre>
+<p>Only 5 trajectories in the right panel instead of 15 — SDE paths are jagged
+scribbles; more would be unreadable.</p>
+<p>And the check is the same but stronger: the middle panel (Euler–Maruyama
+samples) must STILL match the left panel (analytic conditional samples) at
+every snapshot — visual confirmation that Langevin augmentation preserves the
+marginals, with a correctly implemented score. If your <code>conditional_score</code>
+had the sign flipped, the noise would win and the cloud would visibly
+over-spread. (Nit: the header comment still says "Run me for Problem 2.3!" —
+copy-paste; this is 2.4.)</p>
+<hr />
+<h2>Part 3 — Training on the Gaussian path (Cells 16–27)</h2>
+<p>The markdown restates the two-step trick (notes 06 §D): the marginal field
+u_t^ref(x) = E_{z ~ p_t(z|x)}[u_t^ref(x|z)] is unknowable, but since the
+minimizer of a squared error against a noisy target is the conditional mean
+(06 §A3), regressing u_t^θ(x) against the <em>conditional</em> field under
+(z ~ p(z), x ~ p_t(x|z), t ~ U[0,1)) — the <strong>conditional flow matching loss
+L_CFM</strong> — has the marginal field as its exact minimizer.</p>
+<h2>Cell 16 — <code>build_mlp</code> and <code>MLPVectorField</code></h2>
+<pre><code class="language-python">def build_mlp(dims: List[int], activation: Type[torch.nn.Module] = torch.nn.SiLU):
+        mlp = []
+        for idx in range(len(dims) - 1):
+            mlp.append(torch.nn.Linear(dims[idx], dims[idx + 1]))
+            if idx &lt; len(dims) - 2:
+                mlp.append(activation())
+        return torch.nn.Sequential(*mlp)
+</code></pre>
+<p>A <code>dims</code> list like <code>[3, 64, 64, 2]</code> becomes Linear(3→64), SiLU, Linear(64→64),
+SiLU, Linear(64→2). The <code>if idx &lt; len(dims) - 2</code> skips the activation after
+the LAST layer — essential: the output is a velocity in ℝ², which can be any
+real vector; squashing it through SiLU would forbid, e.g., large negative
+components. <code>activation</code> is passed as a <em>class</em> (<code>Type[nn.Module]</code>) and
+instantiated fresh each time (<code>activation()</code>) — sharing one instance would be
+fine for stateless SiLU but the pattern is correct in general. SiLU
+(x·sigmoid(x)) is the smooth default in diffusion codebases.</p>
+<pre><code class="language-python">class MLPVectorField(torch.nn.Module):
+    def __init__(self, dim: int, hiddens: List[int]):
+        super().__init__()
+        self.dim = dim
+        self.net = build_mlp([dim + 1] + hiddens + [dim])
+</code></pre>
+<p>The learned field u_t^θ: input size <code>dim + 1</code> — position ⊕ time — output size
+<code>dim</code> — one arrow. The <code>+ 1</code> IS the time conditioning.</p>
+<pre><code class="language-python">    def forward(self, x: torch.Tensor, t: torch.Tensor):
+        xt = torch.cat([x,t], dim=-1)
+        return self.net(xt)
+</code></pre>
+<p>Concatenate <code>(bs, dim)</code> and <code>(bs, 1)</code> along the last axis → <code>(bs, dim+1)</code>,
+one MLP pass → <code>(bs, dim)</code>. This is why the whole lab carries t as a
+<code>(bs, 1)</code> column: <code>cat</code> demands matching batch shapes — feed a scalar t here
+and you get an immediate dimension error. (Real image models replace this raw
+concat with sinusoidal time embeddings — notes 06 Part E's training box — but
+for 2D toys, raw t works.)</p>
+<h2>Cell 17 — The <code>Trainer</code> scaffold</h2>
+<pre><code class="language-python">class Trainer(ABC):
+    def __init__(self, model: torch.nn.Module):
+        super().__init__()
+        self.model = model
+
+    @abstractmethod
+    def get_train_loss(self, **kwargs) -&gt; torch.Tensor:
+        pass
+</code></pre>
+<p>The pattern: a Trainer owns a model and the ONLY thing a subclass must define
+is how to compute one batch's loss. Flow matching vs score matching will
+differ in <code>get_train_loss</code> alone — a strong hint that they are the same
+algorithm with a different regression target.</p>
+<pre><code class="language-python">    def get_optimizer(self, lr: float):
+        return torch.optim.Adam(self.model.parameters(), lr=lr)
+</code></pre>
+<p>Adam, overridable. Note it is created fresh inside <code>train</code> — calling <code>train</code>
+twice restarts optimizer state (momentum etc.), though the model weights
+persist.</p>
+<pre><code class="language-python">    def train(self, num_epochs: int, device: torch.device, lr: float = 1e-3, **kwargs):
+        self.model.to(device)
+        opt = self.get_optimizer(lr)
+        self.model.train()
+</code></pre>
+<p>Move the model to the compute device (the models are constructed on CPU in
+Cells 19/23/32/34 — this line is what makes that OK), build the optimizer
+AFTER the move (optimizer state tensors follow parameter placement), switch to
+train mode (a no-op for these plain MLPs — no dropout/batchnorm — but correct
+hygiene).</p>
+<pre><code class="language-python">        pbar = tqdm(enumerate(range(num_epochs)))
+        for idx, epoch in pbar:
+            opt.zero_grad()
+            loss = self.get_train_loss(**kwargs)
+            loss.backward()
+            opt.step()
+            pbar.set_description(f'Epoch {idx}, loss: {loss.item()}')
+        self.model.eval()
+</code></pre>
+<p>The canonical PyTorch five-step: clear stale gradients (forget this and
+gradients <em>accumulate</em> across iterations — the classic silent bug), compute
+loss, backprop, apply the update, report. <code>loss.item()</code> pulls the scalar to
+CPU for display without keeping the graph alive. Two quirks to notice:
+<code>tqdm(enumerate(range(n)))</code> is a roundabout <code>tqdm(range(n))</code> and, lacking a
+<code>total</code>, shows a counter without an ETA bar; and <strong><code>train</code> returns <code>None</code></strong> —
+yet every call site writes <code>losses = trainer.train(...)</code>. <code>losses</code> is always
+<code>None</code>; nothing plots it, so nothing breaks — but if you ever want a loss
+curve, you must collect and return <code>loss.item()</code> per step yourself.
+"Epoch" here also really means "one freshly sampled batch": there is no
+dataset and no dataloader, because the path can synthesize unlimited training
+pairs — one luxury of knowing p_data.</p>
+<h2>Cell 18 — Problem 3.1: the conditional flow matching loss</h2>
+<pre><code class="language-python">class ConditionalFlowMatchingTrainer(Trainer):
+    def __init__(self, path: ConditionalProbabilityPath, model: MLPVectorField, **kwargs):
+        super().__init__(model, **kwargs)
+        self.path = path
+</code></pre>
+<p>A trainer owns the model (via the base) <em>and</em> the path — the path is the
+training-data factory and the answer key.</p>
+<pre><code class="language-python">    def get_train_loss(self, batch_size: int) -&gt; torch.Tensor:
+        z = self.path.p_data.sample(batch_size) # (bs, dim)
+        t = torch.rand(batch_size,1).to(z)      # (bs, 1)
+        x = self.path.sample_conditional_path(z,t) # (bs, dim)
+</code></pre>
+<p>The Monte-Carlo sampling of the loss's expectation, one line per random
+variable, exactly matching the blue subscripts in the markdown's L_CFM:
+z ~ p_data (data point), t ~ U[0,1) (<code>torch.rand</code> is uniform on [0,1) — the
+half-open interval conveniently dodges the β_1 = 0 singularity), and
+x ~ p_t(x|z) via Cell 10's reparameterization line. The small gem is
+<strong><code>.to(z)</code></strong>: tensor-to-tensor <code>.to</code> copies BOTH device and dtype from <code>z</code> —
+<code>t</code> was born on CPU (<code>torch.rand</code> ignores the model's device) and this is the
+one-token fix; forget it and the <code>cat([x,t])</code> inside the model throws a
+device mismatch. Compare notes 06 Part E's training box: these three lines
+are its first three lines with x₁ renamed z.</p>
+<pre><code class="language-python">        ut_theta = self.model(x,t)                        # (bs, dim)
+        ut_ref = self.path.conditional_vector_field(x,z,t) # (bs, dim)
+        error = torch.sum(torch.square(ut_theta - ut_ref), dim=-1) # (bs,)
+        return torch.mean(error)
+</code></pre>
+<p>Prediction, target, squared error. Read the reduction order: <code>square</code> is
+elementwise <code>(bs, dim)</code>; <code>sum(dim=-1)</code> collapses the coordinates into the
+squared <em>norm</em> ‖·‖² per sample <code>(bs,)</code> — the norm in the loss formula; <code>mean</code>
+averages over the batch — the 1/N in the Monte-Carlo estimate. (A blanket
+<code>mean</code> of everything would differ only by the constant factor dim — harmless
+here, but matching the formula keeps loss values comparable to theory.)
+Why the target is computable at all: WE know which z generated this x — we
+just made it — so the "conditional" field is evaluated with its condition in
+hand. Why the loss will NOT go to zero: at a fixed (x, t), different z's
+disagree, and the best any function of (x, t) can do is their conditional mean
+(notes 06 §D2) — the leftover is the variance of the arrows around that mean,
+an irreducible floor. The notebook bolds exactly this: "the loss should
+converge, but not to zero!"</p>
+<h2>Cell 19 — Train the flow model</h2>
+<pre><code class="language-python">path = GaussianConditionalProbabilityPath(
+    p_data = GaussianMixture.symmetric_2D(nmodes=5, ...).to(device),
+    alpha = LinearAlpha(),
+    beta = SquareRootBeta()
+).to(device)
+
+flow_model = MLPVectorField(dim=2, hiddens=[64,64,64,64])
+
+trainer = ConditionalFlowMatchingTrainer(path, flow_model)
+losses = trainer.train(num_epochs=5000, device=device, lr=1e-3, batch_size=1000)
+</code></pre>
+<p>Rebuild the same path (each big cell reconstructs it — makes cells
+self-contained at the cost of repetition), a 4×64 MLP (≈13k parameters —
+2D toy scale), and 5000 Adam steps of batch 1000 at lr 1e-3. <code>flow_model</code> is
+built on CPU; <code>train</code> moves it. <code>losses</code> is <code>None</code> (Cell 17's quirk). About a
+minute on GPU. The global <code>flow_model</code> is reused by Cells 21, 25, 27.</p>
+<h2>Cell 20 — Wrapping the learned field as an <code>ODE</code></h2>
+<pre><code class="language-python">class LearnedVectorFieldODE(ODE):
+    def __init__(self, net: MLPVectorField):
+        self.net = net
+
+    def drift_coefficient(self, x, t):
+        return self.net(x, t)
+</code></pre>
+<p>The three most satisfying lines in the lab: the <em>neural network</em> now sits
+exactly where the <em>analytic</em> field sat in Cell 12 — same <code>ODE</code> socket, same
+simulators, nothing downstream changes. (No <code>super().__init__()</code> and no z:
+the learned field is the MARGINAL field; conditioning has been averaged out
+by training. Docstring nit: <code>t</code> is <code>(bs, 1)</code>, not <code>(bs, dim)</code>.) This is the
+payoff of Lab 1's equation/simulator split.</p>
+<h2>Cell 21 — Does the learned ODE reproduce the marginal path?</h2>
+<p>Cell 13's triptych with two swaps. Swap one:</p>
+<pre><code class="language-python">ode = LearnedVectorFieldODE(flow_model)
+simulator = EulerSimulator(ode)
+x0 = path.p_simple.sample(num_samples)
+ts = torch.linspace(0.0, 1.0, num_timesteps).view(1,-1,1).expand(num_samples,-1,1).to(device)
+xts = simulator.simulate_with_trajectory(x0, ts)
+</code></pre>
+<p>Simulate the <em>learned marginal</em> ODE from noise — there is no z anywhere; this
+is unconditional generation, the real thing.</p>
+<p>Swap two, in the left ("Ground-Truth Marginal Probability Path") panel:</p>
+<pre><code class="language-python">    marginal_samples = path.sample_marginal_path(tt)
+</code></pre>
+<p>The comparison target is now <code>sample_marginal_path</code> (Cell 5's
+sample-z-then-x-then-forget-z line) instead of the conditional sampler — fresh
+z per point per snapshot, i.e. true marginal samples. What success looks like:
+the middle panel's cloud spreads from the origin and splits into the five
+mixture bumps in lockstep with the left panel; the right panel's trajectories
+<em>curve</em> — each conditional field pushed straight at its own z, but averaging
+over z bends the marginal flow (notes 06 Part E: straight conditionals,
+curved marginal — the observation behind Reflow/rectification). Middle vs
+left agreeing at ALL intermediate times, not just t=1, is the strong check:
+the network learned the whole path, not just the endpoint. Everything else in
+the cell (snapshot extraction via <code>record_every</code>, <code>num_samples // 10 = 100</code>
+black trajectories, styling) is Cell 13 verbatim.</p>
+<h2>Cell 22 — Problem 3.2: <code>MLPScore</code> and the score matching loss</h2>
+<p>The markdown sets it up: to add Langevin stochasticity at <em>sampling</em> time —
+dX = [u_t^θ + ½σ² ∇log p_t(x)]dt + σ dW — we need the marginal score, and
+the SAME trick applies: ∇log p_t(x) = E_{z ~ p_t(z|x)}[∇log p_t(x|z)], so
+regressing against the <em>conditional</em> score (Cell 10's closed form) learns the
+marginal one. Loss L_CSM = E‖s_t^θ(x) − ∇log p_t(x|z)‖².</p>
+<pre><code class="language-python">class MLPScore(torch.nn.Module):
+    def __init__(self, dim: int, hiddens: List[int]):
+        super().__init__()
+        self.dim = dim
+        self.net = build_mlp([dim + 1] + hiddens + [dim])
+
+    def forward(self, x, t):
+        xt = torch.cat([x,t], dim=-1)
+        return self.net(xt)
+</code></pre>
+<p>Byte-for-byte <code>MLPVectorField</code> with a different name. That is the lesson, not
+laziness: a score field and a velocity field are both "ℝ^dim × time → ℝ^dim";
+only the <em>training target</em> distinguishes them (and Cell 26 will show one is a
+linear function of the other).</p>
+<pre><code class="language-python">class ConditionalScoreMatchingTrainer(Trainer):
+    def get_train_loss(self, batch_size: int) -&gt; torch.Tensor:
+        z = self.path.p_data.sample(batch_size) # (bs, dim)
+        t = torch.rand(batch_size,1).to(z)      # (bs, 1)
+        x = self.path.sample_conditional_path(z,t) # (bs, dim)
+
+        s_theta = self.model(x,t)                    # (bs, dim)
+        s_ref = self.path.conditional_score(x,z,t)   # (bs, dim)
+        mse = torch.sum(torch.square(s_theta - s_ref), dim=-1) # (bs,)
+        return torch.mean(mse)
+</code></pre>
+<p>Diff against Cell 18: <code>conditional_vector_field</code> → <code>conditional_score</code>. The
+sampling lines, the <code>.to(z)</code> trick, the sum-then-mean reduction — identical.
+Since the conditional score is −ε/β_t (Cell 10), this is <em>noise prediction
+with a per-t scale</em> — DDPM's L_simple (05 §D4) is this same loss reweighted;
+the 1/β_t factor means the target grows huge for t near 1, which is why this
+loss converges to a (much larger) non-zero floor and why real systems prefer
+predicting ε and rescaling.</p>
+<h2>Cell 23 — Train the score model</h2>
+<p>Same shape as Cell 19: rebuild the path, <code>score_model = MLPScore(dim=2,
+hiddens=[64,64,64,64])</code>, train — but only <code>num_epochs=1000</code> (score targets
+are informative enough, and this is a demo). Global <code>score_model</code> feeds
+Cells 25 and 27.</p>
+<h2>Cell 24 — <code>LangevinFlowSDE</code>: two networks, one sampler</h2>
+<pre><code class="language-python">class LangevinFlowSDE(SDE):
+    def __init__(self, flow_model: MLPVectorField, score_model: MLPScore, sigma: float):
+        super().__init__()
+        self.flow_model = flow_model
+        self.score_model = score_model
+        self.sigma = sigma
+</code></pre>
+<p>The learned twin of Cell 14: both networks plus the noise dial. (Docstring is
+again a stale copy mentioning <code>path</code> and <code>z</code> — neither exists here.)</p>
+<pre><code class="language-python">    def drift_coefficient(self, x, t):
+        return self.flow_model(x,t) + 0.5 * self.sigma ** 2 * self.score_model(x, t)
+
+    def diffusion_coefficient(self, x, t):
+        return self.sigma
+</code></pre>
+<p>dX = [u^θ + ½σ² s^θ]dt + σ dW, with the same return-a-float contract wobble
+as Cell 14 (works via broadcasting). Conceptually this is the biggest cell in
+the lab despite its size: <strong>a whole family of samplers, indexed by σ, from
+ONE pair of trained networks</strong> — σ=0 is the deterministic flow (≈ DDIM),
+σ&gt;0 trades determinism for Langevin self-correction (≈ ancestral
+diffusion) — the η-dial of notes 10 §1.2 rebuilt from parts.</p>
+<h2>Cell 25 — The learned SDE triptych</h2>
+<p>Cell 21's figure with the SDE swapped in:</p>
+<pre><code class="language-python">num_timesteps = 300
+sigma = 2.0 # Don't set sigma too large or you'll get numerical issues!
+...
+sde = LangevinFlowSDE(flow_model, score_model, sigma)
+simulator = EulerMaruyamaSimulator(sde)
+</code></pre>
+<p>300 steps instead of 1000 (SDE snapshots are self-correcting; also cheaper —
+each step is now TWO network calls, flow + score), and the σ warning is
+Cell 14's β_t → 0 explosion, now with a <em>learned</em> score that also becomes
+huge and less reliable near t=1. One more cosmetic difference: the density
+underlays reference <code>path.p_simple</code>/<code>path.p_data</code> (attributes of the path)
+rather than the Cell 7 globals — same objects, tidier habit. Success: the
+middle panel's marginals STILL match the left panel's ground truth despite
+per-step noise injection — Langevin preserving marginals, now end-to-end
+learned. Trajectories (right panel) are jagged where Cell 21's were smooth,
+yet land in the same five bumps.</p>
+<h2>Cell 26 — Question 3.3: the score hiding inside the flow</h2>
+<p>The markdown derivation to hold onto: for Gaussian paths the marginal field
+and marginal score obey the LINEAR identity
+u_t^ref(x) = a_t·x + b_t·∇log p_t(x), with
+(a_t, b_t) = (α̇_t/α_t, β_t²·α̇_t/α_t − β̇_t·β_t). Rearranged:
+score = (u − a_t x)/b_t. So a trained flow model <em>contains</em> a score model:</p>
+<pre><code class="language-python">class ScoreFromVectorField(torch.nn.Module):
+    def __init__(self, vector_field: MLPVectorField, alpha: Alpha, beta: Beta):
+        super().__init__()
+        self.vector_field = vector_field
+        self.alpha = alpha
+        self.beta = beta
+</code></pre>
+<p>Not a new network — zero new parameters. A wrapper holding the trained field
+and the schedules that define the conversion coefficients.</p>
+<pre><code class="language-python">    def forward(self, x, t):
+        alpha_t = self.alpha(t)
+        beta_t = self.beta(t)
+        dt_alpha_t = self.alpha.dt(t)
+        dt_beta_t = self.beta.dt(t)
+
+        num = alpha_t * self.vector_field(x,t) - dt_alpha_t * x
+        den = beta_t ** 2 * dt_alpha_t - alpha_t * dt_beta_t * beta_t
+
+        return num / den
+</code></pre>
+<p>The markdown's s̃_t^θ(x) = (α_t u^θ − α̇_t x)/(β_t² α̇_t − α_t β̇_t β_t) —
+the same rearrangement with numerator and denominator multiplied through by
+α_t. All four schedule values are <code>(bs,1)</code> columns broadcasting against
+<code>(bs,dim)</code>. Sanity-check the denominator with this lab's schedule (α=t,
+β=√(1−t), α̇=1, β̇=−1/(2√(1−t))): (1−t)·1 − t·(−1/(2√(1−t)))·√(1−t)
+= 1 − t + t/2 = <strong>1 − t/2</strong> — exactly the markdown's claim: nonzero on
+[0,1), zero only at t=1. So the conversion is safe everywhere except the
+final instant (dodged in the next cell by t ≤ 0.9999). Big picture: this is
+the flow-matching face of the ε ↔ x₀ ↔ score ↔ velocity interconvertibility
+family (notes 06 Part F "linear re-labelings"; notes 10 uses the same
+identity to turn ε̂ into the PF-ODE drift). Diffusion models learn ONE
+function wearing four costumes.</p>
+<h2>Cell 27 — Quiver comparison: learned score vs converted score</h2>
+<pre><code class="language-python">num_bins = 30
+num_marginals = 4
+</code></pre>
+<p>A 30×30 grid of probe points, at 4 times.</p>
+<pre><code class="language-python">learned_score_model = score_model
+flow_score_model = ScoreFromVectorField(flow_model, path.alpha, path.beta)
+</code></pre>
+<p>The two contenders: s_t^θ trained by score matching (Cell 23) vs s̃_t^θ
+computed from the flow model (Cell 26). If both trainings succeeded, these
+two functions — produced by <em>entirely different losses</em> — must agree.</p>
+<pre><code class="language-python">ts = torch.linspace(0.0, 0.9999, num_marginals).to(device)
+xs = torch.linspace(-scale, scale, num_bins).to(device)
+ys = torch.linspace(-scale, scale, num_bins).to(device)
+xx, yy = torch.meshgrid(xs, ys)
+xx = xx.reshape(-1,1)
+yy = yy.reshape(-1,1)
+xy = torch.cat([xx,yy], dim=-1)
+</code></pre>
+<p>Times stop at 0.9999, not 1.0 — the markdown's ε-dodge. At exactly t=1 the
+code computes <code>beta_t = 0</code> and (thanks to Cell 9's epsilon)
+<code>dt_beta_t ≈ −5000</code>, making Cell 26's denominator
+β²α̇ − αβ̇β = 0 − 1·(−5000)·0 = 0 → division by zero; at t = 0.9999 the
+denominator is safely ≈ 1 − t/2 ≈ 0.5. The rest builds the probe batch:
+meshgrid the axes, flatten each to <code>(900, 1)</code>, concat → <code>(900, 2)</code> query
+points — the same lattice-to-batch move as Cell 2's density plotting.</p>
+<pre><code class="language-python">for idx in range(num_marginals):
+    t = ts[idx]
+    bs = num_bins ** 2
+    tt = t.view(1,1).expand(bs, 1)
+
+    learned_scores = learned_score_model(xy, tt)
+    learned_scores_x = learned_scores[:,0]
+    learned_scores_y = learned_scores[:,1]
+
+    ax = axes[0, idx]
+    ax.quiver(xx.detach().cpu(), yy.detach().cpu(), learned_scores_x.detach().cpu(), learned_scores_y.detach().cpu(), scale=125, alpha=0.5)
+</code></pre>
+<p>Per column: broadcast the scalar time to the <code>(900, 1)</code> contract, evaluate the
+score at all 900 grid points in one call, split into x/y components, and draw
+arrows with <code>quiver</code>. <code>scale=125</code> fixes quiver's arrow-length normalization to
+the same constant in both rows — let matplotlib auto-scale each panel and the
+visual comparison would be meaningless. <code>.detach()</code> genuinely matters here:
+unlike the simulation cells there is no <code>no_grad()</code> context, so the model
+outputs carry grad history and matplotlib/numpy conversion would raise without
+it. The second half of the loop body repeats everything with
+<code>flow_score_model</code> into row 1 (one dead line — <code>ax = axes</code> — is immediately
+overwritten by <code>ax = axes[1, idx]</code>; harmless leftover). Row labels
+("Learned with Score Matching" / "Computed from u_t^θ(x)") plus per-panel
+density underlays and tick removal — styling. What agreement means: two
+independently trained objects satisfying a theoretical identity is strong
+evidence BOTH are close to the truth — you're checking theory with theory.
+Expect the fields to point from empty space toward the five bumps, growing in
+magnitude at later t (the 1/β² sharpening).</p>
+<hr />
+<h2>Part 4 — Linear paths between arbitrary distributions (Cells 28–35)</h2>
+<p>The markdown defines the second path: fix z, take X_0 ~ p_simple, and set
+<strong>X_t = (1−t)·X_0 + t·z</strong> — our notes 06 §C interpolant with x₁ = z, defining
+p_t(x|z) as the law of X_t. Endpoints: p_0(·|z) = p_simple, p_1(·|z) = δ_z.
+Conditional field: u_t(x|z) = (z − x)/(1 − t). Two observations the code will
+exploit: (1) no closed-form conditional <em>score</em> — p_simple may have no density
+we can write (Sampleable-not-Density strikes); (2) <strong>p_simple need not be
+Gaussian</strong> — flow matching between arbitrary clouds.</p>
+<h2>Cell 28 — Three non-Gaussian Sampleables</h2>
+<pre><code class="language-python">class MoonsSampleable(Sampleable):
+    def __init__(self, device, noise=0.05, scale=5.0, offset=None):
+        self.noise = noise
+        self.scale = scale
+        self.device = device
+        if offset is None:
+            offset = torch.zeros(2)
+        self.offset = offset.to(device)
+</code></pre>
+<p>A thin adapter over sklearn. Note it is NOT an <code>nn.Module</code> — no buffers, no
+<code>.to()</code> — so it stores its <code>device</code> explicitly and moves each batch there
+itself. The mutable-default dodge (<code>offset=None</code> then create zeros) is the
+standard Python idiom. <code>dim</code> is hardcoded 2.</p>
+<pre><code class="language-python">    def sample(self, num_samples: int) -&gt; torch.Tensor:
+        samples, _ = make_moons(n_samples=num_samples, noise=self.noise, random_state=None)
+        return self.scale * torch.from_numpy(samples.astype(np.float32)).to(self.device) + self.offset
+</code></pre>
+<p>sklearn returns numpy float64 points (labels discarded via <code>_</code>);
+<code>random_state=None</code> keeps every call fresh (a fixed seed would make "sampling"
+return the same cloud forever — deadly for training). The cast to float32
+before <code>from_numpy</code> avoids a silent dtype mismatch with the float32 models;
+then scale, move, shift. (Docstring typo: says shape <code>(num_samples, 3)</code>; it is
+<code>(num_samples, 2)</code>.) <code>CirclesSampleable</code> is identical with
+<code>make_circles(..., factor=0.5)</code> — two concentric rings, inner at half radius.</p>
+<pre><code class="language-python">class CheckerboardSampleable(Sampleable):
+    def sample(self, num_samples: int) -&gt; torch.Tensor:
+        grid_length = 2 * self.scale / self.grid_size
+        samples = torch.zeros(0,2).to(device)
+        while samples.shape[0] &lt; num_samples:
+            new_samples = (torch.rand(num_samples,2).to(self.device) - 0.5) * 2 * self.scale
+            x_mask = torch.floor((new_samples[:,0] + self.scale) / grid_length) % 2 == 0 # (bs,)
+            y_mask = torch.floor((new_samples[:,1] + self.scale) / grid_length) % 2 == 0 # (bs,)
+            accept_mask = torch.logical_xor(~x_mask, y_mask)
+            samples = torch.cat([samples, new_samples[accept_mask]], dim=0)
+        return samples[:num_samples]
+</code></pre>
+<p>Hand-rolled <strong>rejection sampling</strong> — worth reading line by line because it's a
+technique, not a library call:
+- <code>grid_length</code>: the board spans [−scale, scale]² split into <code>grid_size</code>
+  cells per side.
+- Start with an EMPTY <code>(0, 2)</code> tensor (note it uses the <em>global</em> <code>device</code>,
+  not <code>self.device</code> — works here because they're the same object; still an
+  inconsistency to spot) and loop until enough survivors accumulate.
+- Propose <code>num_samples</code> uniform points on the whole square:
+  <code>(rand − 0.5) · 2 · scale</code>.
+- Column index: shift x by +scale into [0, 2·scale], divide by cell size,
+  <code>floor</code> → integer cell column; <code>% 2 == 0</code> → is it an even column? Same for
+  rows.
+- <code>logical_xor(~x_mask, y_mask)</code>: true when <code>~x_mask ≠ y_mask</code>, i.e. when
+  <code>x_mask == y_mask</code> — keep points whose row and column parities MATCH (both
+  even or both odd). That alternating keep/discard pattern IS the
+  checkerboard. (An XNOR written as xor-of-a-complement — squint-worthy but
+  correct.)
+- Boolean-mask the survivors, append, and finally trim the overshoot with
+  <code>samples[:num_samples]</code>. Each round keeps ≈half its proposals, so the loop
+  runs ~2 iterations.</p>
+<p>Why the checkerboard is the boss-level target: hard edges and disconnected
+components — a density a Gaussian mixture can't fake, and a good stress test
+for how sharply a learned flow can fold mass.</p>
+<h2>Cell 29 — Visualize the new targets</h2>
+<pre><code class="language-python">targets = {
+    &quot;circles&quot;: CirclesSampleable(device),
+    &quot;moons&quot;: MoonsSampleable(device, scale=3.5),
+    &quot;checkerboard&quot;: CheckerboardSampleable(device, grid_size=4)
+}
+</code></pre>
+<p>Dict of name → distribution, then one loop: <code>hist2d_sampleable(target,
+20000, bins=100, scale=7.5, ax=ax)</code> per panel plus <code>set_aspect('equal')</code>
+(circles should look circular) and the usual tick/title styling. Histograms,
+not scatter — 20k points reveal <em>density</em> (the two moons have uniform
+intensity; the rings are thin and sharp). These have no <code>log_density</code>, so the
+heatmap-of-density plots of Parts 2–3 are impossible — samples are all we
+have, which is the entire point of Part 4.</p>
+<h2>Cell 30 — Problem 4.1: <code>LinearConditionalProbabilityPath</code></h2>
+<pre><code class="language-python">class LinearConditionalProbabilityPath(ConditionalProbabilityPath):
+    def __init__(self, p_simple: Sampleable, p_data: Sampleable):
+        super().__init__(p_simple, p_data)
+</code></pre>
+<p>Contrast with the Gaussian path's constructor: p_simple is now a <em>parameter</em>.
+Any Sampleable pair works — this single signature change is observation (2).</p>
+<pre><code class="language-python">    def sample_conditioning_variable(self, num_samples: int):
+        return self.p_data.sample(num_samples)
+</code></pre>
+<p>Same as before: z is a data point.</p>
+<pre><code class="language-python">    def sample_conditional_path(self, z, t):
+        x0 = self.p_simple.sample(z.shape[0])
+        return (1 - t) * x0 + t * z
+</code></pre>
+<p><strong>The interpolant, literally</strong> (notes 06 §C, Eq. ▲): draw a FRESH source point
+per call and slide. Batch size read off <code>z.shape[0]</code>; <code>t</code> is <code>(ns,1)</code>
+broadcasting against <code>(ns,dim)</code>. Two things to notice: unlike the Gaussian
+path there is no <code>randn_like</code> — the only randomness is x₀ itself (at fixed z
+and t, X_t is a deterministic squash of the source distribution); and pairing
+is <em>independent</em> — z and x₀ are drawn with no relation to each other, which is
+exactly the independent-coupling assumption of vanilla flow matching.</p>
+<pre><code class="language-python">    def conditional_vector_field(self, x, z, t):
+        return (z - x) / (1 - t)
+</code></pre>
+<p>u_t(x|z) = (z − x)/(1−t). Where it comes from: on the interpolant the velocity
+is constant, ẋ = z − x₀ (06 §C Eq. ▲▲); eliminating x₀ via
+x₀ = (x − tz)/(1−t) gives z − x₀ = (z − x)/(1−t) — "the remaining
+displacement divided by the remaining time." Cross-check against Part 2's
+machinery: with a Gaussian source this path is p_t(x|z) = N(tz, (1−t)²I),
+i.e. a Gaussian path with α_t = t, β_t = 1 − t; plug α̇=1, β̇=−1,
+β=1−t into Cell 10's formula: (1 + t/(1−t))·z − x/(1−t) = (z − x)/(1−t) ✓.
+Same singularity at t=1 as ever — defined on [0,1) only; training's
+<code>torch.rand</code> ∈ [0,1) never touches it.</p>
+<pre><code class="language-python">    def conditional_score(self, x, z, t):
+        raise Exception(&quot;You should not be calling this function!&quot;)
+</code></pre>
+<p>Honest API design: the conditional density is the law of (1−t)X₀ + tz, and
+for a samples-only p_simple (moons, checkerboard...) there is no formula to
+differentiate — so the method fails LOUDLY instead of returning something
+plausible and wrong. Consequence: no score matching and no Langevin/SDE
+sampling on linear paths here — Part 4 is ODE-only. (This is why diffusion
+<em>models</em> insist on Gaussian corruption: it buys the score.)</p>
+<h2>Cell 31 — Problem 4.1's consistency check: three rows must agree</h2>
+<pre><code class="language-python">num_samples = 100000
+num_timesteps = 500
+num_marginals = 5
+assert num_timesteps % (num_marginals - 1) == 0
+</code></pre>
+<p>100k samples — histograms need mass. The <code>assert</code> fixes Cell 4's
+<code>record_every</code> off-by-one: 500 % 4 == 0 makes the recorded frames land
+exactly on 5 evenly spaced times.</p>
+<pre><code class="language-python">path = LinearConditionalProbabilityPath(
+    p_simple = Gaussian.isotropic(dim=2, std=1.0),
+    p_data = CheckerboardSampleable(device, grid_size=4)
+).to(device)
+z = path.p_data.sample(1) # (1,2)
+</code></pre>
+<p>Gaussian → checkerboard, and one conditioning point for the first two rows.</p>
+<p>Row 1 — conditional path via <code>sample_conditional_path</code>:</p>
+<pre><code class="language-python">ts = torch.linspace(0.0, 1.0, num_marginals).to(device)
+for idx, t in enumerate(ts):
+    zz = z.expand(num_samples, -1)
+    tt = t.view(1,1).expand(num_samples,1)
+    xts = path.sample_conditional_path(zz, tt)
+    percentile = min(99 + 2 * torch.sin(t).item(), 100)
+    hist2d_samples(samples=xts.cpu(), ax=axes[0, idx], bins=300, scale=scale, percentile=percentile, alpha=1.0)
+</code></pre>
+<p>Same broadcast idiom as Cell 11 (<code>expand(num_samples, -1)</code>: −1 = "keep that
+dim"), but plotted as histograms. The <code>percentile</code> line is a purely cosmetic
+hack: as t → 1 the cloud collapses toward z and nearly all mass enters a few
+bins; sliding the color ceiling from the 99th percentile (t=0) toward 100
+(t→1; <code>2·sin(t)</code> grows 0 → ~1.7, clipped at 100) keeps the collapsing blob
+from saturating. Don't look for math in it.</p>
+<p>Row 2 — the SAME path via the ODE:</p>
+<pre><code class="language-python">ode = ConditionalVectorFieldODE(path, z)
+simulator = EulerSimulator(ode)
+ts = torch.linspace(0,1,num_timesteps).to(device)
+record_every_idxs = record_every(len(ts), len(ts) // (num_marginals - 1))
+x0 = path.p_simple.sample(num_samples)
+xts = simulator.simulate_with_trajectory(x0, ts.view(1,-1,1).expand(num_samples,-1,1))
+xts = xts[:,record_every_idxs,:]
+</code></pre>
+<p>Cell 12's adapter reused unchanged on the NEW path class — the interface
+paying rent. Integrate 100k particles for 500 Euler steps, keep 5 frames,
+histogram each (same percentile hack, labels from
+<code>ts[record_every_idxs[idx]]</code>). Rows 1 and 2 agreeing is the
+Problems-4.1 check: your sampler and your vector field describe the same
+p_t(x|z).</p>
+<p>Row 3 — the marginal path:</p>
+<pre><code class="language-python">    xts = path.sample_marginal_path(tt)
+</code></pre>
+<p>Fresh z per sample (Cell 5). Expect: unit blob at t=0 morphing into the FULL
+checkerboard at t=1 — and at mid-times a smeared hybrid. Per-row styling
+(limits, ticks, titles, y-labels, the red star on the last column of rows 1–2
+marking z) grouped as usual.</p>
+<h2>Cell 32 — Train flow matching on the linear path</h2>
+<pre><code class="language-python">path = LinearConditionalProbabilityPath(
+    p_simple = Gaussian.isotropic(dim=2, std=1.0),
+    p_data = CheckerboardSampleable(device, grid_size=4)
+).to(device)
+
+linear_flow_model = MLPVectorField(dim=2, hiddens=[64,64,64,64])
+
+trainer = ConditionalFlowMatchingTrainer(path, linear_flow_model)
+losses = trainer.train(num_epochs=10000, device=device, lr=1e-3, batch_size=2000)
+</code></pre>
+<p>The punchline cell for software design: <strong><code>ConditionalFlowMatchingTrainer</code> is
+reused verbatim</strong> — it only ever spoke to the abstract path interface, so
+swapping Gaussian → linear path costs zero new training code. Budget doubles
+(10000 epochs, batch 2000): the checkerboard's hard edges are harder to
+regress than five smooth bumps. Note the trainer calls only
+<code>sample_conditional_path</code> and <code>conditional_vector_field</code> — the forbidden
+<code>conditional_score</code> is never touched, so the <code>raise</code> never fires.</p>
+<h2>Cell 33 — Ground truth vs learned, side by side</h2>
+<p>A 2×5 grid. Row 0: <code>path.sample_marginal_path(tt)</code> histogrammed at 5 times
+(the analytic answer — same loop as Cell 31 row 3, batch 50000). Row 1:</p>
+<pre><code class="language-python">ode = LearnedVectorFieldODE(linear_flow_model)
+simulator = EulerSimulator(ode)
+ts = torch.linspace(0,1,100).to(device)
+record_every_idxs = record_every(len(ts), len(ts) // (num_marginals - 1))
+x0 = path.p_simple.sample(num_samples)
+xts = simulator.simulate_with_trajectory(x0, ts.view(1,-1,1).expand(num_samples,-1,1))
+xts = xts[:,record_every_idxs,:]
+for idx in range(xts.shape[1]):
+    xx = xts[:,idx,:]
+    hist2d_samples(samples=xx.cpu(), ax=axes[1, idx], bins=200, scale=scale, percentile=99, alpha=1.0)
+</code></pre>
+<p>Simulate the learned field — with only <strong>100 Euler steps</strong> now (vs 1000 in
+Part 2/3): the near-straight linear path is exactly what Euler integrates
+accurately with few steps (notes 06 Fact 1/2 and Part B's "why FM samples in
+tens of steps"). Snapshot, histogram, label; usual styling and row labels
+("Ground Truth" / "Learned"). Success: a recognizable 4×4 checkerboard grown
+out of a Gaussian blob, with matching <em>intermediate</em> marginals — the learned
+field reproduces the whole path. Expect slightly soft edges: an MLP regressing
+a discontinuous-density limit will blur corners; more capacity/epochs
+sharpens them.</p>
+<h2>Cell 34 — Problem 4.3: drop the Gaussian entirely</h2>
+<pre><code class="language-python">path = LinearConditionalProbabilityPath(
+    p_simple = CirclesSampleable(device),
+    p_data = CheckerboardSampleable(device, grid_size=4)
+).to(device)
+
+bridging_flow_model = MLPVectorField(dim=2, hiddens=[100,100,100,100])
+
+trainer = ConditionalFlowMatchingTrainer(path, bridging_flow_model)
+losses = trainer.train(num_epochs=20000, device=device, lr=1e-3, batch_size=2000)
+</code></pre>
+<p>The source is now concentric circles — <strong>no Gaussian anywhere in the
+problem</strong>. Nothing in the interpolant, the field, the trainer, or the sampler
+ever used Gaussianity of p_simple; the code diff from Cell 32 is literally
+the <code>p_simple=</code> line. Wider network (4×100) and 20000 epochs: bridging two
+structured distributions gives a rougher marginal field (arrows from
+independently paired circle-points and checker-points crisscross heavily), so
+the conditional targets are noisier and the fit is harder. This
+generality — flows between arbitrary marginals — is where flow matching
+outgrows diffusion (whose forward process is welded to Gaussians); it's the
+door to bridge/interpolant methods.</p>
+<h2>Cell 35 — The bridge, visualized</h2>
+<p>Byte-level a copy of Cell 33 with <code>bridging_flow_model</code>, <code>num_samples =
+30000</code>, and <code>ts = torch.linspace(0,1,200)</code> — 200 Euler steps this time (the
+circle→checkerboard marginal field is curvier than Gaussian→checkerboard, so
+Euler needs a finer grid; try 50 and watch the corners smear). Row 0 the
+analytic marginal path (rings dissolving into checkerboard), row 1 the
+learned one. The final markdown cell hands you the keys: swap <code>p_simple</code> /
+<code>p_data</code> among the Cell 28–29 zoo and observe — moons→circles,
+checkerboard→moons all train with the SAME three-line recipe.</p>
+<hr />
+<h2>What to carry forward (Lab 2 → Lab 3 and beyond)</h2>
+<ol>
+<li><strong>One interface, whole lab</strong>: <code>ConditionalProbabilityPath</code> = sample z,
+   sample p_t(x|z), conditional field, conditional score. Every trainer,
+   sampler, and figure consumed only this contract — that's why Gaussian and
+   linear paths swap freely.</li>
+<li><strong>The Gaussian path is DDPM's forward shortcut with designable (α, β)</strong>:
+   p_t(x|z) = N(α_t z, β_t² I); sampling it is one reparameterization
+   (05 §A3); t runs 0=noise → 1=data here.</li>
+<li><strong>Two closed forms to memorize</strong>:
+   u_t(x|z) = (α̇ − (β̇/β)α)z + (β̇/β)x, and
+   ∇log p_t(x|z) = (α_t z − x)/β_t² = −ε/β_t (the score/noise identity,
+   notes 10). Both explode as β_t → 0 — every t→1 epsilon, warning, and
+   σ_t = β_t remedy in the lab traces back to this.</li>
+<li><strong>Training = regress the conditional target; the marginal is what you
+   get</strong>: L_CFM and L_CSM differ only in the target line; least-squares
+   learns conditional means (06 §A3/D2); the loss floor is the target's
+   conditional variance — converges, never to zero.</li>
+<li><strong>Flow and score are the same information</strong>: identical MLPs, and
+   s̃ = (α u^θ − α̇ x)/(β²α̇ − αβ̇β) converts one into the other with zero
+   new parameters — the lab's member of the ε/x₀/score/velocity re-labeling
+   family (06 Part F, 10 §3).</li>
+<li><strong>σ is a sampler dial, not a training choice</strong>: u^θ alone → deterministic
+   ODE; u^θ + ½σ²s^θ + σdW → stochastic samplers with the same marginals
+   (the η-dial of notes 10 §1.2).</li>
+<li><strong>Linear paths free the source</strong>: X_t = (1−t)X₀ + tz needs only samples
+   from both ends — but forfeits the score (no density, no Langevin). Choose
+   Gaussian paths when you want SDEs; linear paths when you want straightness
+   and arbitrary endpoints.</li>
+<li>Recurring PyTorch craft: <code>(bs,1)</code> time columns feeding <code>cat([x,t])</code>;
+   <code>.to(z)</code> for device+dtype in one token; <code>expand</code> for free broadcasts;
+   boundary asserts in ABC constructors; analytic <code>.dt</code> overrides of an
+   autodiff default; rejection sampling with boolean masks; and the small
+   honest bugs — <code>len(ts)</code> vs <code>ts.shape[1]</code>, <code>record_every</code>'s extra frame,
+   <code>train()</code> returning <code>None</code> into <code>losses</code>.</li>
+</ol></div></body></html>

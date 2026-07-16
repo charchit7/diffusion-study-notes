@@ -1,0 +1,116 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What Is Actually Happening?</title><style>
+  :root { --ground:#F7F8FA; --ink:#1D2634; --muted:#5F6E80;
+          --accent:#31599B; --rule:#DDE3EA; --card:#EEF1F5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ground:#12161D; --ink:#D9DEE6; --muted:#8B99AB;
+            --accent:#8FB3E2; --rule:#28303C; --card:#1A202A; } }
+  html { background: var(--ground); }
+  body { margin:0; color:var(--ink);
+    font-family: Charter, Georgia, 'Times New Roman', serif;
+    font-size:1.05rem; line-height:1.66; }
+  .wrap { max-width:72ch; margin:0 auto; padding:2.2rem 1.25rem 4rem; }
+  .eyebrow { font-family:system-ui,sans-serif; font-size:.72rem; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--muted); margin:0 0 .6rem; }
+  h1 { font-size:1.75rem; line-height:1.22; margin:0 0 1.2rem; }
+  h2 { font-size:1.28rem; margin:2.4rem 0 .7rem; padding-top:1.2rem;
+       border-top:1px solid var(--rule); }
+  h3 { font-size:1.08rem; margin:1.8rem 0 .5rem; color:var(--accent); }
+  p, li { margin:0 0 .95rem; } ul, ol { padding-left:1.3rem; }
+  blockquote { border-left:3px solid var(--accent); background:var(--card);
+    margin:1.2rem 0; padding:.7rem 1rem; border-radius:0 6px 6px 0; }
+  pre { background:var(--card); border-radius:6px; padding:.9rem 1rem;
+    overflow-x:auto; font-size:.82rem; line-height:1.5; }
+  code { font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+    font-size:.86em; background:var(--card); padding:.08em .3em; border-radius:4px; }
+  pre code { background:none; padding:0; }
+  .tablewrap { overflow-x:auto; margin:1.2rem 0; }
+  table { border-collapse:collapse; width:100%;
+    font-family:system-ui,sans-serif; font-size:.86rem; }
+  th, td { text-align:left; padding:.45rem .65rem; border-bottom:1px solid var(--rule); }
+  th { font-size:.7rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
+  a { color:var(--accent); }
+</style></head><body>
+<div class="wrap"><p class="eyebrow">Theory 1/7 · <a href="index.html">index</a></p>
+<h1>Phase 3 — Mental Model: What Is Actually Happening?</h1>
+<p><em>No equations in this file. Read this until the picture is vivid, then go to <code>04_mathematics.md</code>.</em></p>
+<h2>1. The core problem</h2>
+<p>Generative modeling = "here are 100k face photos; build a machine that produces <em>new</em> faces from the same distribution." The hard part: the distribution of natural images is a fantastically thin, curved "sheet" (manifold) inside a million-dimensional space. Almost every point in pixel space is TV static; faces occupy a vanishingly small region. Sampling from it directly is hopeless — we can't even write down where it is.</p>
+<h2>2. The diffusion trick: destroy, then learn to rebuild</h2>
+<p><strong>Forward process</strong> — the "destruction" direction. Take a real photo and add a tiny amount of TV static. Then a bit more. Do this 1000 times. After 1000 steps the photo is indistinguishable from pure static. Key properties:</p>
+<ul>
+<li>It's <em>dumb</em>: no learning, no network. Just a fixed recipe of "how much static at each step."</li>
+<li>It's <em>gentle</em>: each step changes the image only slightly, so consecutive steps are nearly identical images.</li>
+<li>It's a <em>bridge</em>: it connects the impossibly-complicated distribution (faces) to the simplest distribution in existence (pure Gaussian static), through 1000 intermediate distributions that morph smoothly from one to the other.</li>
+</ul>
+<p>Analogy: drop of ink in a glass of water. At t=0 the ink is a perfect intricate swirl (a face). Molecules jiggle randomly (noise added). At t=1000 the water is uniformly grey (pure noise). Diffusion in physics runs one way only — that's the forward process.</p>
+<p><strong>Reverse process</strong> — the learned direction. If you watched a <em>movie</em> of the ink dispersing and played it backwards, you'd see grey water spontaneously organize into a swirl. That backwards movie is what we want to learn. Physics says you can't un-mix ink — <em>unless</em> you know, at every moment, the statistics of where the ink came from. A neural network can learn exactly that from data.</p>
+<p>The gentleness of the forward steps is what makes learning possible: undoing 1000 tiny corruptions is 1000 easy problems ("this image is slightly staticky, clean it slightly") instead of one impossible problem ("here is static, produce a face").</p>
+<h2>3. Why predict the noise?</h2>
+<p>At every step the noisy image is literally <code>signal + static</code>. Ask the network: "here is a corrupted image and how far along the corruption is (t) — which part of what you see is the static?" If it can point at the static, we can subtract (some of) it. Three equivalent things the network could predict — the noise ε, the clean image x₀, or the small step backwards — are just algebraic rearrangements of each other (this equivalence is exactly HW Q6). DDPM chose ε because its target always has the same scale (unit-variance static) at every t, which makes one network with one loss work across all 1000 sub-problems.</p>
+<p>Crucial subtlety: at high noise levels the task is <em>ambiguous</em> — many different faces could have produced the same very-noisy image. The network can't know which; the best it can do is predict the <em>average</em> static consistent with all of them. That's why one denoising jump from pure noise gives a blurry "average face," and why we instead take 1000 small steps, <strong>re-injecting a little fresh randomness at each step</strong>. The re-injected randomness is what lets the process commit to <em>one</em> face rather than the average of all faces — each small step makes a small decision, and small decisions compound into a specific, sharp image.</p>
+<h2>4. Training, in one sentence each</h2>
+<ul>
+<li>Pick a random photo from the dataset.</li>
+<li>Pick a random corruption level t (1..1000) — uniformly, so the network gets practice at every level.</li>
+<li>Jump <em>directly</em> to that corruption level (a math shortcut lets us corrupt in one shot instead of t sequential steps — this is why training is cheap).</li>
+<li>Ask the network which part is static; penalize squared error against the static we actually added.</li>
+<li>Repeat millions of times. The network never sees a full forward or reverse trajectory during training — only random single snapshots.</li>
+</ul>
+<h2>5. Sampling (inference), in one sentence each</h2>
+<ul>
+<li>Start from pure static (free to generate — it's just <code>randn</code>).</li>
+<li>For t = 1000 down to 1: ask the network for the static content, take a small step toward "cleaner," add a pinch of fresh static (except at the very last step — the final answer should be clean).</li>
+<li>After 1000 steps: a new face that never existed.</li>
+<li>This is why DDPM sampling is slow (1000 network calls per image) — the pain point behind HW Q7, and later DDIM / flow matching.</li>
+</ul>
+<h2>6. The scheduler / variance schedule</h2>
+<p>The "recipe card" for the destruction: a list of 1000 numbers (β₁…β₁₀₀₀) saying how much static to add at each step, increasing from tiny (1e-4) to moderate (0.02). Why increasing? Early corruption should be delicate — that's where the fine detail (skin texture, hair strands) lives and where the network learns the hardest lessons; late corruption can be coarse because the image is already mostly static. From these 1000 numbers everything else is precomputed bookkeeping: cumulative "how much of the original signal survives to step t" (ᾱ_t, a number sliding from ~1 to ~0), the shortcut coefficients, the reverse-step sizes. The schedule is <em>design</em>, not learning — changing it changes what the model spends its capacity on (Improved DDPM's cosine schedule is exactly this knob).</p>
+<h2>7. The posterior — the one non-obvious object</h2>
+<p>Question: "given the noisy image at step t, AND the original clean photo, what did step t−1 look like?" With both endpoints known this has an exact, known answer (a slightly-less-noisy blend of the two, plus a precisely known amount of remaining uncertainty). This is the <strong>ground-truth answer key</strong> for each reverse step. The network can't use it at test time (no clean photo then!), but during training we teach the network's reverse step to <em>match</em> this answer key. The entire DDPM loss is "match the answer key at every t" — and predicting ε turns out to be the cleanest way to parameterize that match.</p>
+<h2>8. Why the loss curve is a bad progress bar</h2>
+<p>The target (which static was added) is random every time, and at high t the task is irreducibly ambiguous — so the loss plateaus at a nonzero floor and jitters forever (HW Q5b), while sample quality keeps improving. Diffusion people watch <em>samples</em> and KID/FID, not the loss. Corollary: a beautiful loss curve proves only that training-time code works; sampling is a separate untested code path (HW Q5a).</p>
+<h2>9. The cast of characters (map to code)</h2>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Code</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>destruction recipe (β, ᾱ)</td>
+<td>buffers in <code>DDPM.__init__</code></td>
+</tr>
+<tr>
+<td>one-shot corruption</td>
+<td><code>DDPM.forward_process</code></td>
+</tr>
+<tr>
+<td>"which part is static?" network</td>
+<td><code>UNet(x_t, t)</code></td>
+</tr>
+<tr>
+<td>corruption-level dial fed to network</td>
+<td>sinusoidal <code>TimestepEmbedding</code> → FiLM in every ResBlock</td>
+</tr>
+<tr>
+<td>match-the-answer-key loss</td>
+<td><code>DDPM.compute_loss</code> (MSE on ε)</td>
+</tr>
+<tr>
+<td>one small cleaning step</td>
+<td><code>DDPM.reverse_process</code></td>
+</tr>
+<tr>
+<td>static → face loop</td>
+<td><code>DDPM.sample</code></td>
+</tr>
+<tr>
+<td>smoothed network for nicer samples</td>
+<td><code>EMA</code></td>
+</tr>
+</tbody>
+</table></div></div></body></html>

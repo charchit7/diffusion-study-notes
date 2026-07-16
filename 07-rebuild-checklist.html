@@ -1,0 +1,143 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rebuild-From-Scratch Checklist</title><style>
+  :root { --ground:#F7F8FA; --ink:#1D2634; --muted:#5F6E80;
+          --accent:#31599B; --rule:#DDE3EA; --card:#EEF1F5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ground:#12161D; --ink:#D9DEE6; --muted:#8B99AB;
+            --accent:#8FB3E2; --rule:#28303C; --card:#1A202A; } }
+  html { background: var(--ground); }
+  body { margin:0; color:var(--ink);
+    font-family: Charter, Georgia, 'Times New Roman', serif;
+    font-size:1.05rem; line-height:1.66; }
+  .wrap { max-width:72ch; margin:0 auto; padding:2.2rem 1.25rem 4rem; }
+  .eyebrow { font-family:system-ui,sans-serif; font-size:.72rem; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--muted); margin:0 0 .6rem; }
+  h1 { font-size:1.75rem; line-height:1.22; margin:0 0 1.2rem; }
+  h2 { font-size:1.28rem; margin:2.4rem 0 .7rem; padding-top:1.2rem;
+       border-top:1px solid var(--rule); }
+  h3 { font-size:1.08rem; margin:1.8rem 0 .5rem; color:var(--accent); }
+  p, li { margin:0 0 .95rem; } ul, ol { padding-left:1.3rem; }
+  blockquote { border-left:3px solid var(--accent); background:var(--card);
+    margin:1.2rem 0; padding:.7rem 1rem; border-radius:0 6px 6px 0; }
+  pre { background:var(--card); border-radius:6px; padding:.9rem 1rem;
+    overflow-x:auto; font-size:.82rem; line-height:1.5; }
+  code { font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+    font-size:.86em; background:var(--card); padding:.08em .3em; border-radius:4px; }
+  pre code { background:none; padding:0; }
+  .tablewrap { overflow-x:auto; margin:1.2rem 0; }
+  table { border-collapse:collapse; width:100%;
+    font-family:system-ui,sans-serif; font-size:.86rem; }
+  th, td { text-align:left; padding:.45rem .65rem; border-bottom:1px solid var(--rule); }
+  th { font-size:.7rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
+  a { color:var(--accent); }
+</style></head><body>
+<div class="wrap"><p class="eyebrow">Theory 7/7 · <a href="index.html">index</a></p>
+<h1>Rebuild-From-Scratch Checklist</h1>
+<p><em>The goal: close every reference and reimplement DDPM → DDIM → FM → Reflow →
+DPM-Solver from a blank file. Each item names (1) what to build, (2) the one
+formula you must be able to re-derive first, (3) the self-test that proves your
+code is right WITHOUT training anything. Do them in order — each layer's test
+uses the previous layer.</em></p>
+<p>Derivations: <code>04/05</code> (DDPM), <code>06</code> (FM). Working reference code: <code>cmu-10799-diffusion/src/methods/</code>, <code>kaist/*/…_solved.ipynb</code>.</p>
+<h2>Level 0 — Muscle memory (no code)</h2>
+<p>Re-derive on paper, from nothing:
+- [ ] Var rules → sum of independent Gaussians (05 §A1–A4)
+- [ ] x_t = √ᾱ_t x₀ + √(1−ᾱ_t) ε by two-step merge + induction (05 §B2)
+- [ ] Posterior μ̃, β̃ by completing the square (05 §C3)
+- [ ] μ̃ rewritten with ε; why loss = MSE on ε (05 §D3–D4)
+- [ ] FM: why regressing x₁−x₀ learns the marginal field (06 §D2)
+- [ ] ELBO: master identity log p = ELBO + KL, telescoping, KL→MSE (09)
+- [ ] DDIM re-noising family (η dial) and Solver-1 ≡ DDIM (10 §1.2, §5)
+If any step needs the notes → repeat tomorrow. These seven are the whole edifice.</p>
+<h2>Level 1 — Schedule + forward (30 min)</h2>
+<p>Build: β linspace(1e-4, 0.02, 1000) → α, ᾱ buffers (fp64 cumprod, store fp32);
+<code>extract(buf, t, ndim)</code> gather+reshape helper; <code>forward_process(x0, t, noise)</code>.
+- [ ] Self-test 1: ᾱ[0]=0.9999, ᾱ[-1]≈4.0e-5.
+- [ ] Self-test 2: x_t at t=999 over a big batch has mean≈0, std≈1.
+- [ ] Bug to remember: (B,) coefficients MUST become (B,1,1,1) before
+      multiplying (B,C,H,W) — centralize in <code>extract</code>, never inline.</p>
+<h2>Level 2 — Loss (15 min)</h2>
+<p>Build: <code>compute_loss</code>: t~randint(0,T), ε~randn, MSE(net(x_t,t), ε).
+- [ ] Self-test: with a zero-output net, loss = 1.000 ± 0.05 (it's E‖ε‖²).
+      (For x₀-target: loss = Var(data); for FM velocity-target: Var(data)+1.)</p>
+<h2>Level 3 — Posterior + ancestral sampling (1 h)</h2>
+<p>Build: posterior coefficient buffers (β̃, coef_x0, coef_xt);
+<code>_predict_x0</code> (invert forward + clamp [−1,1]); <code>reverse_process</code> (posterior
+mean + √β̃·z, z=0 on last step); <code>sample</code> loop from randn.
+- [ ] Self-test 1: your (x_t,x₀)-form posterior mean == Eq.11 ε-form to ~1e-6
+      for random inputs, all t (this catches almost every algebra slip).
+- [ ] Self-test 2: β̃₁ ≈ 1e-5-ish (≈0); β̃_t &lt; β_t everywhere.
+- [ ] Bugs to remember: noise added at the final step (Q5a); missing
+      unnormalize+clamp when saving (Q5c); sampling with raw instead of EMA
+      weights; t indexing 0-based in code vs 1-based in the paper.</p>
+<h2>Level 4 — U-Net (2 h)</h2>
+<p>Build: time-embedding MLP → FiLM ResBlocks → attention at 16/8 → skip-cat
+decoder with <code>num_res_blocks+1</code> blocks per level → zero-init output conv.
+- [ ] Self-test 1: out.shape == in.shape; untrained output exactly 0 (zero init).
+- [ ] Self-test 2: skip bookkeeping — assert the skip list is empty after the
+      decoder consumed it.
+- [ ] Bug to remember: decoder in_channels = current + skip channels; track
+      them in a list during construction, don't compute arithmetically.</p>
+<h2>Level 5 — Overfit gate (30 min wall-clock)</h2>
+<ul>
+<li>[ ] Train on ONE repeated batch: loss 1.0 → &lt;0.05 within ~400 steps and
+      samples reproduce the batch. Only after this gate, spend GPU-hours.
+      (Loss stuck at 1.0 ⇒ t or ε plumbing broken; loss falls but samples are
+      noise ⇒ sampler broken — the loss never tests the sampler!)</li>
+</ul>
+<h2>Level 6 — DDIM + striding (45 min)</h2>
+<p>Build: subsequence ts = linspace(T−1, 0, S); per-jump α_eff = ᾱ_t/ᾱ_s (never
+reuse per-step β!); DDIM step x_prev = √ᾱ_prev·x̂₀ + √(1−ᾱ_prev)·ε̂.
+- [ ] Self-test 1: α_eff with adjacent steps == α_t exactly.
+- [ ] Self-test 2: DDIM with the same seed twice → bit-identical samples;
+      ancestral → different across runs (fresh z).
+- [ ] Self-test 3: DDIM final step (ᾱ_prev=1) returns x̂₀ exactly.
+- [ ] Re-derive: recompute ε̂ from the CLAMPED x̂₀ so (x̂₀, ε̂, x_t) stay
+      consistent.</p>
+<h2>Level 7 — Flow matching (45 min)</h2>
+<p>Build: x_t = (1−t)x₀ + t·x₁; loss MSE(v_θ(x_t, t·1000), x₁−x₀); Euler sampler
+t: 0→1.
+- [ ] Self-test 1: interpolant endpoints: t=0 → x₀, t=1 → x₁ exactly.
+- [ ] Self-test 2 (the strongest single test in this whole file): build an
+      ORACLE velocity net that returns the true x₁−x₀ given the state; your
+      Euler sampler must reconstruct x₁ to ~1e-6 in ONE step. Catches
+      direction, dt, and time-scaling bugs simultaneously.
+- [ ] Bug to remember: t∈[0,1] fed raw to a sinusoidal embedding designed for
+      0..1000 collapses all time embeddings — scale it, identically in train
+      and sample.</p>
+<h2>Level 8 — Reflow (30 min)</h2>
+<p>Build: sample N trajectories from the trained flow, store COUPLED (x₀ = the
+exact starting noise, x₁̂ = where it landed); retrain the same architecture on
+straight lines between couples; sample with ~10 steps.
+- [ ] Self-test: few-step CD/quality of reflowed model ≫ plain FM at the same
+      step count (ours: 25.7 vs 36.9 CD at 10 steps).
+- [ ] Bug to remember: re-randomizing x₀ in <strong>getitem</strong> silently turns Reflow
+      back into plain FM — the pairing IS the method.</p>
+<h2>Level 9 — DPM-Solver (1.5 h, needs Level 6 understood)</h2>
+<p>Re-derive first: PF-ODE semi-linearity → variation of constants → λ = log(α/σ)
+change of variables → x_t = (α_t/α_s)x_s − σ_t(e^h−1)ε̂, h = λ_t−λ_s.
+Build: DDPM→DPM notation (α=√ᾱ, σ=√(1−ᾱ), λ), order-1 step, midpoint order-2.
+- [ ] Self-test 1: your order-1 step == your DDIM step numerically (they are
+      the same formula in different clothes — prove it by expanding e^h).
+- [ ] Self-test 2: λ strictly DECREASES with t (increases toward data); h &gt; 0
+      for a denoising step.
+- [ ] Insight to remember: order-2 wins at LOW NFE (≤20); at 50+ NFE on easy
+      data it can tie or lose (coarser grid per step) — ours: 15.4 (o1) vs
+      19.6 (o2) at 50 NFE.</p>
+<h2>Level 10 — Training hygiene (learned the hard way)</h2>
+<ul>
+<li>[ ] EMA shadow + apply/restore bracketing for every sampling call, WITH
+      decay warmup min(d,(1+step)/(10+step)): the shadow starts as a clone of
+      the random init, which retains d^step weight -- at d=0.9999 that is
+      13.5% after 20k steps = mush samples and noise-level KID from a
+      perfectly healthy model (we measured 0.474). Self-test: early in
+      training, EMA samples should look no worse than raw-weight samples.</li>
+<li>[ ] bf16 autocast (or fp16 + GradScaler + clipping) — and a non-finite-loss
+      skip guard: one bad batch must never write NaN into the weights.
+      (Our x₀ run died at step ~20k without it; restart cost 1.5 h.)</li>
+<li>[ ] Loss curves don't measure sample quality: evaluate checkpoints with
+      KID/CD, log sample grids every few thousand steps.</li>
+<li>[ ] Never trust "the file exists" as "the code ran" — check for execution
+      evidence (outputs, metrics, timestamps).</li>
+</ul></div></body></html>

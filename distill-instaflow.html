@@ -1,0 +1,623 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>InstaFlow, Line by Line</title><style>
+  :root { --ground:#F7F8FA; --ink:#1D2634; --muted:#5F6E80;
+          --accent:#31599B; --rule:#DDE3EA; --card:#EEF1F5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ground:#12161D; --ink:#D9DEE6; --muted:#8B99AB;
+            --accent:#8FB3E2; --rule:#28303C; --card:#1A202A; } }
+  html { background: var(--ground); }
+  body { margin:0; color:var(--ink);
+    font-family: Charter, Georgia, 'Times New Roman', serif;
+    font-size:1.05rem; line-height:1.66; }
+  .wrap { max-width:72ch; margin:0 auto; padding:2.2rem 1.25rem 4rem; }
+  .eyebrow { font-family:system-ui,sans-serif; font-size:.72rem; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--muted); margin:0 0 .6rem; }
+  h1 { font-size:1.75rem; line-height:1.22; margin:0 0 1.2rem; }
+  h2 { font-size:1.28rem; margin:2.4rem 0 .7rem; padding-top:1.2rem;
+       border-top:1px solid var(--rule); }
+  h3 { font-size:1.08rem; margin:1.8rem 0 .5rem; color:var(--accent); }
+  p, li { margin:0 0 .95rem; } ul, ol { padding-left:1.3rem; }
+  blockquote { border-left:3px solid var(--accent); background:var(--card);
+    margin:1.2rem 0; padding:.7rem 1rem; border-radius:0 6px 6px 0; }
+  pre { background:var(--card); border-radius:6px; padding:.9rem 1rem;
+    overflow-x:auto; font-size:.82rem; line-height:1.5; }
+  code { font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+    font-size:.86em; background:var(--card); padding:.08em .3em; border-radius:4px; }
+  pre code { background:none; padding:0; }
+  .tablewrap { overflow-x:auto; margin:1.2rem 0; }
+  table { border-collapse:collapse; width:100%;
+    font-family:system-ui,sans-serif; font-size:.86rem; }
+  th, td { text-align:left; padding:.45rem .65rem; border-bottom:1px solid var(--rule); }
+  th { font-size:.7rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
+  a { color:var(--accent); }
+</style></head><body>
+<div class="wrap"><p class="eyebrow">Distillation 5/5 · <a href="index.html">index</a></p><h1>InstaFlow, Line by Line — One-Step Stable Diffusion via Rectified Flow</h1>
+<p><em>A beginner's reading companion to the InstaFlow repo
+(<code>distillation/InstaFlow/</code>, ICLR 2024, arXiv 2309.06380). Every line of
+<code>code/pipeline_rf.py</code> — the rectified-flow inference pipeline — plus a short
+tour of <code>code/rf_lora.py</code>. The repo ships INFERENCE code only; the training
+methodology below is reconstructed from the repo README and the paper.
+Concepts link to our notes: straight-line flows = <code>06 Parts C–F</code>,
+Euler = <code>06 §A1</code>, CFG = <code>11</code>, and we built the Reflow mechanism ourselves at
+toy scale in KAIST Assignment 3.</em></p>
+<p><strong>The repo in one sentence:</strong> take Stable Diffusion's UNet, re-train it (via
+Reflow) to be a <em>velocity field</em> whose noise→image trajectories are nearly
+straight lines, then distill — after which "sampling" is a single Euler step,
+<code>image_latent = noise + v(noise)</code>, and the whole pipeline file is just SD
+plumbing wrapped around a ten-line Euler loop.</p>
+<hr />
+<h2>Methodology — the part that matters</h2>
+<h3>The problem: SD's probability flow is curved</h3>
+<p>Stable Diffusion generates by numerically solving an ODE/SDE from noise to
+data (notes 10). Even with the best solvers (25-step DPM-Solver), you pay ~25
+UNet forward passes per image. Why can't you take ONE giant step? Our notes
+06 §A1 answered this exactly:</p>
+<blockquote>
+<p><strong>Fact 1/2 (06 §A1): if the trajectory is a straight line, velocity is
+constant, and Euler's method is EXACT even with one giant step.</strong>
+Conversely, error comes only from <em>curvature</em>.</p>
+</blockquote>
+<p>SD's flow is curved. Not because each training pair's path is curved — in
+flow matching every <em>conditional</em> path is a straight line (06 Part C) — but
+because the <em>marginal</em> field the network learns is the <strong>average</strong> of all
+straight arrows passing through a point (06 Part D), and averaging straight
+lines with different directions bends the flow (06 Part E, closing
+paragraph). One Euler step on a curved flow lands far from the data manifold:
+blurry, washed-out images.</p>
+<h3>Why naive distillation fails (and what Reflow fixes)</h3>
+<p>The obvious shortcut — "just train a student network to map noise <code>X0</code>
+directly to the teacher's output <code>X1</code> in one step" — has a hidden trap, and
+understanding it is the paper's core insight.</p>
+<p>Under an <em>independent</em> coupling (any noise may pair with any image — which is
+what vanilla diffusion training uses), the same region of noise space is
+associated with many different images. A one-step student trained with an L2
+loss on such pairs learns the <strong>conditional average</strong> of its targets (our
+notes 06 §A3: "the best guess is the average"). Averages of images are gray
+mush. Even with a perceptual loss, the student is asked to fit a
+fundamentally one-to-many map with a one-to-one function — it must fail
+somewhere. The paper measures this directly: progressive-distillation SD gets
+FID 37.2 in one step; InstaFlow gets 23.3. Straightening first is worth 14
+FID points.</p>
+<p>Rectified Flow's Reflow operation (Liu et al. 2022, arXiv 2209.03003) fixes
+the coupling <em>before</em> distilling:</p>
+<ol>
+<li><strong>Simulate the teacher's ODE</strong> to obtain <em>coupled</em> pairs
+   <code>(X0, X1 = ODE(X0))</code>. Because the ODE is deterministic, this coupling is a
+   <em>function</em>: each noise maps to exactly ONE image. No averaging conflict
+   remains.</li>
+<li><strong>Retrain the velocity field on straight lines between these couples</strong>:
+   <code>Xt = t·X1 + (1−t)·X0</code>, target velocity <code>X1 − X0</code> (identical training loop
+   to 06 Part E — only the <em>source of the pairs</em> changed). The result,
+   "2-Rectified Flow", provably transports noise to (approximately) the same
+   image distribution but along straighter trajectories with lower transport
+   cost. Iterating gives 3-RF, 4-RF, … each straighter than the last;
+   InstaFlow stops at 2.</li>
+</ol>
+<p>We implemented exactly this mechanism at toy scale in the KAIST Reflow
+assignment
+(<code>kaist/Diffusion-2025-Assignment3-Flow/flow_matching_solved.ipynb</code>,
+"Rectified Flow: Making Paths as Straight as Possible"): its
+<code>RectFlowDataset</code> stores paired endpoints where <code>X0[i]</code> is the exact prior
+sample whose trajectory under the trained flow ended at <code>X1[i]</code>, and the
+reflow training loop regresses <code>v_θ(Xt, t)</code> onto <code>X1 − X0</code> over those
+couples. InstaFlow is that same loop, scaled from 2D points to a 0.9B-param
+text-conditioned UNet. The theory backdrop is notes
+<code>06_flow_matching_from_zero.md</code> Parts C–F: Part C builds the straight
+interpolant and its constant velocity, Part D shows least-squares learns the
+marginal field, Part E names Reflow as "re-training on the model's own
+(start, end) pairs … the road to 1-step generation", and Part F places it all
+in the DDPM family.</p>
+<h3>The InstaFlow pipeline: three stages (README "Method" + paper §3)</h3>
+<p><strong>Stage 1 — Generate coupled (text, noise, image) triplets from the
+teacher.</strong> Take pre-trained SD 1.5 and a subset of text prompts from
+laion2B-en. For each prompt, sample <code>X0 ~ N(0, I)</code> in latent space
+(shape <code>(4, 64, 64)</code>), run the teacher's ODE — 25-step DPM-Solver with CFG
+scale 6.0 (later runs used 5.0 to avoid over-saturation) — to get <code>X1</code>. Store
+the triplet <code>(T, X0, X1)</code>. ~1.6M pairs for the reflow stage and another 1.6M
+for distillation. Note that CFG is applied <em>while generating the pairs</em>, so
+guidance is partially baked into the coupling — this is why the 2-RF
+checkpoint wants only <code>guidance_scale ≈ 1.5</code> at inference instead of SD's
+7.5 (code README: "optimal range is [1.0, 2.0]").</p>
+<p><strong>Stage 2 — Text-conditioned Reflow → 2-Rectified Flow.</strong> Initialize <code>v_θ</code>
+from SD 1.5's UNet and minimize</p>
+<pre><code>L = E over (T, X0, X1), t~U[0,1] of  || (X1 − X0) − v_θ(Xt, t | T) ||²
+    with  Xt = t·X1 + (1−t)·X0
+</code></pre>
+<p>— literally 06 Part E's training algorithm with coupled pairs and a text
+condition. Time runs <strong>0 = noise → 1 = image</strong> (RF convention, same as our
+notes; opposite to DDPM). This retraining straightens the marginal flow:
+because each <code>X0</code> now has a unique partner <code>X1</code>, arrows through a point stop
+disagreeing, the average stops bending, and (06 §A1 Fact 1) a nearly straight
+flow is nearly exactly integrable by ONE Euler step. Already at this stage
+the model generates decent images in 2–8 steps. Cost: ~75 A100 GPU days
+(11.2 + 64, two sub-stages of 70k + 25k iterations).</p>
+<p><strong>Stage 3 — Distill 2-RF into a true one-step model (InstaFlow).</strong> Freeze the
+straightened coupling <code>(X0, X1' = ODE_2RF(X0))</code> and train a copy of the 2-RF
+UNet so that a <em>single</em> Euler step reproduces the endpoint:</p>
+<pre><code>L = E over (T, X0) of  D( ODE_2RF(X0 | T),  X0 + v_θ(X0 | T) )
+</code></pre>
+<p>where <code>D</code> is a differentiable image similarity — first L2, then <strong>LPIPS</strong>
+(perceptual distance computed on decoded images), which "significantly
+improves" the one-step FID. Distillation is cheap conceptually because the
+map being fit is now <em>nearly one-to-one and nearly linear</em>: the student only
+has to absorb the small residual curvature, not resolve a many-to-many
+assignment. Cost: ~108 A100 GPU days (54.4 L2 + 53.6 LPIPS). Total pipeline:
+199 A100 GPU days — the README's headline "merely supervised training".</p>
+<p>The README stresses that <strong>reflow and distillation are orthogonal
+techniques</strong>: reflow changes <em>which</em> noise goes with which image
+(the coupling); distillation compresses the solver. Doing distillation
+<em>after</em> straightening is the key ordering — the paper's ablation
+(direct SD distillation FID 37.2 vs 2-RF distillation 23.3 on MS COCO
+2017-5k) is the quantitative form of "don't ask a one-step student to average
+a curved, many-to-many flow." Final results: InstaFlow-0.9B, FID 23.3 in
+~0.09s/image; a wider 1.7B variant reaches 22.4; on MS COCO 2014-30k,
+FID 13.1 at 0.09s beats StyleGAN-T (13.9 at 0.1s).</p>
+<p><strong>What the shipped checkpoints are:</strong> <code>XCLiu/2_rectified_flow_from_sd_1_5</code> =
+Stage-2 output (few-step, supports CFG and negative prompts);
+<code>XCLiu/instaflow_0_9B_from_sd_1_5</code> = Stage-3 output (call with
+<code>num_inference_steps=1, guidance_scale=0.0</code>; no negative-prompt support —
+CFG was consumed during pair generation and distillation). Both are plain SD
+1.5-shaped UNets — which is why the pipeline below is 95% stock
+StableDiffusionPipeline and 5% new math, and why vanilla SD LoRAs/ControlNets
+still bolt on.</p>
+<hr />
+<h2><code>code/pipeline_rf.py</code> — the walkthrough</h2>
+<p>The file is a copy of diffusers 0.21.4's <code>StableDiffusionPipeline</code> with the
+denoising loop surgically replaced. We go top to bottom; stock-SD plumbing is
+grouped and summarized (read once, then trust), the rectified-flow surgery is
+line by line.</p>
+<h3>Lines 1–39 — License and imports</h3>
+<pre><code class="language-python">import inspect
+from typing import Any, Callable, Dict, List, Optional, Union
+
+import torch
+from packaging import version
+from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
+</code></pre>
+<p>Standard-library helpers (<code>inspect</code> is used later to sniff a scheduler's
+signature), type hints, PyTorch, and the three CLIP pieces from HuggingFace
+<code>transformers</code>: the image processor (feeds the safety checker), the text
+encoder (prompt → embeddings), and the tokenizer (string → token ids).</p>
+<pre><code class="language-python">from diffusers.configuration_utils import FrozenDict
+from diffusers.image_processor import VaeImageProcessor
+from diffusers.loaders import FromSingleFileMixin, LoraLoaderMixin, TextualInversionLoaderMixin
+from diffusers.models import AutoencoderKL, UNet2DConditionModel
+from diffusers.models.lora import adjust_lora_scale_text_encoder
+from diffusers.schedulers import KarrasDiffusionSchedulers
+from diffusers.utils import (deprecate, logging, replace_example_docstring)
+from diffusers.utils.torch_utils import randn_tensor
+from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
+from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
+</code></pre>
+<p>The diffusers toolbox: <code>AutoencoderKL</code> is the VAE (pixels ↔ latents),
+<code>UNet2DConditionModel</code> is the network that will play the role of our velocity
+field <code>v_θ</code>, the three loader mixins add <code>.load_lora_weights()</code> /
+textual-inversion / single-<code>.ckpt</code> loading for free, <code>randn_tensor</code> is a
+device- and generator-aware <code>torch.randn</code>, and <code>DiffusionPipeline</code> is the
+base class that provides <code>from_pretrained</code>, <code>.to(device)</code>, model
+registration, CPU offload, and the progress bar. Note
+<code>KarrasDiffusionSchedulers</code> is imported only as a <em>type annotation</em> — spoiler
+for the punchline below: <strong>this pipeline never calls the scheduler</strong>.</p>
+<pre><code class="language-python">logger = logging.get_logger(__name__)
+</code></pre>
+<p>Diffusers' logger, used for the truncation and safety-checker warnings.</p>
+<h3>Lines 42–53 — <code>rescale_noise_cfg</code> (dead code — flagged honestly)</h3>
+<pre><code class="language-python">def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
+    std_text = noise_pred_text.std(dim=list(range(1, noise_pred_text.ndim)), keepdim=True)
+    std_cfg = noise_cfg.std(dim=list(range(1, noise_cfg.ndim)), keepdim=True)
+    noise_pred_rescaled = noise_cfg * (std_text / std_cfg)
+    noise_cfg = guidance_rescale * noise_pred_rescaled + (1 - guidance_rescale) * noise_cfg
+    return noise_cfg
+</code></pre>
+<p>A CFG-overexposure fix from arXiv 2305.08891: after guidance amplifies the
+prediction, rescale its per-sample standard deviation back toward the
+text-conditional one, then blend by <code>guidance_rescale</code>. <strong>Quirk: in this file
+the function is defined but never called.</strong> <code>__call__</code> accepts a
+<code>guidance_rescale</code> argument (line 527) and then ignores it — both are
+leftovers from the stock SD pipeline this file was copied from. If you pass
+<code>guidance_rescale=0.7</code> expecting an effect, you get nothing.</p>
+<h3>Lines 56–92 — Class declaration</h3>
+<pre><code class="language-python">class RectifiedFlowPipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin, FromSingleFileMixin):
+</code></pre>
+<p>The one new class. The docstring says it plainly: "Pipeline for text-to-image
+generation using Rectified Flow and Euler discretization … based on
+StableDiffusionPipeline from the official Diffusers library (0.21.4)."
+Multiple inheritance = base pipeline machinery + three loading conveniences.</p>
+<pre><code class="language-python">    model_cpu_offload_seq = &quot;text_encoder-&gt;unet-&gt;vae&quot;
+    _optional_components = [&quot;safety_checker&quot;, &quot;feature_extractor&quot;]
+    _exclude_from_cpu_offload = [&quot;safety_checker&quot;]
+</code></pre>
+<p>Metadata read by <code>DiffusionPipeline</code>: in what order to shuttle submodels
+between CPU and GPU when offloading is enabled (matches the order they're
+used during a generation), which components may be <code>None</code>, and which never
+get offloaded.</p>
+<h3>Lines 93–181 — <code>__init__</code>: register the parts, patch old configs</h3>
+<pre><code class="language-python">    def __init__(self, vae, text_encoder, tokenizer, unet, scheduler,
+                 safety_checker, feature_extractor, requires_safety_checker=True):
+        super().__init__()
+</code></pre>
+<p>The seven components of a Stable Diffusion checkpoint, injected by
+<code>from_pretrained</code> (which reads the checkpoint's <code>model_index.json</code> and builds
+each one). Nothing rectified-flow-specific yet.</p>
+<p>Then four defensive blocks, all stock SD, all "fix ancient checkpoint
+configs and warn" — grouped here, read once:</p>
+<ul>
+<li><strong><code>steps_offset != 1</code> patch (106–118)</strong> and <strong><code>clip_sample</code> patch
+  (120–131)</strong>: old scheduler configs stored on the Hub had wrong defaults;
+  the code emits a deprecation warning and hot-patches
+  <code>scheduler._internal_dict</code>. Ironic given the scheduler is never used, but
+  harmless.</li>
+<li><strong>Safety-checker warnings (133–147)</strong>: warn if you disabled it; error if
+  you kept it but forgot the <code>feature_extractor</code> it needs.</li>
+<li><strong><code>sample_size &lt; 64</code> patch (149–168)</strong>: pre-0.9.0 SD checkpoints
+  mis-declared the UNet's latent resolution as 32; patch it to 64.</li>
+</ul>
+<pre><code class="language-python">        self.register_modules(vae=vae, text_encoder=text_encoder, tokenizer=tokenizer,
+            unet=unet, scheduler=scheduler, safety_checker=safety_checker,
+            feature_extractor=feature_extractor)
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+        self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
+        self.register_to_config(requires_safety_checker=requires_safety_checker)
+</code></pre>
+<p><code>register_modules</code> is what makes <code>pipe.to("cuda")</code> and <code>save_pretrained</code> see
+the submodels. <code>vae_scale_factor</code>: SD's VAE has 4 resolution blocks, so
+2³ = <strong>8</strong> — a 512×512 image lives as a 64×64 latent. <code>VaeImageProcessor</code>
+handles the final tensor→PIL conversion including the <code>[−1,1] → [0,1]</code>
+denormalize.</p>
+<h3>Lines 183–210 — VAE slicing/tiling toggles</h3>
+<p>Four two-line methods (<code>enable_vae_slicing</code>, <code>disable_vae_slicing</code>,
+<code>enable_vae_tiling</code>, <code>disable_vae_tiling</code>) that just forward to the VAE:
+decode in batch-slices or spatial tiles to save memory on big
+batches/resolutions. Pure pass-throughs; no RF content.</p>
+<h3>Lines 212–240 — <code>_encode_prompt</code> (deprecated shim)</h3>
+<p>Old API kept for backwards compatibility: calls the new <code>encode_prompt</code>
+(next) and re-concatenates its <code>(positive, negative)</code> tuple into the single
+tensor the old API returned — note the order <code>[negative, positive]</code>
+(<code>torch.cat([prompt_embeds_tuple[1], prompt_embeds_tuple[0]])</code>), the same
+uncond-first order used in the CFG batch later. Skim and move on.</p>
+<h3>Lines 242–399 — <code>encode_prompt</code>: text → embeddings (stock SD, but shapes matter)</h3>
+<p>This is the standard SD prompt encoder, copied verbatim. The flow, with
+shapes for batch size B and <code>num_images_per_prompt = n</code>:</p>
+<pre><code class="language-python">        if lora_scale is not None and isinstance(self, LoraLoaderMixin):
+            self._lora_scale = lora_scale
+            adjust_lora_scale_text_encoder(self.text_encoder, lora_scale)
+</code></pre>
+<p>If the text encoder carries LoRA layers, set their global scale first.</p>
+<pre><code class="language-python">        text_inputs = self.tokenizer(prompt, padding=&quot;max_length&quot;,
+            max_length=self.tokenizer.model_max_length, truncation=True, return_tensors=&quot;pt&quot;)
+</code></pre>
+<p>Tokenize to exactly 77 tokens (CLIP's max): pad short prompts, truncate long
+ones. The block that follows re-tokenizes with <code>padding="longest"</code> purely to
+<em>detect</em> truncation and print a warning naming the dropped words — a nice
+UX touch, no effect on computation.</p>
+<pre><code class="language-python">        prompt_embeds = self.text_encoder(text_input_ids.to(device), attention_mask=attention_mask)
+        prompt_embeds = prompt_embeds[0]
+</code></pre>
+<p>Run CLIP; take the last hidden state, <strong>shape (B, 77, 768)</strong> for SD 1.5.
+(<code>attention_mask</code> is only passed for text encoders configured to want it —
+CLIP in SD 1.5 is not.)</p>
+<pre><code class="language-python">        bs_embed, seq_len, _ = prompt_embeds.shape
+        prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
+        prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+</code></pre>
+<p>The repeat-then-view dance duplicates each prompt's embedding for each image
+requested: (B, 77, 768) → (B, 77·n, 768) → <strong>(B·n, 77, 768)</strong>. (Repeating
+along dim 1 then viewing is an MPS-friendly equivalent of
+<code>repeat_interleave</code> on dim 0.)</p>
+<p>Lines 346–397: if CFG is on and no precomputed negatives were passed, build
+the <strong>unconditional</strong> embeddings — from <code>negative_prompt</code> if given, else from
+the empty string <code>""</code> — with type/batch-size validation, then the same
+tokenize → encode → repeat dance, giving <code>negative_prompt_embeds</code> of the same
+<strong>(B·n, 77, 768)</strong>. Returns the pair <code>(prompt_embeds,
+negative_prompt_embeds)</code>.</p>
+<h3>Lines 401–441 — Safety checker, deprecated decoder, scheduler-kwargs sniffer</h3>
+<pre><code class="language-python">    def run_safety_checker(self, image, device, dtype):
+</code></pre>
+<p>If a safety checker exists: CLIP-embed the decoded images and let the checker
+black out flagged ones; returns <code>(image, has_nsfw_concept)</code>. (The code README
+warns that for reproducing paper FID you should disable it — false positives
+become black images and inflate FID.)</p>
+<pre><code class="language-python">    def decode_latents(self, latents):
+        latents = 1 / self.vae.config.scaling_factor * latents
+        image = self.vae.decode(latents, return_dict=False)[0]
+        image = (image / 2 + 0.5).clamp(0, 1)
+</code></pre>
+<p>Deprecated but instructive: SD latents are stored multiplied by
+<code>scaling_factor</code> (0.18215) so they're roughly unit-variance; decoding undoes
+that, and the VAE's <code>[−1,1]</code> output maps to <code>[0,1]</code>. The live path does the
+same thing inline at line 684.</p>
+<pre><code class="language-python">    def prepare_extra_step_kwargs(self, generator, eta):
+        accepts_eta = &quot;eta&quot; in set(inspect.signature(self.scheduler.step).parameters.keys())
+        ...
+</code></pre>
+<p>Uses <code>inspect</code> to check whether <code>scheduler.step</code> accepts <code>eta</code>/<code>generator</code>.
+<strong>Quirk: pure vestige.</strong> This pipeline never calls <code>scheduler.step</code>, and the
+dict this returns is built at line 654 and then never read. The <code>eta</code>
+argument of <code>__call__</code> is likewise decorative.</p>
+<h3>Lines 443–488 — <code>check_inputs</code>: fail fast</h3>
+<p>Validation only, grouped: height/width divisible by 8 (the VAE downsamples
+by 8, so odd sizes can't round-trip); <code>callback_steps</code> a positive int;
+exactly one of <code>prompt</code> / <code>prompt_embeds</code>; not both <code>negative_prompt</code> and
+<code>negative_prompt_embeds</code>; and if both embeds are passed directly their shapes
+must match (they get concatenated for CFG).</p>
+<h3>Lines 490–505 — <code>prepare_latents</code>: draw <code>X0</code></h3>
+<pre><code class="language-python">    def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
+        shape = (batch_size, num_channels_latents, height // self.vae_scale_factor, width // self.vae_scale_factor)
+</code></pre>
+<p>The starting noise shape: <strong>(B·n, 4, H/8, W/8)</strong> — (1, 4, 64, 64) for one
+512×512 image. In RF language this is <code>X0</code>, the t=0 end of the straight line.</p>
+<pre><code class="language-python">        if latents is None:
+            latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+        else:
+            latents = latents.to(device)
+        latents = latents * self.scheduler.init_noise_sigma
+</code></pre>
+<p>Fresh <code>N(0, I)</code> noise (reproducible via <code>generator</code>), or user-supplied
+latents (how the README's latent-interpolation video is made: interpolate two
+noises, feed them in here). The <code>init_noise_sigma</code> multiply is stock-SD
+scaling for sigma-based schedulers; for the scheduler config these
+checkpoints ship, it's 1.0 — a no-op kept for structural fidelity.</p>
+<h3>Lines 507–655 — <code>__call__</code> part 1: setup</h3>
+<pre><code class="language-python">    @torch.no_grad()
+    def __call__(self, prompt=None, height=None, width=None,
+        num_inference_steps: int = 50, guidance_scale: float = 7.5, ...):
+</code></pre>
+<p>Inference only, so no autograd (same reason as lab1 Cell 2's
+<code>@torch.no_grad()</code>). <strong>Quirk: the defaults are inherited from SD and are
+wrong for both shipped checkpoints.</strong> The code README tells you what to
+actually pass: 2-RF wants <code>num_inference_steps</code> 2–25 and <code>guidance_scale</code>
+1.0–2.0; InstaFlow-0.9B wants exactly <code>num_inference_steps=1,
+guidance_scale=0.0</code>. The long docstring (529–593) is stock SD.</p>
+<pre><code class="language-python">        height = height or self.unet.config.sample_size * self.vae_scale_factor
+        width = width or self.unet.config.sample_size * self.vae_scale_factor
+</code></pre>
+<p>Default 64·8 = 512. Then <code>check_inputs</code> (599), and batch size inferred from
+<code>prompt</code> (str → 1, list → len, else from <code>prompt_embeds.shape[0]</code>).</p>
+<pre><code class="language-python">        do_classifier_free_guidance = guidance_scale &gt; 1.0
+</code></pre>
+<p>CFG switch, same convention as SD (w=1 ⇒ formula collapses to the
+conditional prediction, so skip the double pass). Consequence worth knowing:
+for one-step InstaFlow, <code>guidance_scale=0.0</code> and <code>1.0</code> behave <em>identically</em> —
+CFG is off either way and the scale value is never multiplied in. The
+README's <code>0.0</code> is a signal to the reader, not a different computation.</p>
+<pre><code class="language-python">        prompt_embeds, negative_prompt_embeds = self.encode_prompt(...)
+        if do_classifier_free_guidance:
+            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
+</code></pre>
+<p>Encode, then stack <strong>uncond first, cond second</strong> into one <strong>(2·B·n, 77,
+768)</strong> tensor so both CFG branches ride one UNet forward pass (notes 11).</p>
+<pre><code class="language-python">        # 4. Prepare timesteps
+        timesteps = [(1. - i/num_inference_steps) * 1000. for i in range(num_inference_steps)]
+</code></pre>
+<p><strong>The first rectified-flow line in the file, and the timestep-convention
+gymnastics live here.</strong> Unpack it. Let <code>N = num_inference_steps</code> and let
+<code>s = i/N</code> be RF time (0 = noise → 1 = image, our notes-06 convention). The
+code computes <code>t_unet = 1000·(1 − s)</code>:</p>
+<ul>
+<li><code>N=1</code> → <code>timesteps = [1000.0]</code></li>
+<li><code>N=2</code> → <code>[1000.0, 500.0]</code></li>
+<li><code>N=25</code> → <code>[1000.0, 960.0, …, 40.0]</code></li>
+</ul>
+<p>Three things to notice, honestly:</p>
+<ol>
+<li><strong>The UNet keeps SD's clock.</strong> SD's UNet was pre-trained with integer
+   timesteps 0..999 where <em>large = noisy</em>. Reflow fine-tuning kept that
+   convention (queried at continuous values) so the network's time embedding
+   starts from meaningful pre-trained features: RF time <code>s</code> is mapped to
+   <code>1000(1−s)</code> before hitting the UNet. The Euler loop below marches <code>s</code>
+   forward 0→1 while the number fed to the UNet counts <em>down</em> 1000→1000/N.</li>
+<li><strong><code>t_unet = 1000</code> is outside SD's original 0..999 grid</strong>, and the values
+   are floats (960.0), not integers. Both are fine mechanically — the
+   sinusoidal timestep embedding accepts any float (same fact we noted in 06
+   Part E for our own UNet) — and the reflow fine-tune trained the model at
+   exactly these query points, so this is the convention the checkpoint
+   <em>expects</em>. But do not feed this pipeline a vanilla SD checkpoint: it would
+   see timesteps it half-recognizes and a velocity target it never learned.</li>
+<li><strong>These are left endpoints; the grid never touches <code>t_unet = 0</code></strong> (RF
+   time never reaches 1 inside the loop — the final Euler step <em>lands</em> there).
+   For <code>N=1</code> the single query is at pure noise, <code>s=0</code>: one-step generation
+   evaluates the velocity field once, at the noise itself.</li>
+</ol>
+<p>No scheduler involved: compare stock SD's
+<code>self.scheduler.set_timesteps(...)</code> — deleted, replaced by one list
+comprehension. (The training scripts are not in this repo, so the exact
+training-time mapping is inferred from this inference code plus the paper's
+<code>Xt = t·X1 + (1−t)·X0</code> convention.)</p>
+<pre><code class="language-python">        num_channels_latents = self.unet.config.in_channels
+        latents = self.prepare_latents(batch_size * num_images_per_prompt, num_channels_latents, ...)
+</code></pre>
+<p>Draw <code>X0</code>: <strong>(B·n, 4, 64, 64)</strong>.</p>
+<pre><code class="language-python">        extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
+        dt = 1.0 / num_inference_steps
+</code></pre>
+<p>First line: the unused vestige (see above). Second line: <strong>the RF step
+size</strong> — uniform Euler steps over the unit interval, <code>Δ = 1/N</code>. For <code>N=1</code>,
+<code>dt = 1.0</code>: one step covers the whole trip. This is 06 §A1 Fact 2 with the
+biggest possible Δ, justified only because reflow made the path straight
+(Fact 1).</p>
+<h3>Lines 657–680 — <code>__call__</code> part 2: <strong>the Euler loop (the whole point)</strong></h3>
+<pre><code class="language-python">        # 7. Denoising loop of Euler discretization from t = 0 to t = 1
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            for i, t in enumerate(timesteps):
+</code></pre>
+<p>The comment states the RF convention outright. Compare this loop to lab1's
+<code>EulerSimulator.step</code> — it is the same three-line idea wearing SD clothes.</p>
+<pre><code class="language-python">                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+</code></pre>
+<p>CFG batching: duplicate the state to (2·B·n, 4, 64, 64) so the uncond and
+cond halves (matching the <code>[negative, positive]</code> embed order) share one
+forward pass. Without CFG, pass latents straight through — the one-step
+InstaFlow path takes this branch, so one image really is ONE UNet call.</p>
+<pre><code class="language-python">                vec_t = torch.ones((latent_model_input.shape[0],), device=latents.device) * t
+</code></pre>
+<p>Broadcast the scalar timestep to a per-sample vector, shape <strong>(2·B·n,)</strong> (or
+(B·n,)): every sample shares one clock, but the UNet API wants one timestep
+per batch element. Note it's a <em>float</em> tensor — continuous time, as promised.</p>
+<pre><code class="language-python">                v_pred = self.unet(latent_model_input, vec_t, encoder_hidden_states=prompt_embeds).sample
+</code></pre>
+<p><strong>The UNet as velocity field.</strong> Architecturally this is exactly SD 1.5's
+<code>UNet2DConditionModel</code>; only the <em>meaning</em> of the output changed. Stock SD:
+<code>eps_pred</code>, "which noise was added." Post-reflow: <code>v_pred ≈ E[X1 − X0 | Xt]</code>,
+"the arrow from your noise toward your image" (06 Part C/D — same interface,
+different target, exactly as our notes said: "the same interface as DDPM's
+ε_θ(x_t, t), just a different meaning for the output"). Shape out = shape in:
+<strong>(2·B·n, 4, 64, 64)</strong>.</p>
+<pre><code class="language-python">                if do_classifier_free_guidance:
+                    v_pred_neg, v_pred_text = v_pred.chunk(2)
+                    v_pred = v_pred_neg + guidance_scale * (v_pred_text - v_pred_neg)
+</code></pre>
+<p>CFG applied <strong>to velocities, not noise predictions</strong> — the same affine
+extrapolation as notes 11, <code>v = v_neg + w·(v_text − v_neg)</code>, which matches
+the paper's <code>α·v(Zt,t|T) + (1−α)·v(Zt,t|NULL)</code> with <code>α = guidance_scale</code>.
+Chunk order follows the embed concat: first half uncond/negative, second half
+text. Because guidance was already baked into the teacher pairs (Stage 1),
+<code>w ≈ 1.5</code> suffices for 2-RF where raw SD needed 7.5 — over-guiding a model
+whose training data was <em>already</em> guided causes the over-saturation the paper
+mentions.</p>
+<pre><code class="language-python">                latents = latents + dt * v_pred
+</code></pre>
+<p><strong>The most important line in the repository.</strong> Euler's method, verbatim from
+06 §A1 Fact 2: where you'll be = where you are + arrow × time. No scheduler
+<code>step()</code>, no <code>alpha_prod</code> gymnastics, no posterior variance, no noise
+re-injection — compare a DDPM/DDIM <code>step</code> and enjoy. With <code>N=1</code> this line
+runs once and reads <code>image_latent = noise + v(noise, prompt)</code>: <strong>the entire
+one-step generation path.</strong> Everything InstaFlow's 199 GPU days bought is the
+right to trust this single addition — straight trajectory ⇒ constant velocity
+⇒ Euler exact in one giant step (06 §A1 Fact 1). Also note the update uses
+<code>latents</code> (batch B·n), not <code>latent_model_input</code> (2·B·n) — the CFG duplicate
+was only ever a compute trick.</p>
+<pre><code class="language-python">                if i == len(timesteps) - 1 or ((i + 1) % self.scheduler.order == 0):
+                    progress_bar.update()
+                    if callback is not None and i % callback_steps == 0:
+                        step_idx = i // getattr(self.scheduler, &quot;order&quot;, 1)
+                        callback(step_idx, t, latents)
+</code></pre>
+<p>Progress-bar and user-callback bookkeeping, copied from stock SD. The
+<code>scheduler.order</code> references (order = 1 for first-order schedulers) are the
+scheduler's only appearances inside the loop — cosmetic.</p>
+<h3>Lines 683–703 — <code>__call__</code> part 3: decode and return</h3>
+<pre><code class="language-python">        if not output_type == &quot;latent&quot;:
+            image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
+            image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
+        else:
+            image = latents
+            has_nsfw_concept = None
+</code></pre>
+<p>Latents <code>X1</code> (B·n, 4, 64, 64) → undo the 0.18215 scaling → VAE decode →
+pixels <strong>(B·n, 3, 512, 512)</strong> in <code>[−1, 1]</code> → safety check. Or hand back raw
+latents if asked.</p>
+<pre><code class="language-python">        if has_nsfw_concept is None:
+            do_denormalize = [True] * image.shape[0]
+        else:
+            do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
+        image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
+</code></pre>
+<p>Per-image <code>[−1,1] → [0,1]</code> denormalize — skipped for flagged images, which
+the safety checker already replaced with black (already in <code>[0,1]</code>). Then
+tensor → numpy/PIL per <code>output_type</code>.</p>
+<pre><code class="language-python">        self.maybe_free_model_hooks()
+        if not return_dict:
+            return (image, has_nsfw_concept)
+        return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+</code></pre>
+<p>Release CPU-offload hooks, and return in SD's standard envelope —
+<code>result.images[0]</code> is your picture.</p>
+<p><strong>Scorecard vs stock StableDiffusionPipeline</strong> — the entire diff is:
+(a) the <code>timesteps</code> list comprehension replacing <code>scheduler.set_timesteps</code>,
+(b) <code>dt = 1/N</code>, (c) <code>v_pred</code> naming + CFG on velocities,
+(d) <code>latents = latents + dt * v_pred</code> replacing <code>scheduler.step(...)</code>.
+Four edits. The scheduler object, <code>eta</code>, <code>extra_step_kwargs</code>,
+<code>guidance_rescale</code>, and <code>rescale_noise_cfg</code> all remain as fossils of the
+original — a nice reminder that "rectified flow inference" is a <em>simpler</em>
+special case of what the SD machinery already does, not a more complex one.</p>
+<hr />
+<h2><code>code/rf_lora.py</code> — briefly: bolting community styles onto a one-step model</h2>
+<p>This script demonstrates the README's "compatible with pre-trained LoRAs"
+claim. Why it works at all: InstaFlow's UNet is a <em>fine-tune</em> of SD 1.5's
+UNet (same architecture, nearby weights), so weight <em>deltas</em> that restyle SD
+approximately restyle InstaFlow too.</p>
+<pre><code class="language-python">def merge_dW_to_unet(pipe, dW_dict, alpha=1.0):
+    _tmp_sd = pipe.unet.state_dict()
+    for key in dW_dict.keys():
+        _tmp_sd[key] += dW_dict[key] * alpha
+    pipe.unet.load_state_dict(_tmp_sd, strict=False)
+</code></pre>
+<p>Task-vector arithmetic on raw state dicts: add a scaled weight-difference
+dictionary into the UNet. <code>strict=False</code> tolerates keys the checkpoint
+doesn't cover.</p>
+<pre><code class="language-python">def load_hf_hub_lora(pipe_rf, lora_path='Lykon/dreamshaper-7', ...):
+    ...
+    dW_dict[key] = lora_unet_checkpoint[key] - sd_state_dict[key]
+</code></pre>
+<p>Despite the "lora" name, this path handles <em>full fine-tuned</em> checkpoints
+(e.g., DreamShaper): download base SD 1.5 and the styled model, form
+<code>dW = W_styled − W_SD15</code> per tensor, then <code>W_instaflow + dW</code>. It also swaps
+in the styled model's VAE and text encoder wholesale. This is the "InstaFlow
++ dreamshaper-7" combo the HF Space demo uses.</p>
+<pre><code class="language-python">def load_civitai_lora(pipeline, checkpoint_path, multiplier, device, dtype):
+    ...
+    curr_layer.weight.data += multiplier * alpha * torch.mm(weight_up, weight_down)
+</code></pre>
+<p>The true low-rank path, for CivitAI <code>.safetensors</code> LoRAs: parse key names
+like <code>lora_unet_..._proj.lora_down.weight</code>, walk the module tree attribute by
+attribute to find the target layer (the odd <code>while len(layer_infos) &gt; -1:</code>
+is an always-true loop escaped by <code>break</code> — janky, works), then merge
+<code>ΔW = α/rank · (up @ down)</code> directly into <code>weight.data</code> (with a
+squeeze/unsqueeze dance for conv layers, whose weights are 4-D). Merging into
+weights (rather than keeping LoRA as runtime adapters) keeps one-step
+inference at exactly one unmodified UNet call.</p>
+<pre><code class="language-python">def main(args):
+    if args.instaflow:
+        pipe = RectifiedFlowPipeline.from_pretrained(&quot;XCLiu/instaflow_0_9B_from_sd_1_5&quot;, ...)
+    else:
+        pipe = RectifiedFlowPipeline.from_pretrained(&quot;XCLiu/2_rectified_flow_from_sd_1_5&quot;, ...)
+</code></pre>
+<p>Same pipeline class for both checkpoints — only the call differs:</p>
+<pre><code class="language-python">    if args.instaflow:
+        images = pipe(args.prompt, num_inference_steps=1, guidance_scale=1.0, ...).images
+    else:
+        images = pipe(prompt=args.prompt, negative_prompt=&quot;painting, unreal, twisted&quot;,
+                      num_inference_steps=n_step, guidance_scale=1.5, ...).images
+</code></pre>
+<p>InstaFlow: 1 step, guidance 1.0 (= CFG off; identical to the README's 0.0 —
+see the <code>&gt; 1.0</code> switch above), no negative prompt. 2-RF: default 25 steps,
+guidance 1.5, negative prompts fine. The rest of <code>main</code> is filename
+plumbing for saving the PNG.</p>
+<hr />
+<h2>What to carry forward (InstaFlow → everything else)</h2>
+<ol>
+<li><strong>Straighten, then distill.</strong> Distilling a curved flow asks a one-step
+   student to fit a many-to-many map — it learns a blur (06 §A3: least
+   squares learns the average). Reflow first makes the noise→image coupling
+   deterministic and the map nearly linear; distillation then only mops up
+   residual curvature. 37.2 → 23.3 FID is the price of skipping this.</li>
+<li><strong>Reflow = the FM training loop with the pairs swapped</strong>: same
+   <code>‖(X1−X0) − v(Xt,t)‖²</code> loss (06 Part E), but <code>(X0, X1)</code> are <em>coupled</em>
+   endpoints of the teacher's own ODE, not independent draws. We built
+   exactly this in KAIST Assignment 3's <code>RectFlowDataset</code>.</li>
+<li><strong>Straight ⇒ Euler exact ⇒ <code>x1 = x0 + v(x0)</code></strong> (06 §A1 Facts 1–2). The
+   entire sampler is <code>latents = latents + dt * v_pred</code>; one-step generation
+   is that line with <code>dt = 1.0</code>.</li>
+<li><strong>Conventions are gymnastics, contracts are forever.</strong> RF time <code>s ∈ [0,1]</code>
+   (0 = noise) is fed to SD's UNet as <code>1000·(1−s)</code> — continuous, hitting
+   1000 (outside the original 0..999 grid), never hitting 0 — because the
+   checkpoint was fine-tuned to expect exactly that. Interface unchanged,
+   semantics retrained: <code>ε_θ</code> became <code>v_θ</code> without touching architecture.</li>
+<li><strong>CFG extrapolates whatever the network predicts</strong> — noise in SD,
+   velocity here — and guidance baked into the <em>training pairs</em> means far
+   less guidance needed at inference (1.5 vs 7.5), and none at all for the
+   distilled one-step model.</li>
+<li>Reading pipelines: diff against the stock one. Here the diff is four
+   edits, and the leftover fossils (<code>scheduler</code>, <code>eta</code>, unused
+   <code>rescale_noise_cfg</code>) tell you the true story — RF inference <em>removes</em>
+   machinery.</li>
+</ol>
+<p><strong>References:</strong> InstaFlow: Liu, Zhang, Ma, Peng, Liu, "InstaFlow: One Step
+is Enough for High-Quality Diffusion-Based Text-to-Image Generation," ICLR
+2024, arXiv 2309.06380. Rectified Flow / Reflow: Liu, Gong, Liu, "Flow
+Straight and Fast: Learning to Generate and Transfer Data with Rectified
+Flow," arXiv 2209.03003. Our notes: <code>06_flow_matching_from_zero.md</code>
+(Parts A, C–F), <code>10_ddim_dpmsolver_from_zero.md</code>, <code>11_guidance_from_zero.md</code>;
+KAIST <code>Diffusion-2025-Assignment3-Flow/flow_matching_solved.ipynb</code>.</p></div></body></html>

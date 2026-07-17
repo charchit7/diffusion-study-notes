@@ -1,0 +1,620 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LCM Distillation, Line by Line</title><style>
+  :root { --ground:#F7F8FA; --ink:#1D2634; --muted:#5F6E80;
+          --accent:#31599B; --rule:#DDE3EA; --card:#EEF1F5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ground:#12161D; --ink:#D9DEE6; --muted:#8B99AB;
+            --accent:#8FB3E2; --rule:#28303C; --card:#1A202A; } }
+  html { background: var(--ground); }
+  body { margin:0; color:var(--ink);
+    font-family: Charter, Georgia, 'Times New Roman', serif;
+    font-size:1.05rem; line-height:1.66; }
+  .wrap { max-width:72ch; margin:0 auto; padding:2.2rem 1.25rem 4rem; }
+  .eyebrow { font-family:system-ui,sans-serif; font-size:.72rem; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--muted); margin:0 0 .6rem; }
+  h1 { font-size:1.75rem; line-height:1.22; margin:0 0 1.2rem; }
+  h2 { font-size:1.28rem; margin:2.4rem 0 .7rem; padding-top:1.2rem;
+       border-top:1px solid var(--rule); }
+  h3 { font-size:1.08rem; margin:1.8rem 0 .5rem; color:var(--accent); }
+  p, li { margin:0 0 .95rem; } ul, ol { padding-left:1.3rem; }
+  blockquote { border-left:3px solid var(--accent); background:var(--card);
+    margin:1.2rem 0; padding:.7rem 1rem; border-radius:0 6px 6px 0; }
+  pre { background:var(--card); border-radius:6px; padding:.9rem 1rem;
+    overflow-x:auto; font-size:.82rem; line-height:1.5; }
+  code { font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+    font-size:.86em; background:var(--card); padding:.08em .3em; border-radius:4px; }
+  pre code { background:none; padding:0; }
+  .tablewrap { overflow-x:auto; margin:1.2rem 0; }
+  table { border-collapse:collapse; width:100%;
+    font-family:system-ui,sans-serif; font-size:.86rem; }
+  th, td { text-align:left; padding:.45rem .65rem; border-bottom:1px solid var(--rule); }
+  th { font-size:.7rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
+  a { color:var(--accent); }
+</style></head><body>
+<div class="wrap"><p class="eyebrow">Distillation 2/5 · <a href="index.html">index</a></p><h1>LCM Distillation, Line by Line — <code>train_lcm_distill_sd_wds.py</code></h1>
+<p><em>A beginner's reading companion to
+<code>distillation/latent-consistency-model/LCM_Training_Script/consistency_distillation/train_lcm_distill_sd_wds.py</code>
+(the LCM team's original release; the diffusers repo maintains a cleaned-up
+copy). Every load-bearing line: what it does, why it's there, and what breaks
+without it. Concepts link to our notes: DDIM step and x̂₀-identity = <code>10 §1.2</code>,
+CFG = <code>11 §4–5</code>, ODE/velocity-field picture = <code>06 §A2</code> and <code>10 Part 3</code>.
+Paper: Luo et al. 2023, "Latent Consistency Models" (arXiv 2310.04378).</em></p>
+<p><strong>The method in one sentence:</strong> train a student U-Net so that its <em>one-jump
+guess of the clean image</em> is the same no matter where on a single (guidance-
+augmented) denoising trajectory you ask it — using the frozen Stable Diffusion
+teacher's DDIM steps to manufacture pairs of points on that trajectory — so
+that at inference the student can leap from pure noise to an image in 1–4
+steps, with classifier-free guidance already baked into its weights.</p>
+<hr />
+<h2>Methodology (read this before the code)</h2>
+<h3>1. The consistency function: f(x_t, t) → x₀</h3>
+<p>A diffusion sampler (notes <code>10 Part 3</code>) is a slow walk down the
+<strong>probability-flow ODE (PF-ODE)</strong>: a deterministic trajectory
+{x_T, …, x_t, …, x₀} connecting noise to one specific image. Every point on
+one trajectory "belongs to" the same endpoint x₀.</p>
+<p>A <strong>consistency model</strong> (Song et al. 2023, which LCM builds on) learns that
+endpoint map directly: a function f(x_t, t) that outputs the trajectory's
+<em>origin</em> x₀ from any point on it. If you have f, sampling is one function
+call: draw x_T ~ N(0, I), output f(x_T, T). Done. (Few-step variants
+alternate: predict x₀, re-noise to a smaller t, predict again — that is what
+<code>LCMScheduler</code> does at 4 steps.)</p>
+<h3>2. Self-consistency, and why distillation needs a teacher</h3>
+<p>How do you train f without ever running a full trajectory? Exploit its
+defining property, <strong>self-consistency</strong>: any two points on the <em>same</em>
+trajectory must map to the <em>same</em> origin,</p>
+<pre><code>f(x_t, t) = f(x_{t'}, t')   for all t, t' on one trajectory.
+</code></pre>
+<p>So the loss is: take two adjacent points on one trajectory and penalize the
+distance between the student's two predictions. The catch: you need two points
+that genuinely lie on one trajectory. Data alone gives you x_t = ᾱ√·x₀ + σ·ε
+at any t (the forward marginal), but two independently-noised samples are NOT
+on a shared ODE path. The fix is <strong>distillation</strong>: from x_t, ask the <em>frozen
+teacher</em> (SD 1.5) for its noise prediction, and take one numerical <strong>DDIM
+step</strong> (notes <code>10 §1.2</code>, η = 0 case) to get x_{t−k}. Teacher + ODE solver =
+a trajectory oracle. Each training example is then a pair
+(x_t, x_{t−k}) on one (approximate) trajectory, and the loss pulls
+f_student(x_t, t) toward f_target(x_{t−k}, t−k). This is exactly Algorithm 1
+of the LCM paper (the code's comments cite it: "z_{t_{n+k}} in Algorithm 1").</p>
+<h3>3. The augmented PF-ODE: bake the guidance scale w into the model</h3>
+<p>Stable Diffusion is never sampled bare; it is sampled with <strong>classifier-free
+guidance</strong> (notes <code>11 §4</code>): ε̂<em>cfg = ε̂</em>∅ + s·(ε̂<em>c − ε̂</em>∅), which doubles
+the cost of every step (two U-Net calls, notes <code>11 §5</code>). Different s values
+define <em>different</em> vector fields, hence different PF-ODE trajectories — the
+LCM paper calls the family over all w the <strong>augmented PF-ODE</strong>.</p>
+<p>LCM distills the <em>guided</em> teacher: during training, a guidance scale w is
+sampled at random from U[w_min, w_max] per example, the teacher's CFG-combined
+prediction (at that w) drives the DDIM step, and w is fed to the <em>student</em> as
+an extra conditioning input — a sinusoidal <strong>w-embedding</strong> injected next to
+the timestep embedding. The student thus learns the whole family of guided
+trajectories at once, indexed by w. Payoff at inference: you get CFG-quality
+samples from <strong>one</strong> U-Net call per step — no unconditional pass, no
+doubling. Guidance becomes free.</p>
+<h3>4. EMA target network (avoiding self-referential collapse)</h3>
+<p>The self-consistency loss compares the student to <em>itself</em> at a different
+timestep. If both sides of the loss were the same live network, the trivial
+solution "output a constant" satisfies it. Consistency training therefore
+uses two copies:</p>
+<ul>
+<li><strong>online student</strong> <code>unet</code> — updated by the optimizer;</li>
+<li><strong>target student</strong> <code>target_unet</code> — updated only as an exponential moving
+  average of the online one (θ_target ← μ·θ_target + (1−μ)·θ_online,
+  μ = 0.95 here), never by gradients, and its prediction is wrapped in
+  <code>no_grad</code>.</li>
+</ul>
+<p>The target provides a slowly-moving, stable regression target — the same trick
+as target networks in Q-learning and the EMA teacher in BYOL.</p>
+<h3>5. The skipping-step technique (k = 20)</h3>
+<p>Adjacent fine-grained timesteps (t and t−1 out of 1000) give consistency
+targets that barely differ — tiny signal, slow convergence. LCM instead
+enforces consistency between points <strong>k steps apart</strong> on a coarse 50-point
+DDIM grid: with 1000 training timesteps and 50 DDIM timesteps, k = 1000/50 =
+20. One teacher DDIM step jumps t_{n+k} → t_n in a single solver call. This
+"skipping-step" schedule is the reason LCM distillation converges in a few
+thousand iterations rather than the hundreds of thousands the original
+consistency-models recipe needed.</p>
+<h3>6. Boundary conditions: c_skip, c_out, and f(x₀, 0) = x₀</h3>
+<p>Self-consistency alone is satisfied by any constant function. What pins f to
+the <em>true</em> origin is the <strong>boundary condition</strong> f(x₀, 0) = x₀: at t = 0 the
+model must be the identity. Rather than hoping the network learns this, it is
+enforced <em>by parameterization</em>:</p>
+<pre><code>f(x, t) = c_skip(t) · x + c_out(t) · F_θ(x, t)
+</code></pre>
+<p>where F_θ is "raw network output converted to an x₀-estimate", and the scalar
+schedules satisfy c_skip(0) = 1, c_out(0) = 0 — so at t = 0, f is the
+identity regardless of θ, and the consistency loss propagates that anchor up
+the trajectory: f at t must match f at t−k, which matches f at t−2k, … which
+at t = 0 is the ground truth x₀. In this script (with σ_data = 0.5 and a
+timestep scaling of 10):</p>
+<pre><code>c_skip(t) = 0.25 / ((10t)² + 0.25),      c_out(t) = 10t / √((10t)² + 0.25)
+</code></pre>
+<p>Check: t = 0 gives c_skip = 1, c_out = 0 ✓; t = 999 gives c_skip ≈ 2.5e-9,
+c_out ≈ 1 — at high noise, f is essentially the network's x₀-prediction.</p>
+<h3>7. LCM-LoRA: distillation as an adapter</h3>
+<p>The sibling script <code>train_lcm_distill_lora_sd_wds.py</code> makes one swap: instead
+of cloning the full teacher into a trainable student, it freezes the teacher
+weights and trains only <strong>LoRA adapters</strong> on top (<code>peft</code>'s <code>LoraConfig</code> /
+<code>get_peft_model</code>). Because so few parameters move, it also drops the EMA
+target network — the target-side prediction at t−k is computed by the <em>same</em>
+<code>unet</code> under <code>no_grad</code> (its line 1237 calls <code>unet(...)</code>, not
+<code>target_unet(...)</code>), and there is no w-embedding input (the architecture must
+stay identical to the base model for the adapter to be portable). The
+resulting "acceleration vector" can be added to <em>any</em> fine-tune of the same
+base model — distillation shipped as a plug-in.</p>
+<h3>The methodology in one training step (pseudocode)</h3>
+<pre><code>x₀        = VAE.encode(image)                        # clean latent
+t_{n+k}   ~ random point on the 50-step DDIM grid    # &quot;start&quot; timestep
+x_{t_{n+k}} = √ᾱ·x₀ + √(1−ᾱ)·ε                       # forward-noise it
+w         ~ U[w_min, w_max]                          # random guidance scale
+
+# online side (gradients flow)
+pred      = c_skip(t_{n+k})·x_{t_{n+k}} + c_out(t_{n+k})·x̂₀_student(x, t_{n+k}, w, c)
+
+# teacher side (no_grad): one guided DDIM step to t_n
+x̂₀_cfg, ε̂_cfg = teacher CFG at scale w              # notes 11 §4
+x_{t_n}   = √ᾱ_prev·x̂₀_cfg + √(1−ᾱ_prev)·ε̂_cfg      # DDIM, notes 10 §1.2
+
+# target side (no_grad, EMA weights)
+target    = c_skip(t_n)·x_{t_n} + c_out(t_n)·x̂₀_target(x_{t_n}, t_n, w, c)
+
+loss      = huber(pred, target);  backprop into student;  EMA-update target
+</code></pre>
+<p>Every block of the walkthrough below is one line of this box.</p>
+<hr />
+<h2>Section 0 — Header and imports (lines 1–75), grouped</h2>
+<pre><code class="language-python">import webdataset as wds
+from accelerate import Accelerator
+from diffusers import AutoencoderKL, DDPMScheduler, LCMScheduler, StableDiffusionPipeline, UNet2DConditionModel
+</code></pre>
+<p>Three stacks: <strong>webdataset</strong> streams training images from tar shards (LAION-
+style) instead of a folder; <strong>accelerate</strong> handles multi-GPU/mixed precision;
+<strong>diffusers</strong> supplies the SD 1.5 parts — VAE (<code>AutoencoderKL</code>), noise
+schedule (<code>DDPMScheduler</code>), U-Net, and <code>LCMScheduler</code> (used only for
+validation sampling: it is the <em>inference-time</em> consistency sampler).
+<code>MAX_SEQ_LENGTH = 77</code> is CLIP's token limit. <code>check_min_version("0.18.0.dev0")</code>
+guards against diffusers versions lacking <code>LCMScheduler</code>.</p>
+<h2>Section 1 — Webdataset plumbing (lines 78–214), grouped</h2>
+<p>Data-loading boilerplate — read once, then trust:</p>
+<ul>
+<li><code>filter_keys</code> (78–82): returns a function keeping only wanted dict keys per
+  sample.</li>
+<li><code>group_by_keys_nothrow</code> / <code>tarfile_to_samples_nothrow</code> (85–118): re-implement
+  webdataset's tar-grouping so that a malformed sample <em>warns</em> instead of
+  killing a multi-day run — the FIXME comment explains the LAION-400M edge
+  case (same key prefix straddling two tars).</li>
+<li><code>WebdatasetFilter</code> (121–138): drops images smaller than <code>min_size</code> or with
+  watermark probability &gt; 0.5, judged from LAION's per-sample json. (Defined
+  but never used in this script — a leftover.)</li>
+<li><code>Text2ImageDataset</code> (141–214): the pipeline. Resample shards → untar →
+  shuffle(1000) → decode PIL → rename (<code>jpg/png/… → image</code>, <code>txt/… → text</code>) →
+  resize shorter side to 512, random-crop 512×512, <code>to_tensor</code>, normalize to
+  [−1, 1] → <code>to_tuple("image", "text")</code> → batch. Each dataloader item is a
+  <strong>2-tuple</strong> <code>(image, text)</code> with <code>image: (B, 3, 512, 512)</code> in [−1, 1] and
+  <code>text</code> a list of B strings. Remember "2-tuple" — it matters at line 1102.
+  <code>with_epoch(num_worker_batches)</code> makes the infinite resampled stream look
+  like finite epochs of the requested size.</li>
+</ul>
+<h2>Section 2 — <code>log_validation</code> (lines 217–290), grouped</h2>
+<p>Builds a <code>StableDiffusionPipeline</code> from the teacher checkpoint but swaps in
+the student <code>unet</code> <strong>and <code>LCMScheduler</code></strong>, then samples the 4 fixed prompts
+with <code>num_inference_steps=4</code> — the whole point of the method made visible: 4
+steps, no CFG argument needed. Images go to tensorboard/wandb.</p>
+<p>One real quirk: the <code>del pipeline / gc.collect() / return image_logs</code> block
+(lines 286–290) is indented <em>inside</em> the <code>for tracker in ...</code> loop, so the
+function returns after the first tracker. Works with one tracker; silently
+skips the rest with several.</p>
+<h2>Section 3 — The w-embedding (lines 293–320)</h2>
+<pre><code class="language-python">def guidance_scale_embedding(w, embedding_dim=512, dtype=torch.float32):
+    assert len(w.shape) == 1
+    w = w * 1000.0
+</code></pre>
+<p><code>w: (B,)</code> — one guidance scale per batch element. Multiplying by 1000 moves
+w ∈ [5, 15] into the range the sinusoidal embedding below was designed for
+(the same trick and code as timestep embeddings, borrowed from Google's VDM —
+see the docstring's link; timesteps live in [0, 1000], so scale w to match).</p>
+<pre><code class="language-python">    half_dim = embedding_dim // 2
+    emb = torch.log(torch.tensor(10000.0)) / (half_dim - 1)
+    emb = torch.exp(torch.arange(half_dim, dtype=dtype) * -emb)
+    emb = w.to(dtype)[:, None] * emb[None, :]
+    emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+</code></pre>
+<p>Standard transformer/DDPM sinusoidal embedding: geometric frequencies from 1
+down to 1/10000, outer product with w — <code>(B, 1) * (1, half_dim) →
+(B, half_dim)</code> — then sin/cos concatenated → <code>(B, embedding_dim)</code>. This
+vector is later passed to the U-Net as <code>timestep_cond</code>; internally the U-Net
+(constructed with <code>time_cond_proj_dim</code>) projects it and <strong>adds it into the
+timestep embedding</strong>, which is how one scalar w conditions every layer.</p>
+<pre><code class="language-python">def append_dims(x, target_dims):
+    return x[(...,) + (None,) * dims_to_append]
+</code></pre>
+<p>(Lines 323–328.) Reshape helper: turns <code>(B,)</code> into <code>(B, 1, 1, 1)</code> so
+per-sample scalars broadcast against <code>(B, 4, 64, 64)</code> latents.</p>
+<h2>Section 4 — Boundary-condition scalings (lines 331–335) ★ methodology §6</h2>
+<pre><code class="language-python">def scalings_for_boundary_conditions(timestep, sigma_data=0.5, timestep_scaling=10.0):
+    c_skip = sigma_data**2 / ((timestep / 0.1) ** 2 + sigma_data**2)
+    c_out = (timestep / 0.1) / ((timestep / 0.1) ** 2 + sigma_data**2) ** 0.5
+    return c_skip, c_out
+</code></pre>
+<p>The enforced boundary condition, verbatim from <code>LCMScheduler</code>. <code>timestep</code> is
+the raw integer grid value (0…999), shape <code>(B,)</code>; both outputs are <code>(B,)</code>.
+<code>timestep / 0.1</code> = <code>timestep * 10</code> — the "scaled timestep". Plug in t = 0:
+c_skip = σ_d²/σ_d² = 1, c_out = 0 → f(x, 0) = x exactly, for any network
+weights. As t grows, c_skip → 0 and c_out → 1: at high noise the input x is
+useless and f is essentially the network's x₀-prediction. σ_data = 0.5 is the
+assumed data std (Karras/EDM convention, roughly right for SD latents).</p>
+<p>Honest quirk: the <code>timestep_scaling=10.0</code> <strong>parameter is never used</strong> — the
+10 is hard-coded as <code>/0.1</code>. Change the argument and nothing happens.</p>
+<h2>Section 5 — x̂₀-prediction (lines 338–357) ★ the identity from notes 10 §1.2</h2>
+<pre><code class="language-python">def predicted_origin(model_output, timesteps, sample, prediction_type, alphas, sigmas):
+    if prediction_type == &quot;epsilon&quot;:
+        pred_x_0 = (sample - sigmas * model_output) / alphas
+    elif prediction_type == &quot;v_prediction&quot;:
+        pred_x_0 = alphas * sample - sigmas * model_output
+</code></pre>
+<p>Converts a raw U-Net output into an estimate of the clean latent. For
+ε-prediction this is exactly our one-line inversion of the forward shortcut
+(notes <code>10 §1.2</code>): x_t = α_t x₀ + σ_t ε ⇒ <strong>x̂₀ = (x_t − σ_t ε̂)/α_t</strong>. Here
+<code>alphas</code>/<code>sigmas</code> are the <em>global</em> schedules √ᾱ and √(1−ᾱ), each <code>(1000,)</code>;
+<code>extract_into_tensor</code> (lines 354–357) is the familiar gather-then-reshape from
+our DDPM code: pick each sample's own scalar by its timestep, <code>a.gather(-1, t)</code>
+→ <code>(B,)</code>, reshape to <code>(B, 1, 1, 1)</code> for broadcasting. The v-prediction branch
+is the same identity in v-parameterization (SD 2.x). Output: <code>(B, 4, 64, 64)</code>.</p>
+<h2>Section 6 — <code>DDIMSolver</code> (lines 360–384) ★ the trajectory oracle</h2>
+<pre><code class="language-python">class DDIMSolver:
+    def __init__(self, alpha_cumprods, timesteps=1000, ddim_timesteps=50):
+        step_ratio = timesteps // ddim_timesteps
+        self.ddim_timesteps = (np.arange(1, ddim_timesteps + 1) * step_ratio).round().astype(np.int64) - 1
+</code></pre>
+<p>Precomputes the coarse grid for the skipping-step technique (methodology §5).
+With defaults, <code>step_ratio = 20</code> and <code>ddim_timesteps = [19, 39, 59, …, 999]</code>,
+shape <code>(50,)</code> — fifty evenly-spaced trainable timesteps, k = 20 apart.</p>
+<pre><code class="language-python">        self.ddim_alpha_cumprods = alpha_cumprods[self.ddim_timesteps]
+        self.ddim_alpha_cumprods_prev = np.asarray(
+            [alpha_cumprods[0]] + alpha_cumprods[self.ddim_timesteps[:-1]].tolist()
+        )
+</code></pre>
+<p>ᾱ at each grid point, and ᾱ at each grid point's <em>predecessor</em>: entry i of
+<code>_prev</code> is ᾱ at <code>ddim_timesteps[i−1]</code>; entry 0 (whose predecessor would be
+t = −1) falls back to ᾱ₀, i.e. t = 0. Both <code>(50,)</code>. <code>to(device)</code> (374–378)
+just moves the three buffers.</p>
+<pre><code class="language-python">    def ddim_step(self, pred_x0, pred_noise, timestep_index):
+        alpha_cumprod_prev = extract_into_tensor(self.ddim_alpha_cumprods_prev, timestep_index, pred_x0.shape)
+        dir_xt = (1.0 - alpha_cumprod_prev).sqrt() * pred_noise
+        x_prev = alpha_cumprod_prev.sqrt() * pred_x0 + dir_xt
+        return x_prev
+</code></pre>
+<p>One deterministic DDIM step, η = 0 — precisely equation (1) of notes
+<code>10 §1.2</code> with the fresh-noise term deleted: <strong>x_s = α_s·x̂₀ + σ_s·ε̂</strong>, with
+α_s = √ᾱ_prev and σ_s = √(1−ᾱ_prev). Note it indexes by <code>timestep_index</code>
+(position 0–49 on the coarse grid, <code>(B,)</code>), <em>not</em> by the raw timestep — the
+caller must pass the same <code>index</code> it used to pick <code>start_timesteps</code>. Inputs
+and output all <code>(B, 4, 64, 64)</code>. This single call is the teacher's "advance
+the ODE by k = 20 fine steps" jump.</p>
+<h2>Section 7 — EMA update (lines 387–398) ★ methodology §4</h2>
+<pre><code class="language-python">@torch.no_grad()
+def update_ema(target_params, source_params, rate=0.99):
+    for targ, src in zip(target_params, source_params):
+        targ.detach().mul_(rate).add_(src, alpha=1 - rate)
+</code></pre>
+<p>Polyak averaging, in-place: θ_target ← rate·θ_target + (1−rate)·θ_online.
+<code>no_grad</code> + <code>detach</code> keep autograd entirely out. The script calls it with
+<code>args.ema_decay = 0.95</code> — much <em>faster</em>-moving than the 0.999–0.9999 typical
+of generative-model EMA, because here the EMA copy is a <em>training target</em>
+that must track the student closely (methodology §4), not a polish-for-
+release average.</p>
+<h2>Section 8 — <code>parse_args</code> (lines 421–741), grouped</h2>
+<p>Standard HF-script argparse; the LCD-specific block (lines 620–669) is the
+part worth reading:</p>
+<ul>
+<li><code>--w_min 5.0</code>, <code>--w_max 15.0</code>: the guidance-scale sampling range for the
+  augmented PF-ODE (methodology §3). The help text claims the <em>Imagen</em> CFG
+  formulation ("all guidance scales have 1 added"), but as we'll see at line
+  1207 the code actually implements the <em>LCM-paper</em> formulation — an internal
+  inconsistency; more at Section 12.</li>
+<li><code>--num_ddim_timesteps 50</code>: the coarse grid size, hence k = 1000/50 = 20.</li>
+<li><code>--loss_type {l2, huber}</code>, <code>--huber_c 0.001</code>: consistency-loss distance.</li>
+<li><code>--ema_decay 0.95</code>: target-network rate.</li>
+<li><code>--cast_teacher_unet</code>: run the frozen teacher in fp16/bf16 to save memory.</li>
+</ul>
+<p><strong>Real bug to know about:</strong> lines 859 and 1143 use <code>args.unet_time_cond_proj_dim</code>
+(the w-embedding width), but <strong>no <code>--unet_time_cond_proj_dim</code> argument is ever
+defined</strong> in <code>parse_args</code> — this script crashes with <code>AttributeError</code> as
+shipped. The maintained diffusers copy of the script adds the flag (default
+256). Patch it in if you run this version.</p>
+<p><code>encode_prompt</code> (744–767): tokenize captions to 77 tokens, run CLIP under
+<code>no_grad</code> → <code>prompt_embeds: (B, 77, 768)</code>. It can randomly blank captions
+with probability <code>proportion_empty_prompts</code> — but see the quirk at line 1011.</p>
+<h2>Section 9 — <code>main</code>: setup (lines 770–1049), grouped with highlights</h2>
+<p>Lines 771–812: <code>Accelerator</code> (with <code>split_batches=True</code> — the comment explains
+this keeps LR-schedule step counts right with webdataset), logging levels,
+seeding, output dir, optional Hub repo. Boilerplate.</p>
+<pre><code class="language-python">    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_teacher_model, subfolder=&quot;scheduler&quot;, ...)
+    alpha_schedule = torch.sqrt(noise_scheduler.alphas_cumprod)
+    sigma_schedule = torch.sqrt(1 - noise_scheduler.alphas_cumprod)
+    solver = DDIMSolver(noise_scheduler.alphas_cumprod.numpy(), timesteps=..., ddim_timesteps=args.num_ddim_timesteps)
+</code></pre>
+<p>(Lines 814–826.) The teacher's own noise schedule — ᾱ over 1000 steps — is
+split into the (α_t, σ_t) = (√ᾱ, √(1−ᾱ)) pair our notes use, each <code>(1000,)</code>,
+and handed to the <code>DDIMSolver</code>. The student must live on the <em>teacher's</em>
+schedule; a mismatched schedule would put teacher and student on different
+trajectories and the consistency pairs would be garbage.</p>
+<p>Lines 828–854: load tokenizer, CLIP text encoder, VAE, and the <strong>teacher
+U-Net</strong> from the SD checkpoint, then freeze all of them
+(<code>requires_grad_(False)</code>). Nothing about the teacher ever trains. (Ignore the
+comments saying "SD-XL checkpoint" — copy-paste from the SDXL sibling script;
+this one is plain SD.)</p>
+<pre><code class="language-python">    if teacher_unet.config.time_cond_proj_dim is None:
+        teacher_unet.config[&quot;time_cond_proj_dim&quot;] = args.unet_time_cond_proj_dim
+    unet = UNet2DConditionModel(**teacher_unet.config)
+    unet.load_state_dict(teacher_unet.state_dict(), strict=False)
+    unet.train()
+</code></pre>
+<p>(Lines 856–863.) Student creation, and the architectural delta of the whole
+method: the teacher's config is mutated to include <code>time_cond_proj_dim</code>, so
+the freshly built student U-Net has one extra small linear layer
+(<code>time_embedding.cond_proj</code>) that ingests the w-embedding (Section 3).
+<code>strict=False</code> is required because the teacher's state_dict has no weights
+for that new layer — every shared weight is copied from the teacher (warm
+start), and <strong>the <code>cond_proj</code> layer alone starts at random init</strong>. (Mutating
+the already-built teacher's config dict is a dirty but harmless trick — the
+teacher's modules are already constructed.)</p>
+<pre><code class="language-python">    target_unet = UNet2DConditionModel(**teacher_unet.config)
+    target_unet.load_state_dict(unet.state_dict())
+    target_unet.train()
+    target_unet.requires_grad_(False)
+</code></pre>
+<p>(Lines 865–870.) The EMA target (methodology §4): an exact clone of the
+student at t = 0, gradient-free forever; only <code>update_ema</code> will move it.
+So three U-Nets coexist in memory: frozen teacher, trainable student, EMA
+target — the main VRAM cost of LCM distillation (and what LCM-LoRA removes).</p>
+<p>Lines 872–908: precision hygiene — trainable student stays fp32; frozen
+VAE/text-encoder/teacher move to device and (optionally) to fp16/bf16;
+<code>alpha_schedule</code>, <code>sigma_schedule</code>, <code>solver</code> buffers also move to device.
+Lines 910–942: accelerate save/load hooks so checkpoints contain both <code>unet</code>
+and <code>unet_target</code>. Lines 944–988: xformers, TF32, gradient checkpointing,
+optional 8-bit Adam; optimizer over <code>unet.parameters()</code> <strong>only</strong> — the
+optimizer never sees teacher or target.</p>
+<p>Lines 990–1049: dataset (Section 1) instantiated; <code>compute_embeddings_fn</code>
+built with <code>functools.partial</code>; LR scheduler; <code>accelerator.prepare(unet,
+optimizer, lr_scheduler)</code> (note the dataloader is <em>not</em> prepared — webdataset
+handles its own sharding). Quirk at line 1011: the partial hard-codes
+<code>proportion_empty_prompts=0</code>, so the CLI flag <code>--proportion_empty_prompts</code> is
+parsed, validated… and ignored. Finally:</p>
+<pre><code class="language-python">    uncond_input_ids = tokenizer([&quot;&quot;] * args.train_batch_size, ..., max_length=77).input_ids.to(...)
+    uncond_prompt_embeds = text_encoder(uncond_input_ids)[0]
+</code></pre>
+<p>(Lines 1046–1049.) The empty-prompt embedding <code>(B, 77, 768)</code>, computed <strong>once</strong>
+— the "∅" of CFG (notes <code>11 §5</code>). The teacher will be queried with it every
+step; precomputing saves a text-encoder call per iteration.</p>
+<h2>Section 10 — The training loop, part 1: batch → noisy latent (lines 1099–1139)</h2>
+<pre><code class="language-python">    for epoch in range(first_epoch, args.num_train_epochs):
+        for step, batch in enumerate(train_dataloader):
+            with accelerator.accumulate(unet):
+                image, text, _, _ = batch
+</code></pre>
+<p><code>accelerator.accumulate</code> handles gradient accumulation transparently.
+<strong>Quirk/bug:</strong> the dataset yields 2-tuples <code>(image, text)</code> (Section 1), so
+this 4-way unpack raises <code>ValueError</code> as shipped — the <code>_, _</code> (original size,
+crop coords) belong to the SDXL sibling script. Delete the two underscores to
+run this file.</p>
+<pre><code class="language-python">                image = image.to(accelerator.device, non_blocking=True)
+                encoded_text = compute_embeddings_fn(text)
+                pixel_values = image.to(dtype=weight_dtype)
+</code></pre>
+<p>Move images <code>(B, 3, 512, 512)</code> to GPU; encode captions →
+<code>encoded_text = {"prompt_embeds": (B, 77, 768)}</code>.</p>
+<pre><code class="language-python">                latents = []
+                for i in range(0, pixel_values.shape[0], 32):
+                    latents.append(vae.encode(pixel_values[i : i + 32]).latent_dist.sample())
+                latents = torch.cat(latents, dim=0)
+                latents = latents * vae.config.scaling_factor
+</code></pre>
+<p>VAE-encode in chunks of ≤ 32 (the encoder is memory-hungry at 512²), <em>sample</em>
+from the posterior (not the mean), and apply SD's magic 0.18215 scaling so
+latents have ~unit variance. <code>latents: (B, 4, 64, 64)</code> — this is the x₀ of
+the methodology box. Everything from here on happens in latent space; that
+"latent" is the L in LCM.</p>
+<pre><code class="language-python">                noise = torch.randn_like(latents)
+                bsz = latents.shape[0]
+
+                topk = noise_scheduler.config.num_train_timesteps // args.num_ddim_timesteps
+                index = torch.randint(0, args.num_ddim_timesteps, (bsz,), device=latents.device).long()
+                start_timesteps = solver.ddim_timesteps[index]
+                timesteps = start_timesteps - topk
+                timesteps = torch.where(timesteps &lt; 0, torch.zeros_like(timesteps), timesteps)
+</code></pre>
+<p>The skipping-step sampling (methodology §5). <code>topk</code> = k = 20. <code>index: (B,)</code>
+picks a random position on the 50-point coarse grid per sample;
+<code>start_timesteps</code> = t_{n+k} ∈ {19, 39, …, 999} is where the <em>pair starts</em>;
+<code>timesteps</code> = t_n = t_{n+k} − 20 is where the teacher's DDIM step will land.
+The <code>where</code> clamps the one negative case (index 0: 19 − 20 = −1 → 0), which
+matches <code>DDIMSolver</code>'s ᾱ_prev[0] = ᾱ₀ fallback — for every other index,
+<code>timesteps</code> lands exactly on <code>ddim_timesteps[index − 1]</code>. Consistent
+bookkeeping between the two is essential: the <em>same</em> t_n must be used for
+the target's c_skip/c_out and U-Net call as the solver actually stepped to.</p>
+<pre><code class="language-python">                c_skip_start, c_out_start = scalings_for_boundary_conditions(start_timesteps)
+                c_skip_start, c_out_start = [append_dims(x, latents.ndim) for x in [c_skip_start, c_out_start]]
+                c_skip, c_out = scalings_for_boundary_conditions(timesteps)
+                c_skip, c_out = [append_dims(x, latents.ndim) for x in [c_skip, c_out]]
+</code></pre>
+<p>Boundary scalings (Section 4) at <em>both</em> ends of the pair — <code>_start</code> for the
+online student at t_{n+k}, plain for the target at t_n — each reshaped
+<code>(B,) → (B, 1, 1, 1)</code>.</p>
+<pre><code class="language-python">                noisy_model_input = noise_scheduler.add_noise(latents, noise, start_timesteps)
+</code></pre>
+<p>Forward-diffuse to t_{n+k}: x = √ᾱ·x₀ + √(1−ᾱ)·ε, <code>(B, 4, 64, 64)</code> — the
+z_{t_{n+k}} of the paper's Algorithm 1 (the code comment says so). Note the
+pair's starting point comes from the <em>forward marginal</em>, not from simulating
+the ODE from noise — that is what makes each training step cheap (one solver
+step, not a whole trajectory), and it works because the teacher's ε̂ defines
+a valid trajectory through <em>any</em> marginal sample (notes <code>10 §1.1</code>).</p>
+<h2>Section 11 — Training loop, part 2: sample w, run the student (lines 1141–1170)</h2>
+<pre><code class="language-python">                w = (args.w_max - args.w_min) * torch.rand((bsz,)) + args.w_min
+                w_embedding = guidance_scale_embedding(w, embedding_dim=args.unet_time_cond_proj_dim)
+                w = w.reshape(bsz, 1, 1, 1)
+</code></pre>
+<p>The augmented-PF-ODE dial (methodology §3): per-sample guidance scale
+w ~ U[5, 15], <code>(B,)</code>. Two forms are kept: the sinusoidal <code>w_embedding</code>
+<code>(B, 256)</code> to <em>condition the student</em>, and the raw scalar reshaped to
+<code>(B, 1, 1, 1)</code> to <em>combine the teacher's CFG</em> below. Both moved to the
+latents' device/dtype (lines 1146–1147).</p>
+<pre><code class="language-python">                prompt_embeds = encoded_text.pop(&quot;prompt_embeds&quot;)
+
+                noise_pred = unet(
+                    noisy_model_input,
+                    start_timesteps,
+                    timestep_cond=w_embedding,
+                    encoder_hidden_states=prompt_embeds.float(),
+                    added_cond_kwargs=encoded_text,
+                ).sample
+</code></pre>
+<p>The <strong>online student's</strong> forward pass at the pair's start: inputs
+<code>(B, 4, 64, 64)</code>, <code>(B,)</code> timesteps, <code>timestep_cond=w_embedding</code> (the LCM-
+specific input — this is where w enters the network), text <code>(B, 77, 768)</code>.
+Output <code>noise_pred: (B, 4, 64, 64)</code> — an ε̂-prediction (SD 1.5 is
+ε-parameterized). After the <code>pop</code>, <code>encoded_text</code> is <code>{}</code>, so
+<code>added_cond_kwargs={}</code> — a harmless SDXL leftover.</p>
+<pre><code class="language-python">                pred_x_0 = predicted_origin(noise_pred, start_timesteps, noisy_model_input, ...)
+                model_pred = c_skip_start * noisy_model_input + c_out_start * pred_x_0
+</code></pre>
+<p>Convert ε̂ → x̂₀ via the identity (Section 5), then apply the boundary
+parameterization: <strong>model_pred = f_θ(x_{t_{n+k}}, t_{n+k}, w, c)</strong> — the
+left-hand side of the consistency loss, the only tensor in this whole step
+that carries gradients. <code>(B, 4, 64, 64)</code>.</p>
+<h2>Section 12 — Training loop, part 3: teacher CFG + DDIM step (lines 1172–1209) ★ the heart</h2>
+<pre><code class="language-python">                with torch.no_grad():
+                    with torch.autocast(&quot;cuda&quot;):
+                        cond_teacher_output = teacher_unet(
+                            noisy_model_input.to(weight_dtype),
+                            start_timesteps,
+                            encoder_hidden_states=prompt_embeds.to(weight_dtype),
+                        ).sample
+                        cond_pred_x0 = predicted_origin(cond_teacher_output, start_timesteps, noisy_model_input, ...)
+</code></pre>
+<p>Teacher pass #1: conditional ε̂_c at the <em>same</em> noisy input and timestep, no
+gradients, autocast for speed. Converted to a conditional x̂₀ too. Note the
+teacher takes <strong>no</strong> <code>timestep_cond</code> — it never heard of w; w exists only in
+how we <em>combine</em> its two passes.</p>
+<pre><code class="language-python">                        uncond_teacher_output = teacher_unet(
+                            noisy_model_input.to(weight_dtype),
+                            start_timesteps,
+                            encoder_hidden_states=uncond_prompt_embeds.to(weight_dtype),
+                        ).sample
+                        uncond_pred_x0 = predicted_origin(uncond_teacher_output, ...)
+</code></pre>
+<p>Teacher pass #2: unconditional ε̂_∅, using the precomputed empty-prompt
+embedding. This is the classic two-pass CFG evaluation of notes <code>11 §5</code> —
+the very cost LCM is about to distill away.</p>
+<pre><code class="language-python">                        # 20.4.11. Perform &quot;CFG&quot; to get x_prev estimate (using the LCM paper's CFG formulation)
+                        pred_x0 = cond_pred_x0 + w * (cond_pred_x0 - uncond_pred_x0)
+                        pred_noise = cond_teacher_output + w * (cond_teacher_output - uncond_teacher_output)
+                        x_prev = solver.ddim_step(pred_x0, pred_noise, index)
+</code></pre>
+<p><strong>The single most important block in the file.</strong> CFG applied in <em>both</em> spaces
+— x̂₀ and ε̂ — then one DDIM step (Section 6):
+x_prev = √ᾱ_prev · x̂₀_cfg + √(1−ᾱ_prev) · ε̂_cfg, landing at t_n.
+<code>x_prev: (B, 4, 64, 64)</code> is the second point of the trajectory pair; w
+broadcasts as <code>(B, 1, 1, 1)</code>.</p>
+<p>Two honest notes. (1) <em>Convention</em>: <code>cond + w·(cond − uncond)</code> =
+<code>uncond + (1+w)·(cond − uncond)</code>, i.e. our notes-<code>11 §4</code> formula with
+s = 1 + w. So w ∈ [5, 15] here behaves like SD <code>guidance_scale</code> ∈ [6, 16] —
+and the argparse help (which claims Imagen convention, s = w) contradicts the
+code comment (which says LCM-paper convention). The code line is the ground
+truth: LCM-paper formulation. (2) <em>Both spaces</em>: because CFG is a linear
+combination and ε ↔ x̂₀ is an affine map at fixed t, combining in ε-space and
+then converting would give the same x̂₀ — computing both explicitly just
+feeds <code>ddim_step</code>'s two slots directly.</p>
+<h2>Section 13 — Training loop, part 4: target prediction and loss (lines 1211–1244)</h2>
+<pre><code class="language-python">                with torch.no_grad():
+                    with torch.autocast(&quot;cuda&quot;, dtype=weight_dtype):
+                        target_noise_pred = target_unet(
+                            x_prev.float(),
+                            timesteps,
+                            timestep_cond=w_embedding,
+                            encoder_hidden_states=prompt_embeds.float(),
+                        ).sample
+                    pred_x_0 = predicted_origin(target_noise_pred, timesteps, x_prev, ...)
+                    target = c_skip * x_prev + c_out * pred_x_0
+</code></pre>
+<p>The <strong>EMA target network</strong> evaluates the consistency function at the <em>other</em>
+end of the pair: f_θ⁻(x_{t_n}, t_n, w, c), same w-embedding, same prompt, but
+at <code>timesteps</code> = t_n and input <code>x_prev</code>. All under <code>no_grad</code> — the target is
+a fixed regression label for this step (methodology §4). <code>target:
+(B, 4, 64, 64)</code>. Self-consistency demands <code>model_pred ≈ target</code>.</p>
+<pre><code class="language-python">                if args.loss_type == &quot;l2&quot;:
+                    loss = F.mse_loss(model_pred.float(), target.float(), reduction=&quot;mean&quot;)
+                elif args.loss_type == &quot;huber&quot;:
+                    loss = torch.mean(
+                        torch.sqrt((model_pred.float() - target.float()) ** 2 + args.huber_c**2) - args.huber_c
+                    )
+</code></pre>
+<p>The consistency-distillation loss. The "huber" branch is the smooth
+<strong>pseudo-Huber</strong> distance √(d² + c²) − c: quadratic for |d| ≪ c, linear for
+|d| ≫ c — robust to the occasional wild teacher/solver estimate, which is why
+the LCM paper prefers it for latent-space distillation (c = 0.001 default).
+Note this is a plain regression in latent space — no ELBO, no noise-matching;
+the entire diffusion math already happened upstream.</p>
+<pre><code class="language-python">                accelerator.backward(loss)
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+</code></pre>
+<p>Standard optimization, gradients flowing only through <code>model_pred</code> → student
+<code>unet</code>. Grad-norm clipping at 1.0 only on real (synced) steps.</p>
+<h2>Section 14 — Training loop, part 5: EMA + bookkeeping (lines 1246–1299)</h2>
+<pre><code class="language-python">            if accelerator.sync_gradients:
+                update_ema(target_unet.parameters(), unet.parameters(), args.ema_decay)
+</code></pre>
+<p>After each real optimizer step, drag the target 5% of the way toward the
+student (μ = 0.95, Section 7). Order matters: target update <em>after</em> the
+student step, once per effective batch — inside the accumulate block it would
+move during half-formed gradients.</p>
+<p>The rest is housekeeping: rotate checkpoints under <code>checkpoints_total_limit</code>,
+<code>accelerator.save_state</code> every 500 steps, run <code>log_validation</code> (Section 2)
+every 200 steps for <em>both</em> the target and online U-Nets (the target usually
+looks better — it is the one you ship), log loss/lr, and at the very end save
+<code>unet/</code> and <code>unet_target/</code> with <code>save_pretrained</code>.</p>
+<hr />
+<h2>Quirk ledger (all verified against the code)</h2>
+<ol>
+<li><code>args.unet_time_cond_proj_dim</code> used (lines 859, 1143) but never added to
+   <code>parse_args</code> → <code>AttributeError</code> on launch. Add the flag (diffusers'
+   maintained copy defaults it to 256).</li>
+<li><code>image, text, _, _ = batch</code> (line 1102) vs. a 2-tuple dataset (line 178)
+   → <code>ValueError</code>. SDXL leftover.</li>
+<li>Help text for <code>--w_min/--w_max</code> claims Imagen CFG convention; line 1207
+   implements the LCM-paper convention (effective SD scale = 1 + w).</li>
+<li><code>timestep_scaling</code> parameter of <code>scalings_for_boundary_conditions</code> is
+   dead; the ×10 is hard-coded as <code>/0.1</code>.</li>
+<li><code>compute_embeddings_fn</code> hard-codes <code>proportion_empty_prompts=0</code>; the CLI
+   flag is ignored.</li>
+<li><code>log_validation</code> returns from inside its tracker loop (line 290).</li>
+<li><code>WebdatasetFilter</code> is defined but never applied to the pipeline.</li>
+<li>Comments mention "SD-XL checkpoint" and numbered steps "20.4.x" — artifacts
+   of the file this was adapted from; the numbering is still a useful map of
+   Algorithm 1's stages.</li>
+</ol>
+<h2>What to carry forward</h2>
+<ol>
+<li><strong>Consistency = same origin from anywhere on one trajectory.</strong> The loss
+   never sees a real image as a target — only the model's own prediction one
+   solver step downstream; ground truth enters solely through the t = 0
+   boundary condition.</li>
+<li><strong>c_skip/c_out parameterization</strong>: f(x, t) = c_skip·x + c_out·x̂₀(x, t)
+   with c_skip(0) = 1, c_out(0) = 0 — identities you enforce by construction
+   beat identities you hope to learn.</li>
+<li><strong>Teacher + DDIM step = trajectory-pair factory</strong> (notes <code>10 §1.2</code> with
+   η = 0). Any better ODE solver could slot into <code>DDIMSolver.ddim_step</code>
+   unchanged — equation vs. simulator separation, again (MIT Lab 1's lesson).</li>
+<li><strong>w as an input, not a sampler trick</strong>: sample the guidance scale during
+   training, embed it like a timestep, and CFG's 2× inference cost disappears
+   (notes <code>11 §4–5</code> for what w does).</li>
+<li><strong>Skipping-step k = 20</strong> turns 1000 fine steps into 50 coarse consistency
+   pairs — bigger jumps, stronger training signal, faster convergence.</li>
+<li><strong>EMA target network</strong> (μ = 0.95): the self-referential loss needs a
+   slow-moving second copy, exactly like target networks in RL.</li>
+<li><strong>LCM-LoRA</strong>: same loss, student = frozen teacher + adapters, no EMA copy,
+   no w-embedding — few-step sampling shipped as a portable plug-in.</li>
+</ol></div></body></html>

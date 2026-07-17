@@ -1,0 +1,907 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DMD (original), Line by Line</title><style>
+  :root { --ground:#F7F8FA; --ink:#1D2634; --muted:#5F6E80;
+          --accent:#31599B; --rule:#DDE3EA; --card:#EEF1F5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ground:#12161D; --ink:#D9DEE6; --muted:#8B99AB;
+            --accent:#8FB3E2; --rule:#28303C; --card:#1A202A; } }
+  html { background: var(--ground); }
+  body { margin:0; color:var(--ink);
+    font-family: Charter, Georgia, 'Times New Roman', serif;
+    font-size:1.05rem; line-height:1.66; }
+  .wrap { max-width:72ch; margin:0 auto; padding:2.2rem 1.25rem 4rem; }
+  .eyebrow { font-family:system-ui,sans-serif; font-size:.72rem; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--muted); margin:0 0 .6rem; }
+  h1 { font-size:1.75rem; line-height:1.22; margin:0 0 1.2rem; }
+  h2 { font-size:1.28rem; margin:2.4rem 0 .7rem; padding-top:1.2rem;
+       border-top:1px solid var(--rule); }
+  h3 { font-size:1.08rem; margin:1.8rem 0 .5rem; color:var(--accent); }
+  p, li { margin:0 0 .95rem; } ul, ol { padding-left:1.3rem; }
+  blockquote { border-left:3px solid var(--accent); background:var(--card);
+    margin:1.2rem 0; padding:.7rem 1rem; border-radius:0 6px 6px 0; }
+  pre { background:var(--card); border-radius:6px; padding:.9rem 1rem;
+    overflow-x:auto; font-size:.82rem; line-height:1.5; }
+  code { font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+    font-size:.86em; background:var(--card); padding:.08em .3em; border-radius:4px; }
+  pre code { background:none; padding:0; }
+  .tablewrap { overflow-x:auto; margin:1.2rem 0; }
+  table { border-collapse:collapse; width:100%;
+    font-family:system-ui,sans-serif; font-size:.86rem; }
+  th, td { text-align:left; padding:.45rem .65rem; border-bottom:1px solid var(--rule); }
+  th { font-size:.7rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
+  a { color:var(--accent); }
+</style></head><body>
+<div class="wrap"><p class="eyebrow">Distillation · DMD lineage 1/3 · <a href="index.html">index</a></p><h1>DMD1, Line by Line — The Original Distribution Matching Recipe (CIFAR-10, EDM)</h1>
+<p><em>A beginner's reading companion to the </em><em>unofficial</em><em> DMD reimplementation
+(<code>distillation/dmd1/</code>, devrimcavusoglu/dmd), which reproduces "One-step
+Diffusion with Distribution Matching Distillation" (Yin et al., arXiv
+2311.18828, CVPR 2024) on CIFAR-10 with an NVLabs EDM teacher. This is the
+</em><em>prequel</em><em> to our DMD2 chapter (<code>dmd2_line_by_line.md</code>): the original
+recipe, including everything DMD2 later removed — above all the
+pre-generated paired dataset and the LPIPS regression loss on it. Because
+this repo is a community reimplementation (not MIT/Adobe's code), we flag
+every place it may deviate from the paper. Concepts link to our notes:
+score = −ε̂/σ is <code>10 §3</code>, the reverse-KL derivation is <code>dmd2_line_by_line.md
+§M2–M3</code>, deterministic noise→image couples are
+<code>instaflow_line_by_line.md</code>.</em></p>
+<p><strong>The codebase in one sentence:</strong> a copy of the EDM CIFAR-10 UNet is trained
+to map scaled noise to a finished image in ONE call, pulled by two forces —
+a distribution-matching gradient (frozen teacher score minus a continuously
+retrained "fake" score, evaluated on re-noised generator samples) and an
+LPIPS regression loss that pins the generator to a 100k-pair dataset of
+(noise, teacher-ODE-output) couples manufactured offline by the teacher's
+own 18-step sampler.</p>
+<hr />
+<h2>Methodology</h2>
+<h3>M0 — Where this sits, and how honest we can be</h3>
+<p>Read order: this chapter and <code>dmd2_line_by_line.md</code> share one core (the
+DMD gradient); this one adds what DMD1 had and DMD2 deleted. DMD1's
+generator objective is</p>
+<pre><code>L_G = L_KL + λ_reg · L_reg,        λ_reg = 0.25,
+</code></pre>
+<p>where <code>L_KL</code> is the distribution-matching (reverse-KL) loss and <code>L_reg</code> is
+a <strong>regression loss on paired teacher samples</strong> — LPIPS between <code>G(z_ref)</code>
+and the image <code>y_ref</code> that the <em>teacher's ODE sampler</em> produced from that
+same <code>z_ref</code>, precomputed for a whole dataset before training starts.
+Alongside, a second network <code>mu_fake</code> (the fake score) is trained with a
+denoising loss on the generator's outputs, alternating 1:1 with the
+generator. That's the whole method: three networks (frozen teacher
+<code>mu_real</code>, trainable critic <code>mu_fake</code>, trainable generator <code>G</code>, all three
+the <em>same</em> EDM architecture initialized from the <em>same</em> teacher
+checkpoint), two optimizers, two-and-a-half losses.</p>
+<p>Honesty up front: this repo is an unofficial reproduction by two students
+(the README and <code>goals.txt</code> say so plainly). They trained on ONE RTX 4090
+with batch 48 instead of the paper's 7 GPUs × batch 56, sqrt-scaled the
+learning rate accordingly, and did <strong>not</strong> reach the paper's CIFAR-10 FID
+of 2.66. The README's "Assumptions" section admits the paper doesn't say
+which model each hyperparameter applies to, so the repo uses the same
+optimizer settings (AdamW, lr 5e-5, wd 0.01) for <em>all three</em> networks.
+Wherever the code makes a choice the paper doesn't pin down, we say so.</p>
+<h3>M1 — The reverse-KL gradient (the shared core — see DMD2 §M2 for the derivation)</h3>
+<p>DMD minimizes <code>E_t KL(p_fake,t ‖ p_real,t)</code> over noised versions of the
+generator's output distribution vs the teacher's. The derivation (done
+fully in <code>dmd2_line_by_line.md §M2</code>, pedigree SDS→VSD→DMD in its §M3)
+gives</p>
+<pre><code>∇_θ L ≈ E_{z,t,ε} [ w_t · ( s_fake(x_t) − s_real(x_t) ) · ∂x_t/∂θ ],
+</code></pre>
+<p>with <code>s_real</code> the frozen teacher's score and <code>s_fake</code> the score of the
+<em>generator's own current outputs</em>, estimated by a second network trained
+online with an ordinary denoising loss on generator samples. Both scores
+are expressed through denoised predictions; DMD1's paper (its Eq. 8)
+chooses the weight</p>
+<pre><code>w_t = σ_t²/α_t · C·S / ‖x − x̂₀_real‖₁      (C·S = channels × pixels)
+</code></pre>
+<p>precisely so that the score-difference prefactor cancels and the surviving
+gradient is a plain difference of denoised images with a per-sample
+normalizer:</p>
+<pre><code>grad = ( x̂₀_fake − x̂₀_real ) / mean|x − x̂₀_real|.                (M1.1)
+</code></pre>
+<p>In this EDM/VE codebase the cancellation is even cleaner than in the SD
+world: EDM has α_t ≡ 1 and its network <em>natively outputs x̂₀</em> (§M3 below),
+so <code>s(x) = (D(x;σ) − x)/σ²</code>, the <code>σ²</code> cancels against <code>w_t = σ²·(...)</code>,
+and <code>dmd/loss.py</code> literally computes <code>(pred_fake_image − pred_real_image)
+/ weighting_factor</code> and injects it with the detached-target trick
+<code>0.5·mse(x, (x − grad).detach())</code> — the same three lines as DMD2, and the
+single most important code block in this repo (§L2). One notable
+<em>difference</em> from DMD2: <strong>no CFG anywhere</strong> — CIFAR-10 EDM is
+class-conditional via one-hot labels, not text, so <code>s_real</code> is the plain
+teacher score, not a guided one.</p>
+<h3>M2 — The regression branch: paired couples + LPIPS (what DMD2 deleted) ★</h3>
+<p>The reverse KL is <strong>mode-seeking</strong>: a generator that collapses onto a few
+teacher modes can score a low KL while dropping whole classes of images,
+and early in training — when <code>mu_fake</code> is a poor estimate of a fast-moving
+<code>p_fake</code> — the DM gradient can point anywhere. DMD1's fix is brute-force
+anchoring:</p>
+<ol>
+<li><strong>Offline, before training</strong>: run the teacher's own deterministic ODE
+   sampler (EDM's Heun sampler, 18 steps ≈ 35 UNet calls each) on a large
+   set of seeds and save the couples <code>(z_ref, y_ref = ODE(z_ref))</code>. This
+   repo generates 10,000 pairs per CIFAR class = <strong>100,000 couples</strong>
+   (<code>dmd/dataset/dataset_generator.py</code>), each stored as a stacked
+   <code>(2, 3, 32, 32)</code> npy and then packed into one HDF5 file (§D3–D4). The
+   paper did the same at much larger scale for text-to-image; this is the
+   expensive part — you pay full teacher sampling for an entire dataset
+   before step 0.</li>
+<li><strong>Online, every step</strong>: draw a couple from the dataset, push the <em>same</em>
+   <code>z_ref</code> through the student, and penalize
+   <code>L_reg = LPIPS(G(z_ref), y_ref)</code> (§L3).</li>
+</ol>
+<p>Why this works: the teacher ODE is deterministic, so the coupling
+<code>z_ref → y_ref</code> is <strong>one-to-one</strong> — regression onto it does not suffer the
+"average of many targets" gray-mush failure that dooms naive one-step
+distillation under an independent coupling (our
+<code>instaflow_line_by_line.md</code>, "Why naive distillation fails"; DMD1's
+couples are exactly the same object as InstaFlow's, minus the Reflow
+straightening). Because <code>z_ref</code> covers noise space uniformly and each has
+a definite teacher answer, the regression term drags the generator toward
+<em>every</em> teacher mode — mode coverage — and it is a fixed, stationary
+target, so it stabilizes the early phase when the two-network chase of the
+DM loss is still finding its feet.</p>
+<p>Why DMD2 deleted it: it caps the student at the teacher's per-sample ODE
+quality, it costs a dataset's worth of teacher sampling (prohibitive for
+SDXL), and DMD2's GAN-on-real-data term provides the missing stabilizer
+more cheaply (<code>dmd2_line_by_line.md §M4.1–M4.2</code>). Watching DMD1 first
+makes DMD2's deletions legible: same skeleton, the crutch swapped for a
+critic.</p>
+<h3>M3 — EDM parametrization: σ-space, not ᾱ-space</h3>
+<p>Our SD-world tutorials (notes <code>10</code> notation header) use
+<code>α_t := √ᾱ_t</code>, <code>σ_t := √(1−ᾱ_t)</code>, <code>x_t = α_t x₀ + σ_t ε</code> — a
+<em>variance-preserving</em> frame where the clean image is shrunk as noise
+grows. EDM works in the <strong>variance-exploding</strong> σ-frame:</p>
+<pre><code>x_σ = x₀ + σ·ε,        σ ∈ [0.002, 80],   α ≡ 1,
+</code></pre>
+<p>i.e. "time" IS the noise level, nothing is rescaled, and at σ=80 the image
+is an invisible perturbation on top of huge noise. Three consequences you
+must hold in mind while reading this repo:</p>
+<ul>
+<li>
+<p><strong>The network is a denoiser, not an ε-predictor.</strong> <code>EDMPrecond</code> (§W1)
+  wraps the raw UNet <code>F</code> as</p>
+<p>D(x; σ) = c_skip(σ)·x + c_out(σ)·F(c_in(σ)·x, c_noise(σ)),</p>
+</li>
+</ul>
+<p>with <code>c_in = 1/√(σ²+σ_d²)</code> (whitens the input: <code>Var(x_σ) = σ_d² + σ²</code>),
+  <code>c_skip = σ_d²/(σ²+σ_d²)</code> and <code>c_out = σ·σ_d/√(σ²+σ_d²)</code> (chosen so the
+  effective training target has unit variance at every σ), <code>c_noise =
+  ln(σ)/4</code>, <code>σ_d = 0.5</code> (CIFAR pixel std). <code>D(x;σ)</code> directly approximates
+  <code>E[x₀|x_σ]</code> — so where the DMD2 chapter needed <code>get_x0_from_noise</code> after
+  every UNet call, here <strong>the forward pass already returns x̂₀</strong> and
+  <code>loss.py</code> uses the outputs raw.
+- <strong>Score conversion</strong>: from <code>x_σ = x₀ + σε</code>, Tweedie gives
+  <code>∇log p_σ(x) = (D(x;σ) − x)/σ²</code> — the VE analogue of <code>s = −ε̂/σ</code> from
+  notes <code>10 §3</code>. This is the identity behind §M1's cancellation.
+- <strong>The one-step generator is the denoiser called once at (almost) the top
+  noise level.</strong> DMD1 defines <code>G(z) := D_θ(σ_max·z; σ_max-ish)</code> — feed
+  scaled pure noise, condition on a <em>fixed</em> σ, read out the denoised
+  image. At σ≈79.6, <code>c_skip ≈ 4e-5</code> and <code>c_out ≈ 0.5</code>: the input skip is
+  numerically dead and the "denoiser" is really a direct generator network
+  whose output is <code>0.5·F(0.0126·x)</code>. That's why initializing <code>G</code> from the
+  teacher works: the teacher already knows how to make a plausible x̂₀
+  from pure noise (a blurry class-average); training sharpens it into a
+  sample.</p>
+<p>Timesteps in this repo are indices into a 1000-point <strong>Karras grid</strong>
+  (<code>get_sigmas_karras</code>, notes <code>10 §4</code>'s ρ=7 spacing), indexed <em>from the
+  end</em>: <code>t=0 → σ=0</code> (clean), <code>t=999 → σ≈79.56</code> (= grid point 1, "T−1").
+  The generator's fixed sigma is exactly that <code>σ_{T−1} ≈ 79.56</code>.</p>
+<h3>M4 — Map of the code</h3>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>File</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dmd/loss.py</code></td>
+<td>THE heart: <code>DistributionMatchingLoss</code> (M1.1), <code>GeneratorLoss</code> (KL + λ·LPIPS), <code>DenoisingLoss</code> (fake-score training)</td>
+</tr>
+<tr>
+<td><code>dmd/training/training_loop.py</code></td>
+<td><code>train_one_epoch</code>: per-batch G-update then <code>mu_fake</code>-update, paired-batch handling</td>
+</tr>
+<tr>
+<td><code>dmd/train.py</code></td>
+<td><code>run()</code>: loads the three EDM copies, optimizers, dataloaders, epochs, FID</td>
+</tr>
+<tr>
+<td><code>dmd/modeling_utils.py</code></td>
+<td>Karras schedule, VE <code>forward_diffusion</code>, fixed generator sigma, EDM pickle loading</td>
+</tr>
+<tr>
+<td><code>dmd/training/networks.py</code></td>
+<td>verbatim NVLabs EDM networks; we read only <code>EDMPrecond</code></td>
+</tr>
+<tr>
+<td><code>dmd/generate.py</code>, <code>dmd/sampler.py</code></td>
+<td>teacher sampling; <code>save_format="pairs"</code> manufactures the couples</td>
+</tr>
+<tr>
+<td><code>dmd/dataset/*</code></td>
+<td>couple-dataset generation and the HDF5 <code>CIFARPairs</code> Dataset</td>
+</tr>
+<tr>
+<td><code>scripts/dataset_to_h5.py</code></td>
+<td>npy couples + annotations.json → one <code>cifar.hdf5</code></td>
+</tr>
+<tr>
+<td><code>dmd/dnnlib</code>, <code>dmd/torch_utils</code>, <code>dmd/utils</code>, <code>dmd/fid.py</code></td>
+<td>NVLabs plumbing, logging, homemade FID (grouped in §B)</td>
+</tr>
+</tbody>
+</table></div>
+<p>Shapes (B = batch, default 56; everything is <strong>pixels</strong>, not latents —
+CIFAR needs no VAE):</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Tensor</th>
+<th>Shape</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>z</code>, <code>z_ref</code>, <code>x</code>, <code>x_ref</code>, <code>y_ref</code>, <code>noisy_x</code>, <code>grad</code></td>
+<td>(B, 3, 32, 32)</td>
+</tr>
+<tr>
+<td><code>generator_sigma</code></td>
+<td>(1, B) — yes, really; §W4</td>
+</tr>
+<tr>
+<td><code>sigma_t</code> from <code>forward_diffusion</code></td>
+<td>(B,)</td>
+</tr>
+<tr>
+<td><code>class_idx</code> / one-hot <code>class_ids</code></td>
+<td>(B,) long / (B, 10)</td>
+</tr>
+<tr>
+<td><code>weighting_factor</code></td>
+<td>(B, 1, 1, 1)</td>
+</tr>
+</tbody>
+</table></div>
+<p>DMD1 (this repo) vs DMD2, at a glance:</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>DMD1 (here)</th>
+<th>DMD2</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>anchor</td>
+<td>paired dataset + LPIPS regression</td>
+<td>GAN on real data</td>
+</tr>
+<tr>
+<td>real data used</td>
+<td>never (only teacher <em>samples</em>)</td>
+<td>yes (GAN real branch)</td>
+</tr>
+<tr>
+<td>critic:generator update ratio</td>
+<td>1:1</td>
+<td>5:1 (TTUR)</td>
+</tr>
+<tr>
+<td>CFG in <code>s_real</code></td>
+<td>none (class-conditional EDM)</td>
+<td>scale 6–8 baked in</td>
+</tr>
+<tr>
+<td>student steps</td>
+<td>1</td>
+<td>1 or 4 (backward simulation)</td>
+</tr>
+<tr>
+<td>x̂₀ from network</td>
+<td>native (EDM denoiser)</td>
+<td>via <code>get_x0_from_noise</code></td>
+</tr>
+</tbody>
+</table></div>
+<hr />
+<h2>§D — Manufacturing the paired dataset (methodologically load-bearing)</h2>
+<p>This is the part of DMD1 with no DMD2 counterpart: before any distillation
+step runs, the teacher must answer "what image do YOU make from this exact
+noise?" for 100k noises.</p>
+<h3>D1 — <code>dmd/sampler.py</code>: the teacher's ODE sampler (verbatim EDM)</h3>
+<pre><code class="language-python">def edm_sampler(net, latents, steps: int = 18, sigma_min: float = 0.002,
+                sigma_max: float = 80, rho: float = 7.0, S_churn: float = 0.0, ...):
+    t_steps = get_sigmas_karras(steps, sigma_min, sigma_max, rho=rho, device=latents.device)
+    x_next = latents.to(torch.float64) * t_steps[0]
+</code></pre>
+<p>NVLabs' Algorithm 2, copied. 18 Karras-spaced σ levels from 80 down to
+0.002 (+ a final 0). The input <code>latents</code> are <strong>unit</strong> Gaussians; scaling by
+<code>t_steps[0] = 80</code> happens here — remember this, it collides with a training
+detail in §W4. Float64 throughout: EDM's reference sampler prioritizes
+numerical fidelity over speed.</p>
+<pre><code class="language-python">    for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])):
+        ...
+        denoised = net(x_hat, t_hat, class_labels).to(torch.float64)
+        d_cur = (x_hat - denoised) / t_hat
+        x_next = x_hat + (t_next - t_hat) * d_cur
+        if i &lt; steps - 1:
+            denoised = net(x_next, t_next, class_labels).to(torch.float64)
+            d_prime = (x_next - denoised) / t_next
+            x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
+</code></pre>
+<p>Heun's method on the VE probability-flow ODE <code>dx/dσ = (x − D(x;σ))/σ</code>
+(the σ-space twin of the DDIM ODE we derived in notes <code>10 §2</code>): one Euler
+step, then a second UNet call to average the slopes — 2nd order, hence
+2·18−1 = <strong>35 teacher UNet calls per training pair</strong>. <code>S_churn=0</code> in the
+default config makes it fully deterministic — crucial, because the whole
+value of the couple is that <code>z_ref</code> has ONE definite answer (§M2). This is
+the cost DMD2 refused to pay: 100k pairs × 35 calls = 3.5M teacher
+forwards before training even starts.</p>
+<h3>D2 — <code>dmd/generate.py</code>: <code>EDMGenerator</code>, and the <code>pairs</code> save format</h3>
+<p><code>EDMGenerator</code> is a convenience wrapper around <code>edm_sampler</code>: it loads the
+teacher pickle (<code>load_edm</code>, §W5), keeps a <code>GenerationConfig</code> dataclass
+(steps/σ-range/churn defaults exactly as D1), and its <code>__call__</code> shards a
+seed list into batches (with <code>torch.distributed</code> barriers so rank 0
+downloads the model first). The method that matters:</p>
+<pre><code class="language-python">    def generate_batch(self, seeds, class_idx=None, **kwargs):
+        rnd = StackedRandomGenerator(device, seeds)
+        latents = rnd.randn([batch_size, self.model.img_channels,
+                             self.model.img_resolution, self.model.img_resolution], device=device)
+        class_ids = torch.tensor([class_idx] * batch_size, device=device)
+        class_labels = encode_labels(class_ids, self.model.label_dim)
+        images = edm_sampler(self.model, latents, ..., class_labels=class_labels, randn_like=rnd.randn_like)
+        return latents, images
+</code></pre>
+<p><code>StackedRandomGenerator</code> gives every sample its own seeded
+<code>torch.Generator</code>, so pair #001234 is reproducible forever regardless of
+batch size — a dataset of couples must be re-generatable. It returns BOTH
+the unit-Gaussian <code>latents</code> (B,3,32,32) and the finished <code>images</code> — the
+couple, in one tuple.</p>
+<pre><code class="language-python">    @staticmethod
+    def _save_array_as_pairs(output_dir, images, latents, save_start_idx):
+        for iid, image_np, latent_np in zip(instance_ids, images_np, latents_np):
+            pairs = np.stack([image_np, latent_np], axis=0)
+            np.save(os.path.join(samples_output_dir, f&quot;{iid:06d}.npy&quot;), pairs)
+</code></pre>
+<p>One <code>(2, 3, 32, 32)</code> float array per couple: index 0 the image (in
+[−1, 1]-ish pixel range, float64 from the sampler), index 1 the <strong>unit</strong>
+latent. Note the images are saved <em>raw</em>, not quantized to uint8 — the
+regression target keeps full precision.</p>
+<p><code>DMDGenerator</code> at the bottom of the file is the one-step <em>inference</em> class
+for the finished student: load the trained checkpoint
+(<code>load_dmd_model</code>), then</p>
+<pre><code class="language-python">        g_sigmas = get_fixed_generator_sigma(len(seeds), device=device)
+        if scale_latents:
+            latents = latents * g_sigmas[0, 0]
+        ...
+        return self.model(latents, g_sigmas, class_labels=class_labels).to(device)
+</code></pre>
+<p>— scale noise by σ_{T−1}, ONE network call, done. This is the entire
+payoff of the method: compare 35 calls in D1. (Small bug flagged: the
+guard <code>if not latents and not seeds:</code> would crash with "Boolean value of
+Tensor is ambiguous" if you actually pass a <code>latents</code> tensor; seeds-only
+usage works.)</p>
+<h3>D3 — <code>dmd/dataset/dataset_generator.py</code>: the factory loop</h3>
+<pre><code class="language-python">def generate_distillation_dataset(model_path, output_dir, device=None,
+                                  size_per_class: int = 10000, batch_size: int = 64):
+    edm_generator = EDMGenerator(network_path=model_path, device=device)
+    seeds = list(range(size_per_class))
+    for cls in range(10):
+        edm_generator(output_dir.as_posix(), seeds=seeds, class_idx=cls,
+                      batch_size=batch_size, save_format=&quot;pairs&quot;, save_start_idx=instance_id)
+</code></pre>
+<p>10 classes × 10k seeds = 100k couples, class-balanced by construction, plus
+an <code>annotations.json</code> mapping instance id → (npy path, class, seed). The
+docstring recommends batch 1024 on a 24 GB GPU — this is an overnight job,
+and exactly the kind of precompute DMD2's authors deleted. <strong>Deviation
+watch</strong>: the paper doesn't state a CIFAR pair count; 100k is this repo's
+choice (their <code>goals.txt</code> mentions ~1M for ImageNet in the paper).</p>
+<h3>D4 — <code>scripts/dataset_to_h5.py</code> + <code>dmd/dataset/cifar_pairs.py</code>: pack and serve</h3>
+<p><code>convert_json_to_h5</code> walks <code>annotations.json</code> and writes every npy into
+one HDF5 file, <code>hf["/data/{iid}"] = pairs</code> with <code>class_idx</code>/<code>seed</code> as HDF5
+attributes — 100k tiny files become one seekable blob (the README's
+<code>download_data.sh</code> fetches a prebuilt <code>cifar.hdf5</code> from HuggingFace so you
+can skip D1–D3 entirely).</p>
+<pre><code class="language-python">class CIFARPairs(Dataset):
+    def __getitem__(self, index):
+        if self.dataset is None:
+            self.dataset = h5py.File(self.h5_dataset_path, &quot;r&quot;)[&quot;data&quot;]
+        sample = self.dataset[str(index)]
+        image, latent = pairs
+        return_dict = {&quot;instance_id&quot;: index, &quot;image&quot;: image, &quot;latent&quot;: latent,
+                       &quot;class_id&quot;: attributes[&quot;class_idx&quot;], &quot;seed&quot;: attributes[&quot;seed&quot;]}
+</code></pre>
+<p>A standard PyTorch Dataset over the HDF5 file. The lazy <code>h5py.File</code> open
+inside <code>__getitem__</code> is the classic multiprocessing dance: h5py handles
+can't cross the DataLoader fork, so each worker opens its own on first
+access. Unpacking <code>image, latent = pairs</code> splits the (2,3,32,32) stack
+back into the couple. <strong>This dict is the training batch</strong> — every DMD1
+step consumes one paired batch (§T2).</p>
+<hr />
+<h2>§W — <code>dmd/modeling_utils.py</code> (+ <code>EDMPrecond</code>): the EDM wrappers</h2>
+<h3>W1 — <code>EDMPrecond.forward</code> (in <code>dmd/training/networks.py</code>, verbatim NVLabs)</h3>
+<pre><code class="language-python">        c_skip = self.sigma_data**2 / (sigma**2 + self.sigma_data**2)
+        c_out = sigma * self.sigma_data / (sigma**2 + self.sigma_data**2).sqrt()
+        c_in = 1 / (self.sigma_data**2 + sigma**2).sqrt()
+        c_noise = sigma.log() / 4
+
+        F_x = self.model((c_in * x).to(dtype), c_noise.flatten(), class_labels=class_labels, **model_kwargs)
+        D_x = c_skip * x + c_out * F_x.to(torch.float32)
+        return D_x
+</code></pre>
+<p>The preconditioning of §M3, literally. <code>sigma</code> arrives as any shape and is
+<code>reshape(-1, 1, 1, 1)</code>-ed first (this forgiving reshape is what makes §W4's
+odd (1,B) sigma shape survive). All three networks in DMD1 — teacher,
+fake score, generator — ARE this class with a <code>SongUNet</code> inside
+(<code>model_channels=128</code>, <code>channel_mult=(2,2,2)</code>, <code>label_dim=10</code>, ~56M
+params); they differ only in what's frozen and what loss trains them. Every
+call returns x̂₀ ≈ <code>E[x₀|x,σ]</code>, shape (B,3,32,32) — keep repeating this
+while reading <code>loss.py</code>: <strong>no ε anywhere in this codebase</strong>. The rest of
+<code>networks.py</code> (928 lines: <code>SongUNet</code>, <code>DhariwalUNet</code>, attention blocks,
+FIR resampling) is untouched NVLabs EDM — trust it like a library.</p>
+<h3>W2 — <code>get_sigmas_karras</code>: the grid</h3>
+<pre><code class="language-python">    ramp = torch.linspace(0, 1, n)
+    min_inv_rho = sigma_min ** (1 / rho)
+    max_inv_rho = sigma_max ** (1 / rho)
+    sigmas = (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** rho
+    return append_zero(sigmas).to(device)
+</code></pre>
+<p>Karras ρ=7 spacing (interpolate in σ^{1/7}, then raise to the 7th power —
+dense near σ_min, sparse near σ_max), <strong>descending</strong> 80 → 0.002, with a 0
+appended: length n+1. Taken from k-diffusion. Used with n=18 for the
+teacher sampler (D1) and n=1000 as this repo's stand-in for "the 1000
+training timesteps."</p>
+<p><strong>Deviation watch:</strong> the paper's teacher is EDM, and EDM <em>training</em> draws
+σ from a lognormal (P_mean=−1.2, P_std=1.2), not from a uniform index into
+a Karras <em>sampling</em> grid. This repo re-uses the sampling grid as a training
+schedule everywhere (DM loss, denoising loss). It's self-consistent and
+sane, but it is a reimplementation choice — the paper never specifies a
+discrete grid for the CIFAR losses.</p>
+<h3>W3 — <code>forward_diffusion</code>: VE noising, indexed from the end</h3>
+<pre><code class="language-python">def forward_diffusion(x, t, n: int = 1000, noise=None):
+    if noise is None:
+        noise = torch.randn_like(x, device=x.device)
+    sigma = get_sigmas_karras(n, sigma_min=0.002, sigma_max=80, rho=7.0, device=x.device)
+    ns = noise * sigma[-(t + 1), None, None, None]
+    noisy_x = x + ns
+    return noisy_x, sigma[-(t + 1)]
+</code></pre>
+<p>The forward shortcut of this world: <code>x_t = x + σ_t·ε</code> — compare notes <code>10</code>'s
+<code>x_t = α_t x₀ + σ_t ε</code> with α ≡ 1. The index gymnastics: the schedule array
+has 1001 entries descending 80→0.002→0, and <code>sigma[-(t+1)]</code> counts from the
+back, so <strong>t=0 → σ=0 (clean), t=999 → σ=79.56 (grid point 1)</strong> — large t =
+more noise, matching DDPM intuition, but the array itself is stored
+backwards. <code>t</code> is a (B,) LongTensor, so the fancy-index returns (B,) sigmas
+broadcast to (B,1,1,1) for the product. Two small quirks: the full
+1001-point schedule is rebuilt on every call (cheap, but wasteful), and
+callers pass <code>t</code> created on CPU while <code>x</code> is on GPU — PyTorch tolerates
+CPU index tensors on CUDA data, so it works.</p>
+<h3>W4 — <code>get_fixed_generator_sigma</code>: the generator's frozen clock</h3>
+<pre><code class="language-python">def get_fixed_generator_sigma(size, device):
+    sigma = get_sigmas_karras(n=1000, sigma_min=0.002, sigma_max=80.0, device=device)[1]  # sigma_(T-1)
+    return torch.tile(sigma, (1, size))
+</code></pre>
+<p>The paper conditions the one-step generator at the fixed timestep T−1; in
+EDM terms that is grid point 1 of the 1000-point schedule, <strong>σ ≈ 79.564</strong>
+(not 80!). Returned tiled to shape <strong>(1, size)</strong> — an odd choice that only
+works because <code>EDMPrecond.forward</code> reshapes sigma to (−1,1,1,1) anyway;
+callers grab the scalar as <code>generator_sigma[0, 0]</code>.</p>
+<p><strong>Quirk with teeth:</strong> the paired dataset (D1) built its images from
+<code>latents * t_steps[0]</code> = <code>80·z</code>, but training and inference scale <code>z_ref</code>
+by this <strong>79.564</strong>. So the generator sees <code>79.564·z_ref</code> while the teacher
+answered for <code>80·z_ref</code> — a 0.5% mismatch in input scale between the
+couple's question and its answer. Almost certainly harmless (c_in shrinks
+both to ~0.0126·x), but it is a genuine internal inconsistency of this
+reimplementation worth knowing about, since the <em>entire premise</em> of the
+regression loss is "same z, same answer."</p>
+<h3>W5 — Loaders and labels (brief)</h3>
+<ul>
+<li><code>load_edm(model_path, device)</code>: unpickles NVLabs' distributed <code>.pkl</code>
+  and returns the <code>"ema"</code> network. The <code>sys.path.insert(0, SOURCES_ROOT)</code>
+  line is a real trick: the pickle stores module paths
+  (<code>training.networks.EDMPrecond</code>), so the repo fakes the original import
+  layout to deserialize. All three networks start life through this
+  function — <strong>teacher, fake score, and generator are three copies of the
+  same EMA teacher weights</strong> (paper-faithful: DMD initializes both
+  trainables from the teacher).</li>
+<li><code>load_dmd_model(...)</code>: rebuilds <code>EDMPrecond</code> with the CIFAR
+  hyperparameters <strong>hardcoded</strong> (resolution 32, <code>label_dim=10</code>,
+  <code>channel_mult=(2,2,2)</code>, <code>dropout=0.13</code>…), loads <code>model_g</code>/<code>model_d</code>
+  state dicts, and optionally the two AdamW states for resuming. Change
+  dataset → edit this function by hand; the config is not saved in the
+  checkpoint.</li>
+<li><code>encode_labels(class_ids, label_dim)</code>: <code>one_hot(class_ids, 10)</code> → (B,10)
+  float — EDM's class conditioning format.</li>
+<li><code>sample_from_generator</code> / <code>generate_samples</code>: convenience one-step
+  samplers duplicating §D2's <code>DMDGenerator.generate_batch</code> logic (including
+  the same tensor-truthiness bug).</li>
+</ul>
+<hr />
+<h2>§L — <code>dmd/loss.py</code> in FULL: the heart ★</h2>
+<p>Forty-odd lines that contain the whole method. Read them slowly.</p>
+<h3>L1 — Imports</h3>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+from piq import LPIPS
+from torch.nn import Module
+from torch.nn.modules.loss import _Loss
+from torchvision.transforms import Resize
+
+from dmd.modeling_utils import forward_diffusion
+</code></pre>
+<p><code>piq</code> supplies LPIPS (VGG16-feature perceptual distance, notes: "does it
+<em>look</em> the same to a convnet," robust where pixel MSE is blind).
+Subclassing <code>_Loss</code> (PyTorch's private loss base) buys them a <code>reduction</code>
+attribute and nothing else. <code>forward_diffusion</code> is §W3 — the only bridge
+to the noise machinery.</p>
+<h3>L2 — <code>DistributionMatchingLoss</code>: Eq. (M1.1), verbatim ★★</h3>
+<pre><code class="language-python">class DistributionMatchingLoss(_Loss):
+    &quot;&quot;&quot;Loss function for DMD (Algorithm 2) proposed in ...&quot;&quot;&quot;
+    def __init__(self, timesteps: int, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.timesteps = timesteps
+</code></pre>
+<p><code>timesteps=1000</code> — the grid size for §W3. Nothing else is state.</p>
+<pre><code class="language-python">    def forward(self, mu_real: Module, mu_fake: Module, x: torch.Tensor,
+                class_ids: torch.Tensor = None) -&gt; torch.Tensor:
+        b, c, w, h = x.shape
+</code></pre>
+<p>Signature tells the story: the loss <em>receives both score networks as
+arguments</em> every call — no ownership, no optimizer entanglement; the
+training loop decides what's frozen. <code>x</code> is <code>G(z)</code>, (B,3,32,32),
+<strong>graph-attached to the generator</strong> — the only tensor here that ever will
+be.</p>
+<pre><code class="language-python">        # In practice T_min, T_max choices follows DreamFusion as follows
+        T_min, T_max = int(0.02 * self.timesteps), int(0.98 * self.timesteps)
+        timestep = torch.randint(T_min, T_max, [b])
+        noisy_x, sigma_t = forward_diffusion(x, timestep)
+</code></pre>
+<p>Draw t ∈ [20, 979] per sample — the DreamFusion/SDS 2%–98% clip, same
+range and same justification as DMD2 (§G1 there): at tiny σ the gradient
+is noise-dominated, at σ_max it says nothing about x₀. Through §W3's
+end-indexing this means σ ∈ [0.0032, 71.3]. Then diffuse the <em>student's
+own sample</em>: <code>noisy_x = x + σ_t·ε</code>, fresh ε drawn inside
+<code>forward_diffusion</code>. The KL is matched at this shared noisy point.
+(<code>timestep</code> lives on CPU; works, see W3.)</p>
+<pre><code class="language-python">        with (torch.no_grad()):
+            pred_fake_image = mu_fake(noisy_x, sigma_t, class_labels=class_ids)
+            pred_real_image = mu_real(noisy_x, sigma_t, class_labels=class_ids)
+</code></pre>
+<p>Both denoisers answer "what clean image do you think is under this noise?"
+— (B,3,32,32) each, gradient-free (the stray parentheses around
+<code>torch.no_grad()</code> are cosmetic). <code>pred_real_image</code> = the frozen teacher's
+x̂₀ = <code>s_real</code> in disguise; <code>pred_fake_image</code> = the online critic's x̂₀ =
+<code>s_fake</code> in disguise (§M3's Tweedie identity). No CFG, no ε→x̂₀
+conversion, no float64 dance — the EDM wrapper did the work. Compare the
+~20 lines this took in DMD2's SD world.</p>
+<pre><code class="language-python">        weighting_factor = torch.abs(x - pred_real_image).mean(dim=[1, 2, 3], keepdim=True)  # Eqn. 8
+        grad = (pred_fake_image - pred_real_image) / weighting_factor
+</code></pre>
+<p><strong>The DMD gradient.</strong> Numerator: <code>x̂₀_fake − x̂₀_real</code> ∝ <code>s_fake − s_real</code>
+— the reverse-KL direction, "more typical of the student than of the
+teacher," to be descended. Denominator: per-sample <code>mean|x − x̂₀_real|</code>
+over C,H,W, kept as (B,1,1,1) — the paper's Eq. 8 weight
+<code>σ²/α·CS/‖x−x̂₀_real‖₁</code> with the σ²/α part already cancelled by working in
+x̂₀-space (§M1; in this VE frame α=1 so the cancellation is exact). It
+normalizes by "how much the teacher wants this sample changed," keeping
+gradient scale uniform across noise levels and samples. Two nits vs DMD2's
+version: no <code>nan_to_num</code> guard here, and <code>weighting_factor</code> is not
+detached — both harmless in practice (the target is detached next line, so
+no gradient flows through the factor), but the missing NaN guard means a
+degenerate batch would kill training (the loop's <code>isfinite</code> check, §T2, is
+the actual safety net).</p>
+<pre><code class="language-python">        diff = (x - grad).detach()  # stop-gradient
+        return 0.5 * F.mse_loss(x, diff, reduction=self.reduction)
+</code></pre>
+<p>The <strong>detached-target trick</strong>, third sighting after our KAIST SDS and
+DMD2 (<code>dmd2_line_by_line.md §M3</code>, <code>kaist_reports.md</code>): the target is a
+constant, so <code>dL/dx = (x − (x − grad))/N = grad/N</code> — backprop hands
+autograd exactly the hand-computed gradient, which flows into <code>∂G/∂θ</code>
+through <code>x</code>, never touching either score network. <code>reduction</code> defaults to
+<code>"mean"</code>, so N = B·3·32·32 = 3072·B silently scales the injected gradient
+— absorbed by the learning rate, but change resolution and your effective
+step size changes too (same quirk ledger entry as DMD2).</p>
+<h3>L3 — <code>GeneratorLoss</code>: KL + λ·LPIPS — the DMD1 signature ★</h3>
+<pre><code class="language-python">class GeneratorLoss(_Loss):
+    &quot;&quot;&quot;Combined loss for the generator model. See § 3.4 (Final Objective).
+    D_KL + lambda_reg * L_reg&quot;&quot;&quot;
+    def __init__(self, timesteps: int = 1000, lambda_reg: float = 0.25, *args, **kwargs) -&gt; None:
+        super().__init__(self, *args, **kwargs)
+        self.dmd_loss = DistributionMatchingLoss(timesteps)
+        self.lpips = LPIPS()
+        self.lambda_reg = lambda_reg
+</code></pre>
+<p>The paper's §3.4 final objective, one class. <code>lambda_reg=0.25</code> matches the
+paper's stated regression weight. <code>LPIPS()</code> is piq's VGG16 version with
+default <code>reduction='mean'</code> → returns a scalar. (Micro-bug: <code>super()
+.__init__(self, ...)</code> passes <code>self</code> as the <code>size_average</code> positional —
+PyTorch's deprecated arg path shrugs it off, but it's a typo.) <strong>Deviation
+watch:</strong> the official DMD used LPIPS as implemented in its own stack; piq's
+weights/normalization may differ slightly — fine for reproduction, not
+bit-exact.</p>
+<pre><code class="language-python">    def forward(self, mu_real, mu_fake, x, x_ref, y_ref, class_ids=None):
+        loss_kl = self.dmd_loss(mu_real, mu_fake, x, class_ids)
+</code></pre>
+<p>Distribution matching on <code>x = G(z)</code> — <strong>fresh random z</strong>, nothing to do
+with the paired data. The two branches deliberately use different noises:
+the KL term must sample the generator's whole distribution, not just the
+reference set.</p>
+<pre><code class="language-python">        # Apply preprocessing
+        x_ref = (x_ref + 1) / 2.0
+        y_ref = (y_ref + 1) / 2.0
+        transform = Resize(224)
+        x_ref = transform(x_ref)
+        y_ref = transform(y_ref)
+        loss_reg = self.lpips(x_ref, y_ref)
+        return loss_kl + self.lambda_reg * loss_reg
+</code></pre>
+<p><strong>The regression branch — the loss DMD2 deleted.</strong> <code>x_ref = G(z_ref)</code> is
+the student's answer for the paired latent, <code>y_ref</code> the teacher's
+precomputed ODE answer for the <em>same</em> latent (§D). Map [−1,1] → [0,1]
+(piq's expected range), bilinearly upsample 32 → 224 (VGG16 was trained at
+224; a 32×32 input would shrivel to ~1×1 through its poolings — the resize
+is the reimplementers' pragmatic choice; the paper doesn't discuss CIFAR
+LPIPS resolution), then perceptual distance. Because the coupling is
+one-to-one (§M2), this is honest regression, not mush-inducing averaging —
+it anchors mode coverage and steadies the early chase, at the price of a
+teacher-sampled dataset and a quality ceiling. <code>Resize(224)</code> is
+re-instantiated every call — wasteful but harmless. Total:
+<code>loss_kl + 0.25·loss_reg</code>, one scalar.</p>
+<h3>L4 — <code>DenoisingLoss</code>: the fake score chases the student</h3>
+<pre><code class="language-python">class DenoisingLoss(_Loss):
+    &quot;&quot;&quot;Loss function for DMD (Equation 6 / Algorithm 3) ...&quot;&quot;&quot;
+    def forward(self, mu_fake, x, t, class_ids=None):
+        x_t, sigma_t = forward_diffusion(x.detach(), t)  # stop grad
+        pred_fake_image = mu_fake(x_t, sigma_t, class_labels=class_ids)
+</code></pre>
+<p>DMD2's <code>compute_loss_fake</code>, EDM edition. <code>x.detach()</code> first — the
+generator must never learn from its critic's training signal. Re-noise the
+generator's samples with <em>fresh</em> noise and a <em>fresh</em> t (drawn by the
+caller, §T2), then ask the trainable <code>mu_fake</code> to denoise. Note
+<code>pred_fake_image</code> here IS graph-attached — this loss trains <code>mu_fake</code>.</p>
+<pre><code class="language-python">        # Algorithm SNR + 1 / sigma_data^2 for EDM (sigma_data = 0.5)
+        weight = 1 / sigma_t**2 + 1 / mu_fake.sigma_data**2
+        return torch.mean(weight[:, None, None, None] * (pred_fake_image - x.detach()) ** 2)
+</code></pre>
+<p>Weighted x̂₀-space MSE. The weight <code>1/σ² + 1/σ_d²</code> = <code>(σ²+σ_d²)/(σ²σ_d²)</code>
+is <strong>exactly EDM's λ(σ) = 1/c_out(σ)²</strong> — the weighting NVLabs trained the
+teacher with, which makes the effective per-σ target unit-variance. So the
+fake score is trained with <em>the teacher's own recipe</em> but on <em>the
+student's outputs</em> — precisely the paper's Eq. 6 ("same objective as the
+base model"). By the standard denoising-score-matching argument, <code>mu_fake</code>
+→ the denoiser (hence score) of <code>p_fake</code> at every σ. The caller draws
+<code>t ~ DU(1, 1000)</code> — t=0 is excluded because σ=0 makes the weight 1/0²
+(the in-loop comment says exactly this); the full remaining range is used,
+wider than the DM loss's 2–98% clip, for DMD2's same reason: the critic
+must be accurate everywhere it might be queried.</p>
+<hr />
+<h2>§T — The training step: <code>train.py</code> + <code>training_loop.py</code></h2>
+<h3>T1 — <code>dmd/train.py</code>, <code>run()</code>: three copies of one teacher</h3>
+<p>Skipping the argparse-style docstring and Neptune plumbing, the method-
+relevant lines:</p>
+<pre><code class="language-python">    training_dataset = CIFARPairs(data_path)
+    train_loader = DataLoader(training_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+</code></pre>
+<p>THE dataloader is the paired dataset (§D4). There is no separate "noise
+loader": fresh z for the KL term is drawn inside the loop, and — notice —
+<strong>real CIFAR-10 training images are never loaded at all</strong>. DMD1 trains
+purely against the teacher (its samples and its score); real data appears
+only in the FID evaluator (test split). Contrast DMD2, where real latents
+feed the GAN.</p>
+<pre><code class="language-python">    mu_real = load_edm(model_path=&quot;https://nvlabs-fi-cdn.nvidia.com/edm/pretrained/edm-cifar10-32x32-cond-vp.pkl&quot;, device=device)
+    ...
+    mu_fake = load_edm(model_path=model_path, device=device)
+    generator = load_edm(model_path=model_path, device=device)
+</code></pre>
+<p>Three <code>EDMPrecond</code>s. Quirk with teeth: the teacher's URL is <strong>hardcoded</strong>,
+ignoring the CLI's <code>--model-path</code> (which only seeds <code>mu_fake</code> and
+<code>generator</code>) — pass a different teacher and you'll silently distill from
+the CIFAR-10 one anyway. Both trainables start as exact teacher clones
+(paper-faithful; DMD2 does the same).</p>
+<pre><code class="language-python">    generator_optimizer = AdamW(params=generator.parameters(), **optimizer_kwargs)
+    diffuser_optimizer = AdamW(params=mu_fake.parameters(), **optimizer_kwargs)
+    generator_loss = GeneratorLoss(timesteps=dmd_loss_timesteps, lambda_reg=dmd_loss_lambda)
+    diffusion_loss = DenoisingLoss()
+</code></pre>
+<p>Two optimizers, identical settings (lr 5e-5, wd 0.01, betas (0.9, 0.999))
+— the README's "Assumptions" section flags this explicitly: the paper
+gives hyperparameters without saying which network they belong to, so the
+repo applies them to both. No LR scheduler (a commented-out
+<code>lr_scheduler.step</code> haunts <code>train()</code>), no EMA of the generator (commented
+out in the loop) — the paper's larger runs likely had both; another honest
+deviation. <code>resume_from_checkpoint</code> swaps this block for
+<code>load_dmd_model(..., for_training=True)</code> (§W5).</p>
+<p><code>train()</code> itself is a thin epoch loop: <code>train_one_epoch(...)</code> → compute
+FID on the CIFAR-10 <em>test</em> split (§B) → <code>checkpoint_handler.save(...)</code>
+keeping <code>last_checkpoint.pt</code> and a FID-best <code>best_checkpoint.pt</code>. The
+<code>try: import apex / fvcore</code> blocks at the top of the file are dead
+template code from a timm-style project — never used.</p>
+<h3>T2 — <code>training_loop.py</code>, <code>train_one_epoch</code>: the alternation ★</h3>
+<pre><code class="language-python">    generator.requires_grad_(True).train()
+    mu_fake.requires_grad_(True).train()
+    mu_real.requires_grad_(False).eval()
+</code></pre>
+<p>Roles pinned once per epoch: two trainables, one frozen teacher. Note
+<code>mu_fake</code> stays <code>requires_grad_(True)</code> even during the generator's turn —
+safe only because §L2 runs it under <code>no_grad</code> and §T2 zeroes grads before
+each step (DMD2 needed a <code>requires_grad_</code> sandwich because its GAN loss
+flows through critic activations; DMD1 has no such path).</p>
+<pre><code class="language-python">    for pairs in metric_logger.log_every(data_loader_train, print_freq, header):
+        y_ref = pairs[&quot;image&quot;].to(device, non_blocking=True).to(torch.float32).clip(-1, 1)
+        z_ref = pairs[&quot;latent&quot;].to(device, non_blocking=True).to(torch.float32)
+        z = torch.randn_like(y_ref, device=device)
+</code></pre>
+<p>Every iteration consumes one <strong>paired batch</strong>: the teacher's answer
+<code>y_ref</code> (B,3,32,32), clipped to [−1,1] (the float64 ODE output can
+slightly overshoot; LPIPS wants a bounded range), its question <code>z_ref</code>,
+and a <em>fresh</em> unit Gaussian <code>z</code> for the KL branch — two noise sources, two
+loss branches, one batch (§L3's deliberate split).</p>
+<pre><code class="language-python">        generator_sigma = get_fixed_generator_sigma(z.shape[0], device=device)
+        # Scale Z ~ N(0,1) (z and z_ref) w/ sigma(T-1) to match the sigma at T-1
+        z = z * generator_sigma[0, 0]  # scalar product
+        z_ref = z_ref * generator_sigma[0, 0]
+        class_idx = pairs[&quot;class_id&quot;].to(device, non_blocking=True)
+        class_ids = encode_labels(class_idx, generator.label_dim)
+</code></pre>
+<p>Both latents scaled by σ_{T−1} ≈ 79.56 so the generator's input looks like
+a legal EDM state at its fixed conditioning level, <code>x_σ ≈ σ·ε</code> (§M3; and
+recall §W4's 79.56-vs-80 mismatch against how <code>y_ref</code> was made). Labels
+one-hot (B,10); both <code>x</code> and <code>x_ref</code> use the <em>pair's</em> class — the fresh-z
+branch inherits the batch's class distribution, which is uniform by
+dataset construction (§D3).</p>
+<pre><code class="language-python">        with amp_autocast():
+            # Update generator
+            # tanh after small experiment between (no-postprocess, tanh, clipping)
+            x = generator(z, generator_sigma, class_labels=class_ids)
+            x_ref = generator(z_ref, generator_sigma, class_labels=class_ids)
+            l_g = loss_g(mu_real, mu_fake, x, x_ref, y_ref, class_ids)
+            if not math.isfinite(l_g.item()):
+                print(f&quot;Generator Loss is {l_g.item()}, stopping training&quot;)
+                sys.exit(1)
+        update_parameters(generator, l_g, optimizer_g, max_norm)
+</code></pre>
+<p><strong>Generator turn.</strong> TWO generator forwards per step — one per branch:
+<code>x = G(z)</code> feeds the DM loss, <code>x_ref = G(z_ref)</code> feeds LPIPS against
+<code>y_ref</code>; then <code>l_g = loss_kl + 0.25·loss_reg</code> (§L3), hard-exit on
+NaN/inf (the safety net §L2 lacks internally), and
+<code>update_parameters</code> = zero_grad → backward → <code>clip_grad_norm_(10)</code> → step.
+<code>amp_autocast</code> defaults to <code>contextlib.suppress</code> (i.e. <strong>no</strong> mixed
+precision unless wired up — the CLI never wires it). The orphaned comment
+about <code>tanh</code> records an experiment that lost: the shipped code applies
+<em>no</em> output post-processing to <code>x</code> during training, though <code>y_ref</code> was
+clipped — a small asymmetry to know about.</p>
+<pre><code class="language-python">        with amp_autocast():
+            # Update mu_fake
+            t = torch.randint(1, 1000, [x.shape[0]])  # t ~ DU(1,1000) as t=0 leads 1/0^2 -&gt; inf
+            l_d = loss_d(mu_fake, x, t, class_ids)
+            ...
+        update_parameters(mu_fake, l_d, optimizer_d, max_norm)
+</code></pre>
+<p><strong>Critic turn, same iteration, ratio 1:1.</strong> <code>loss_d</code> = §L4's weighted
+denoising loss on the SAME <code>x</code> batch (detached inside), fresh t ∈ [1,999]
+→ σ ∈ [0.002, 79.56]. Two things to notice against DMD2: (i) no TTUR —
+one critic update per generator update (DMD2 found 5:1 necessary at SD
+scale; at CIFAR scale with the regression anchor, 1:1 sufficed); (ii) the
+critic trains on samples from the generator <em>as it was before this
+iteration's update</em> — a one-step-stale distribution, standard
+GAN-alternation slack. Also note the paired branch (<code>x_ref</code>) never feeds
+the critic; <code>mu_fake</code> only ever sees fresh-noise samples.</p>
+<pre><code class="language-python">        if i % im_save_freq == 0:
+            with torch.no_grad():
+                x_t, sigma_t = forward_diffusion(x, t)
+                real_pred = mu_real(x_t, sigma_t, class_labels=class_ids)
+                fake_pred = mu_fake(x_t, sigma_t, class_labels=class_ids)
+            grid = _save_intermediate_images(images_epoch_dir, [x, real_pred, fake_pred, x_ref, y_ref], f&quot;iter_{i}&quot;)
+</code></pre>
+<p>Every 300 iters, the five-row debug grid the README documents:
+<code>(x, x_real, x_fake, x_ref, y_ref)</code> — the student's sample, what the
+teacher vs the critic think hides under its re-noised version (their
+<em>disagreement</em> is the DM gradient — the same "what does the teacher want
+changed" picture DMD2 logs), and the regression pair side by side. It
+reuses the critic's <code>t</code> for a fresh re-noising; visualization only.
+Everything else in the loop is <code>MetricLogger</code> bookkeeping; the epoch
+returns averaged meters.</p>
+<hr />
+<h2>§B — Boilerplate, grouped (skim once, then trust)</h2>
+<ul>
+<li><strong><code>dmd/dnnlib/</code>, <code>dmd/torch_utils/</code></strong> — verbatim NVLabs plumbing:
+  <code>dnnlib.util.open_url</code> (downloads + caches the teacher pickle),
+  <code>EasyDict</code>, <code>persistence</code> (lets pickled classes deserialize),
+  <code>distributed</code>/<code>training_stats</code>/<code>misc</code> (multi-GPU helpers; effectively
+  single-GPU here). Imported, never modified — treat as vendored library.</li>
+<li><strong><code>dmd/fid.py</code></strong> — a homemade FID: InceptionV3 with <code>fc = Identity()</code>,
+  bilinear 299-upsampling, features → scipy <code>sqrtm</code> Fréchet distance,
+  comparing generator samples against the <strong>CIFAR-10 test split (10k)</strong>
+  each epoch. Deviation watch: standard reported CIFAR FIDs (including
+  the paper's 2.66) use 50k samples vs the <em>training</em> set with the
+  canonical FID pipeline — this repo's numbers are directionally useful
+  for checkpointing, not comparable to the paper's table.</li>
+<li><strong><code>dmd/utils/</code></strong> — <code>seed_everything</code>, Neptune experiment creation,
+  <code>MetricLogger</code>/<code>SmoothedValue</code> (torchvision-reference style),
+  <code>CheckpointHandler</code> (last + FID-best checkpoints, JSON log lines),
+  <code>torch_to_pillow</code> (the <code>(x·127.5 + 128)</code> uint8 mapping), image grids.
+  A <code>_load_checkpoint_for_ema</code> helper and fvcore FLOP-count imports are
+  dead template code.</li>
+<li><strong><code>dmd/__main__.py</code></strong> — <code>fire</code> CLI: <code>generate-edm</code> (D2),
+  <code>generate-dataset</code> (D3), <code>train</code> (T1). <code>scripts/download_data.sh</code>
+  fetches the prebuilt <code>cifar.hdf5</code> couples and the authors' trained
+  checkpoint from HuggingFace; <code>main.ipynb</code> is a Colab walk-through of the
+  same calls.</li>
+</ul>
+<hr />
+<h2>Quirk ledger (honesty section)</h2>
+<ul>
+<li><strong>Unofficial, under-resourced reproduction</strong>: 1× RTX 4090, batch 48
+  (paper: 7×56), lr sqrt-scaled to ~1.75e-5 in the authors' actual runs,
+  FID admittedly not matched to the paper's 2.66 (<code>goals.txt</code>). The
+  method is faithfully shaped; the numbers are not the paper's.</li>
+<li><strong>σ = 79.564 vs 80</strong>: couples generated from <code>80·z</code>, generator trained
+  and run on <code>79.564·z_ref</code> (§W4) — a small internal inconsistency in the
+  very pairing the regression loss depends on.</li>
+<li><strong>Hardcoded teacher URL</strong> in <code>run()</code> ignores <code>--model-path</code> for
+  <code>mu_real</code> (§T1).</li>
+<li><strong>Uniform t over a Karras <em>sampling</em> grid</strong> stands in for the teacher's
+  actual (lognormal-σ) training distribution in both losses (§W2) — a
+  reimplementation choice the paper doesn't sanction or forbid.</li>
+<li><strong>LPIPS details are the reimplementers'</strong>: piq's VGG16 LPIPS, [0,1]
+  inputs, bilinear 32→224 upsample; <code>Resize(224)</code> rebuilt per call;
+  <code>super().__init__(self, ...)</code> typo in <code>GeneratorLoss</code> (§L3).</li>
+<li><strong>No <code>nan_to_num</code>, no EMA, no LR schedule</strong>: the NaN guard is an
+  <code>isfinite</code>-and-exit in the loop; EMA and scheduler exist only as
+  comments (§T1–T2). DMD2 kept the nan guard; the paper's big runs almost
+  surely kept EMA.</li>
+<li><strong><code>reduction="mean"</code> in the DM loss</strong> divides the injected gradient by
+  B·3072; resolution changes silently rescale the DM step (shared with
+  DMD2's ledger).</li>
+<li><strong><code>weighting_factor</code> not detached</strong> — harmless (target is detached), but
+  it builds pointless graph.</li>
+<li><strong>(1, B) sigma tensors</strong> (<code>get_fixed_generator_sigma</code>) survive only
+  because <code>EDMPrecond</code> reshapes; don't imitate.</li>
+<li><strong>Tensor-truthiness bug</strong> in <code>sample_from_generator</code> /
+  <code>DMDGenerator.generate_batch</code>: passing an actual <code>latents</code> tensor hits
+  <code>if not latents ...</code> → runtime error; seeds-path works (§D2).</li>
+<li><strong><code>y_ref</code> clipped, <code>x</code> not</strong>: training compares an unclipped student
+  against a clipped teacher target; the orphan "tanh" comment records the
+  experiment (§T2).</li>
+<li><strong>Dead template code</strong>: apex/fvcore imports, EMA helpers, commented
+  schedulers — inherited from a timm-style project skeleton; ignore.</li>
+<li><strong>FID protocol nonstandard</strong> (test split, 10k, homemade pipeline) —
+  fine for model selection, wrong for paper comparison (§B).</li>
+</ul>
+<hr />
+<h2>What to carry forward</h2>
+<ol>
+<li><strong>DMD1 = DMD gradient + paired-regression anchor.</strong> The generator loss
+   is <code>L_KL + 0.25·LPIPS(G(z_ref), ODE_teacher(z_ref))</code>: reverse-KL
+   descent via <code>grad = (x̂₀_fake − x̂₀_real)/mean|x − x̂₀_real|</code> (§L2, the
+   same Eq. as DMD2), plus a fixed one-to-one regression target that buys
+   mode coverage and early-training stability at the price of an offline
+   teacher-sampled dataset and a teacher-quality ceiling. DMD2's whole
+   pitch is deleting branch 2 and replacing its stabilizing role with a
+   GAN on real data.</li>
+<li><strong>Deterministic couples are a recurring tool.</strong> <code>(z, ODE(z))</code> pairs —
+   here as an anchor, in InstaFlow as the entire training signal (after
+   Reflow straightening), in DMD2's optional ODE warm-start — always for
+   the same reason: a deterministic teacher sampler turns hopeless
+   one-to-many regression into honest one-to-one regression.</li>
+<li><strong>Parametrization does bookkeeping for you.</strong> In EDM the network <em>is</em>
+   x̂₀ (<code>D = c_skip·x + c_out·F(c_in·x)</code>), α ≡ 1, and
+   <code>score = (D − x)/σ²</code> — so DMD's weighted score difference collapses to
+   two forward calls and one subtraction, with none of the ε→x̂₀ float64
+   gymnastics the SD/ᾱ world needs (notes <code>10</code> header for the
+   dictionary between frames).</li>
+<li><strong>A one-step generator can be the teacher's own architecture at a
+   frozen timestep</strong>: <code>G(z) = D_θ(σ_{T−1}·z; σ_{T−1})</code>, initialized from
+   teacher weights, where c_skip ≈ 0 makes it a de-facto direct generator
+   — the cheapest possible student design, reused by DMD2.</li>
+<li><strong>The detached-target trick, fourth sighting</strong>: <code>0.5·mse(x,
+   (x − grad).detach())</code> injects any hand-computed gradient with one
+   backward pass and zero backprop through the score networks (KAIST SDS
+   → PDS → DMD2 → here).</li>
+<li><strong>Critic-freshness is scale-dependent</strong>: 1:1 alternation plus a
+   regression anchor suffices at CIFAR scale; at SD scale DMD2 needed
+   5:1 TTUR once the anchor was gone. When you remove a stabilizer,
+   budget update ratio to compensate.</li>
+</ol></div></body></html>

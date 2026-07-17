@@ -1,0 +1,866 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DMDR, Line by Line — DMD Meets RL</title><style>
+  :root { --ground:#F7F8FA; --ink:#1D2634; --muted:#5F6E80;
+          --accent:#31599B; --rule:#DDE3EA; --card:#EEF1F5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ground:#12161D; --ink:#D9DEE6; --muted:#8B99AB;
+            --accent:#8FB3E2; --rule:#28303C; --card:#1A202A; } }
+  html { background: var(--ground); }
+  body { margin:0; color:var(--ink);
+    font-family: Charter, Georgia, 'Times New Roman', serif;
+    font-size:1.05rem; line-height:1.66; }
+  .wrap { max-width:72ch; margin:0 auto; padding:2.2rem 1.25rem 4rem; }
+  .eyebrow { font-family:system-ui,sans-serif; font-size:.72rem; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--muted); margin:0 0 .6rem; }
+  h1 { font-size:1.75rem; line-height:1.22; margin:0 0 1.2rem; }
+  h2 { font-size:1.28rem; margin:2.4rem 0 .7rem; padding-top:1.2rem;
+       border-top:1px solid var(--rule); }
+  h3 { font-size:1.08rem; margin:1.8rem 0 .5rem; color:var(--accent); }
+  p, li { margin:0 0 .95rem; } ul, ol { padding-left:1.3rem; }
+  blockquote { border-left:3px solid var(--accent); background:var(--card);
+    margin:1.2rem 0; padding:.7rem 1rem; border-radius:0 6px 6px 0; }
+  pre { background:var(--card); border-radius:6px; padding:.9rem 1rem;
+    overflow-x:auto; font-size:.82rem; line-height:1.5; }
+  code { font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+    font-size:.86em; background:var(--card); padding:.08em .3em; border-radius:4px; }
+  pre code { background:none; padding:0; }
+  .tablewrap { overflow-x:auto; margin:1.2rem 0; }
+  table { border-collapse:collapse; width:100%;
+    font-family:system-ui,sans-serif; font-size:.86rem; }
+  th, td { text-align:left; padding:.45rem .65rem; border-bottom:1px solid var(--rule); }
+  th { font-size:.7rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
+  a { color:var(--accent); }
+</style></head><body>
+<div class="wrap"><p class="eyebrow">Distillation 6/6 · <a href="index.html">index</a></p><h1>DMDR, Line by Line — Distillation Meets RLHF (the DMD2 Sequel)</h1>
+<p><em>A beginner's reading companion to the open DMDR training demo
+(<code>distillation/dmdr/train_cc/sit/</code>, from "Distribution Matching Distillation
+Meets Reinforcement Learning", arXiv 2511.13649 — the recipe behind
+Z-Image-Turbo). This is a SEQUEL to our DMD2 tutorial
+(<code>dmd2_line_by_line.md</code>): the DMD gradient, the fake-score chase, the
+detached-target trick, TTUR, and backward simulation are all inherited and
+cited there rather than re-derived — this document covers what DMDR ADDS.
+Family context is <code>00_overview.md §3b</code> (family B + RL); CFG is notes
+<code>11 §4</code> (and <code>11 §7</code> for velocity models, which is what runs here).</em></p>
+<p><strong>The codebase in one sentence:</strong> take DMD2's two-score matching loop,
+replace the second full teacher copy with tiny LoRA "guidance units" riding
+on ONE frozen teacher body (fake score = teacher + LoRA, real score =
+teacher), delete the GAN and the entire dataset, and add a differentiable
+reward (DINOv2's log-probability of the conditioning class) to the
+generator's loss — <em>jointly with</em> the DMD term, so the student matches a
+<strong>reward-tilted</strong> teacher distribution instead of being RLHF'd after
+distillation.</p>
+<hr />
+<h2>Methodology</h2>
+<h3>M1 — The problem: distill, then align — and why the sequence fights itself</h3>
+<p>Production diffusion pipelines after DMD2 ran two independent post-training
+stages in sequence: (1) distill the teacher to a few-step student, (2) align
+the student with human preferences by fine-tuning against a reward model
+(RLHF / reward-feedback learning). The DMDR paper's abstract states the two
+failure modes of keeping them separate, and the demo's README quantifies one
+of them:</p>
+<ul>
+<li><strong>RL alone reward-hacks.</strong> A few-step student fine-tuned on a reward has
+  nothing anchoring it to the data manifold; it drifts toward whatever
+  off-distribution textures maximize the reward. (Abstract: "DMD serves as
+  an effective regularizer to mitigate reward hacking during RL training.")</li>
+<li><strong>DMD alone is preference-blind.</strong> Distillation compresses the <em>whole</em>
+  teacher distribution uniformly — the student spends capacity on regions
+  nobody prefers. (Abstract: "RL enables more preference-aware and
+  controllable distillation rather than uniformly compressing the full data
+  distribution.")</li>
+</ul>
+<p>The demo's own results table (<code>train_cc/sit/README.md</code>) shows exactly the
+quality↔diversity trade this buys on ImageNet 256 with a 1-step SiT-XL:
+turning RL on moves Inception Score 232→416 and Precision 0.77→0.90 while
+Recall drops 0.64→0.40 and FID rises 2.13→6.95 — the reward <em>concentrates</em>
+the student on high-scoring regions, at diversity's expense. The README
+frames this honestly as a trade-off dial, not a free win.</p>
+<h3>M2 — DMDR's move: reward-tilted distribution matching (one identity)</h3>
+<p>DMD2's generator objective was <code>∇KL(p_fake ‖ p_real)</code> estimated by a
+difference of two scores (our DMD2 tutorial §M2, Eq. M2.1/M2.2). DMDR's
+generator objective in this demo is, verbatim from the training loop (§T4):</p>
+<pre><code>loss_gen = dmd_loss + w · CE(DINOv2(decode(G(z,y))), y)
+</code></pre>
+<p>Cross-entropy against the conditioning class <code>y</code> is minus the log-probability
+the reward model assigns to it, i.e. minus a reward <code>r(x, y) =
+log p_DINO(y|x)</code>. So the objective is</p>
+<pre><code>L(θ) = KL( p_fake ‖ p_real ) − w · E_{x∼p_fake}[ r(x) ].
+</code></pre>
+<p>Now one line of algebra (only log rules, notes <code>09 §A1</code>): for the <em>tilted</em>
+distribution <code>p̃(x) ∝ p_real(x)·exp(w·r(x))</code>,</p>
+<pre><code>KL( q ‖ p̃ ) = E_q[log q − log p_real − w·r] + log Z
+            = KL( q ‖ p_real ) − w·E_q[r] + const.
+</code></pre>
+<p><strong>The additive "DMD loss + reward loss" of the code is exactly reverse-KL
+against the reward-tilted teacher distribution</strong> <code>p_real·e^{w·r}/Z</code> — up to
+the usual DMD approximations (score estimated by networks, per-sample
+normalizer, sampled t). That is the paper's "Reward-Tilted Distribution
+Matching" in gradient form, and it makes both abstract claims mechanical:</p>
+<ul>
+<li>The reward <strong>tilts the matching target</strong>: the student is no longer asked
+  to cover <code>p_real</code> uniformly but to concentrate where <code>e^{w·r}</code> is large —
+  preference-aware distillation.</li>
+<li>The DMD term <strong>anchors against reward hacking</strong>: any drift off
+  teacher-support costs KL immediately, because <code>s_fake − s_real</code> (the DMD
+  gradient direction, DMD2 §M2) points back toward teacher-land. The reward
+  can only re-weight <em>within</em> the teacher's support, not escape it. <code>w</code>
+  (<code>--dino-loss-weight</code>, 0.05 in the shipped script) is the temperature of
+  the tilt.</li>
+</ul>
+<p>Contrast with sequential RLHF: there the KL anchor is at best an explicit
+penalty to the <em>pre-RL student</em>, and with a few-step student the reward
+gradient quickly finds adversarial directions. Here the anchor is the live,
+continuously re-estimated distribution gap to the <em>teacher</em>.</p>
+<h3>M3 — What this demo changes vs DMD2's machinery</h3>
+<p>Everything below is verified against the code; DMD2 section numbers refer to
+<code>dmd2_line_by_line.md</code>.</p>
+<ol>
+<li><strong>One score body instead of two.</strong> DMD2 kept a frozen <code>real_unet</code> AND a
+   fully trainable <code>fake_unet</code> copy (DMD2 §G1). DMDR's demo keeps ONE frozen
+   SiT-XL teacher body and adds rank-32 LoRA matrices on every attention
+   block's q/v projections (<code>guidance_units.py</code>, §L below). The <em>fake</em> score
+   is the body with LoRA applied at scale <code>--lora-scale-f = 2.0</code>; the <em>real</em>
+   score is the same body with LoRA at scale 0 (pure teacher) — with a
+   twist: early in training the real branch leaks a cosine-decaying fraction
+   of the LoRA (§T4). Only the LoRA parameters train on the guidance side
+   (~millions instead of ~675M) — this is VSD/ProlificDreamer's LoRA
+   fake-score idea (DMD2 §M3) returning after DMD2 had upgraded it to a full
+   copy.</li>
+<li><strong>No GAN, no dataset.</strong> DMD2's second innovation was a GAN head on real
+   LAION latents (DMD2 §M4.2, §G5). This demo has <em>neither a discriminator
+   nor a single real image</em>: the only data loader is a <code>dummy_dataloader</code> of
+   random tensors that exists purely because DeepSpeed demands one (§T1).
+   Training is data-free — signal comes from the teacher's weights and the
+   frozen reward model. In <code>00_overview §1</code> taxonomy terms: DMD2 = B + D;
+   this demo = B + RL, with the reward model replacing the discriminator as
+   the "signal beyond the teacher".</li>
+<li><strong>Flow matching, not ε-prediction.</strong> The backbone is SiT (velocity
+   prediction on the linear path <code>x_t = (1−t)x₀ + t·ε</code>, notes <code>06</code>), so
+   every ε↔x̂₀ conversion from DMD2 becomes the one-liner <code>x̂₀ = x_t − t·v̂</code>
+   — no <code>ᾱ</code> buffers, no float64 rescue near t≈1 (the conversion has no
+   near-zero division), and CFG combines <em>velocities</em> (notes <code>11 §7</code>).</li>
+<li><strong>The RL term is ReFL-style, not policy-gradient.</strong> The reward is
+   <em>differentiable</em> (frozen DINOv2 ViT-L/14 + linear ImageNet head), so the
+   code simply backprops CE through DINOv2 → a differentiable resize →
+   the VAE decoder → the student's one gradient-carrying step. No REINFORCE,
+   no log-prob ratios, no value network — "RL" here means reward-gradient
+   fine-tuning, following ReFL (see M5).</li>
+<li><strong>Same TTUR, same detached-target trick, same backward simulation</strong> — 5
+   guidance updates per generator update (<code>--ratio-update 5.0</code>, DMD2 §M4.3),
+   the <code>½‖x − (x−grad).detach()‖²</code> gradient injection verbatim (DMD2 §G3),
+   and student-generated training inputs via a no-grad self-sampler
+   (DMD2 §M4.4/§U2; here <code>v2x0_sampler</code>, §S2).</li>
+</ol>
+<h3>M4 — The two-stage recipe as shipped (and what is paper-only)</h3>
+<p>The demo trains in two launches (<code>scripts/</code>):</p>
+<p><strong>Stage 1 — cold start (<code>cold_start_sitxl.sh</code>)</strong>: 20 001 generator steps of
+<em>pure DMD</em> — <code>--encoder-type</code> is unset (no reward model is even loaded) and
+<code>--cold-start-iter 20001</code> equals the step budget, so the reward branch can
+never fire. What makes it "dynamic" is <code>--dynamic-step 10000</code>, which drives
+<strong>exactly two cosine-annealed schedules</strong>, both decaying to neutral over the
+first 10k generator steps:</p>
+<ol>
+<li><strong>Annealed timestep sampling</strong> (§H1): the noise levels used both to train
+   the fake score and to query the DMD gradient are drawn from
+   Beta(4, 1.5) — mass near t≈0.86, the high-noise end — annealing to
+   Beta(1, 1) = Uniform(0,1). Early training focuses on coarse structure
+   (where a 1-step student is worst), then spreads to all noise levels.</li>
+<li><strong>Annealed real-branch LoRA scale</strong> (§T4): the "real" score starts as
+   teacher + 0.75×LoRA and cosine-decays to the pure teacher. Since the
+   LoRA <em>is</em> the fake delta, the real target initially sits partway toward
+   the fake score — shrinking <code>s_real − s_fake</code> and gentling the DMD
+   gradient while the student is still far from the teacher — then hardens
+   into the true teacher.</li>
+</ol>
+<p>These are the demo's only two <code>dynamic_step</code>-driven mechanisms, which lines
+up with the abstract's "two dynamic distillation training strategies in the
+initial stage" — but the abstract does not name them, and I cannot verify
+the paper's exact terminology from the demo alone; treat the pairing as a
+strong inference, not a citation.</p>
+<p><strong>Stage 2 — joint DMD+RL (<code>dmdr_sitxl_refl.sh</code>)</strong>: <code>--resume-ckpt</code> from step
+20 000, ~2 000 more generator steps with <code>--cold-start-iter 20000</code> (reward
+active from the first resumed step), <code>--encoder-type dinov2</code>,
+<code>--dino-loss-weight 0.05</code>, batch shrunk 64→24 (the with-grad VAE decode +
+DINOv2 forward is memory-hungry) and lr halved to 1e-5. Because
+<code>global_step ≥ 20000 &gt; dynamic_step = 10000</code>, both dynamic schedules are
+already fully annealed in stage 2: the real branch is the pure teacher and
+timesteps are ~uniform. So stage 2 is exactly the abstract's "joint DMD and
+RL optimization in the second stage".</p>
+<p><strong>What the demo does NOT contain — said explicitly:</strong> the abstract places
+"Reward-Tilted Distribution Matching optimization" <em>in the initial stage</em>,
+alongside the dynamic strategies. In this open demo, stage 1 has <strong>no reward
+term at all</strong> (no reward model is constructed); the only reward-tilting is
+stage 2's additive loss (which, per M2, <em>is</em> tilted matching in gradient
+form). Whatever additional stage-1 reward-tilting machinery the paper
+describes for the T2I/Z-Image models is not present in the ImageNet demo,
+and this tutorial makes no claims about its implementation. Likewise there
+is no GAN branch, no human-preference reward (ImageReward/HPS-style), and no
+text conditioning here — class labels stand in for prompts.</p>
+<p><strong>CFG's role — a deliberate ImageNet difference.</strong> DMD2 baked CFG 6–8 into
+the real branch (DMD2 §G3); this demo ships <code>--cfg-r 0</code>, i.e. the real score
+is <em>unguided</em>. The README explains: on ImageNet, DMD works without CFG, and
+raising it trades diversity for fidelity (their table: cfg 1.5 → FID 5.20,
+IS 387; cfg 4 → FID 15.70, IS 454) — whereas on text-to-image the real
+estimator <em>needs</em> large CFG, an observation their sibling paper
+<strong>Decoupled-DMD</strong> (arXiv 2511.22677) develops into a full story (CFG
+augmentation as the primary engine of few-step conversion, distribution
+matching as regularizer). Decoupled-DMD is mentioned here only for context —
+it is the <em>other</em> half of the Z-Image-Turbo recipe and has its own paper.</p>
+<h3>M5 — Pedigree: ReFL (and where the acknowledgements point)</h3>
+<p>The repo's acknowledgements name DMD2, SRA, and <strong>ReFL</strong> (the ImageReward
+repo). ReFL ("Reward Feedback Learning", Xu et al. 2023) fine-tunes a
+diffusion model by: rolling the sampler <em>without</em> gradient to a randomly
+chosen late step, taking ONE gradient-carrying denoising step, one-step
+predicting x̂₀, decoding, and backpropagating a differentiable reward
+through that single step. Map it onto this code and the correspondence is
+exact: the no-grad roll is <code>v2x0_sampler</code> (backward simulation), the single
+gradient step is the student's <code>pred_v</code> call in the generator turn, and the
+reward is DINOv2's class log-prob instead of ImageReward. For the 1-step
+demo the "roll" is empty — the gradient step IS the whole generation — so
+ReFL degenerates to direct differentiable reward fine-tuning. What DMDR adds
+<em>on top of</em> ReFL is precisely the DMD anchor sharing the same backward pass
+(M2); the training script's filename (<code>train_sitxl_refl_deepspeed.py</code>) is
+honest about the lineage.</p>
+<h3>M6 — Map of the code</h3>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>File</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>guidance_units.py</code></td>
+<td><code>QVLoRAUnits</code> — the rank-r LoRA pair for q/v; the <em>parameters</em> that turn one teacher body into both score estimators</td>
+</tr>
+<tr>
+<td><code>models_sit.py</code></td>
+<td>SiT-XL backbone (DiT-style transformer, velocity output); LoRA injection point in <code>Attention.forward</code>; <code>lora_scale</code> threaded through every block</td>
+</tr>
+<tr>
+<td><code>samplers.py</code></td>
+<td><code>pred_v</code> (one call + velocity-CFG), <code>v2x0_sampler</code> (student's few-step SDE sampler = backward simulation), <code>euler_sampler</code> (teacher reference only)</td>
+</tr>
+<tr>
+<td><code>utils.py</code></td>
+<td>annealed timestep samplers (dynamic strategy #1), <code>get_sample</code>, differentiable DINOv2 preprocessing, small helpers</td>
+</tr>
+<tr>
+<td><code>train_sitxl_refl_deepspeed.py</code></td>
+<td>everything else: dual DeepSpeed engines, the 5:1 loop, guidance update, generator update (reward + DMD, one backward)</td>
+</tr>
+<tr>
+<td><code>arguments.py</code>, <code>configs/</code>, <code>scripts/</code>, <code>convert_weight/</code></td>
+<td>flags, ZeRO-2 config, the two launch scripts, REPA checkpoint conversion</td>
+</tr>
+</tbody>
+</table></div>
+<p>Two models, two optimizers, two <code>Accelerator</code>s (a DeepSpeed necessity, §T1):
+<strong>generator</strong> = <code>gen_model</code>, a full SiT-XL/2 initialized from a REPA-trained
+SiT-XL checkpoint, fully trainable; <strong>guidance</strong> = <code>guidance_model</code>, the same
+architecture with LoRA, main weights copied from the same checkpoint and
+frozen, only LoRA trains.</p>
+<p>Shape conventions (B = 64 stage 1 / 24 stage 2 per GPU; resolution 256):</p>
+<div class="tablewrap"><table>
+<thead>
+<tr>
+<th>Tensor</th>
+<th>Shape</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>latent / noise / x0 / v_pred / grad</td>
+<td>(B, 4, 32, 32)</td>
+</tr>
+<tr>
+<td>class labels <code>y</code></td>
+<td>(B,) long, values 0–999 (1000 = null class)</td>
+</tr>
+<tr>
+<td>timesteps <code>ts</code></td>
+<td>(B, 1, 1, 1) float in [0, 1] (t=1 pure noise), <code>.flatten()</code>→(B,) for the model</td>
+</tr>
+<tr>
+<td>SiT token stream</td>
+<td>(B, 256, 1152)  (16×16 patches of a 32×32 latent, patch 2)</td>
+</tr>
+<tr>
+<td>LoRA factors per block</td>
+<td>A: (1152, 32), B: (32, 1152)</td>
+</tr>
+<tr>
+<td>decoded image → DINOv2 input</td>
+<td>(B, 3, 256, 256) → (B, 3, 224, 224)</td>
+</tr>
+<tr>
+<td>DINOv2 logits</td>
+<td>(B, 1000)</td>
+</tr>
+</tbody>
+</table></div>
+<hr />
+<h2>§L — <code>guidance_units.py</code> (all of it) + the LoRA plumbing in <code>models_sit.py</code></h2>
+<p>An honest note first: despite the name, this file does not contain any loss
+— the DMD and reward math live inline in the training script (§T4). What it
+contains is the 30-line module whose <em>parameters</em> are the entire trainable
+guidance side. The training log even prints them as "Guidance units
+trainable parameters". Conceptually it IS the heart of DMDR's parameter
+economy: these matrices are the only thing separating <code>s_fake</code> from
+<code>s_real</code>.</p>
+<pre><code class="language-python">class QVLoRAUnits(nn.Module):
+    def __init__(self, in_features, out_features, rank=4):
+</code></pre>
+<p>One LoRA unit per attention block. <code>in_features = out_features = 1152</code>
+(SiT-XL width); the training scripts pass <code>rank=32</code>.</p>
+<pre><code class="language-python">        self.lora_QA = nn.Parameter(torch.randn(in_features, rank))
+        self.lora_QB = nn.Parameter(torch.randn(rank, out_features))
+        self.lora_VA = nn.Parameter(torch.randn(in_features, rank))
+        self.lora_VB = nn.Parameter(torch.randn(rank, out_features))
+</code></pre>
+<p>Two low-rank factor pairs — one for the query projection, one for the value
+projection (the classic LoRA target choice). <code>A@B</code> is a rank-32
+1152×1152 update. Note both factors are initialized <code>randn</code> here — standard
+LoRA zero-init happens <em>elsewhere</em>: <code>SiT.initialize_weights</code> in
+<code>models_sit.py</code> sets <code>lora_QB</code> and <code>lora_VB</code> to zero, so the delta starts at
+exactly 0 and the guidance model at step 0 <em>is</em> the teacher (the same warm
+start DMD2 got by copying the whole UNet, DMD2 §G1). The A factors stay
+N(0, 1) — unusually large by LoRA conventions (no 1/√rank scaling), absorbed
+by the learning rate and the zero B.</p>
+<pre><code class="language-python">    def forward(self, q, v):
+        q_l = q @ (self.lora_QA @ self.lora_QB)
+        v_l = v @ (self.lora_VA @ self.lora_VB)
+        return q_l, v_l
+</code></pre>
+<p>Compute only the <em>delta</em>, not the sum — the caller decides how much of it to
+add. <code>q, v</code> arrive as (B, 256, 1152); the parenthesization materializes the
+full 1152×1152 product first (fine at this size). Returning raw deltas is
+what makes the <strong>scale dial</strong> possible, and the scale dial is the method:</p>
+<pre><code class="language-python"># models_sit.py, Attention.forward
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads * self.head_dim).permute(2, 0, 1, 3)...
+        q, k, v = qkv.unbind(0)
+        if self.lora is not None:
+            q_l, v_l = self.lora(q, v)
+            q = q + lora_scale * q_l
+            v = v + lora_scale * v_l
+</code></pre>
+<p>The injection point: after the fused qkv projection, before heads are split.
+<code>lora_scale</code> is a <em>runtime argument</em>, threaded from <code>SiT.forward(x, t, y,
+lora_scale=...)</code> through every <code>SiTBlock</code> into every <code>Attention</code>. So ONE
+set of weights answers as a whole family of models:</p>
+<ul>
+<li><code>lora_scale = args.lora_scale_f = 2.0</code> → the <strong>fake score</strong> (trained to
+  denoise student samples, §T3);</li>
+<li><code>lora_scale = 0</code> → the <strong>real score</strong>, the untouched frozen teacher;</li>
+<li><code>lora_scale = lora_scale_r ∈ (0, 0.75]</code> → the annealed hybrid used as the
+  real branch early in training (§T4, dynamic strategy #2).</li>
+</ul>
+<p>Contrast DMD2 §G1: two full 2.6GB UNets and a monkey-patched forward. Here
+the real/fake pair costs 56 rank-32 factor pairs and a float.</p>
+<p>The rest of <code>models_sit.py</code>, grouped (read once, then trust): standard
+DiT/SiT — <code>PatchEmbed</code> + fixed 2D sin-cos positional embeddings,
+<code>TimestepEmbedder</code> (sinusoidal → MLP; note <code>t</code> here is a <em>float in [0,1]</em>,
+not an integer index), <code>LabelEmbedder</code> with a 1001-row table (row 1000 = the
+CFG null class, inherited from REPA pretraining — this trainer itself never
+drops labels: <code>forward</code>'s <code>no_drop=True</code> default makes <code>token_drop</code>
+unreachable, so <code>--cfg-prob</code> only toggles the table size), 28 adaLN-Zero
+blocks conditioned on <code>t_embed + y_embed</code>, a <code>FinalLayer</code>, <code>unpatchify</code> back
+to (B, 4, 32, 32). Output = <strong>velocity</strong>, one call.</p>
+<hr />
+<h2>§S — <code>samplers.py</code>: how a velocity model generates</h2>
+<h3>S1 — <code>pred_v</code>: one call, with velocity-CFG</h3>
+<pre><code class="language-python">def pred_v(model, latents, t, y, cfg_scale, lora_scale=0, num_of_calsses=1000):
+    do_cfg = cfg_scale &gt; 1.0
+</code></pre>
+<p>The single gateway every score/generator call in the training loop goes
+through. Strictly-greater-than-1 gates CFG — so the demo scripts'
+<code>--cfg-r 0</code> means the real branch runs <em>unguided</em> (M4).</p>
+<pre><code class="language-python">    if do_cfg:
+        latents = torch.cat([latents, latents], dim=0)
+        t = torch.cat([t, t], dim=0)
+        y_null = torch.tensor([num_of_calsses] * y.size(0), device=y.device)
+        y = torch.cat([y_null, y], dim=0)
+</code></pre>
+<p>The doubled-batch CFG trick (DMD2 §G0, notes <code>11 §4</code>), class-conditional
+flavor: the "empty prompt" is class index 1000, the <code>LabelEmbedder</code>'s extra
+row. Order is uncond-first (<code>[y_null, y]</code>), matched by the chunk below.
+(<code>num_of_calsses</code> [sic] — the typo ships.)</p>
+<pre><code class="language-python">    time_input = t.flatten()
+    v_pred = model(latents, time_input, y, lora_scale=lora_scale)
+</code></pre>
+<p><code>t</code> arrives broadcast-shaped (B,1,1,1) from the timestep samplers (§H1);
+the model wants (B,). <code>lora_scale</code> rides through to §L — <strong>this argument is
+which distribution you are asking about.</strong></p>
+<pre><code class="language-python">    if do_cfg:
+        v_pred_uncond, v_pred_cond = v_pred.chunk(2)
+        v_pred = v_pred_uncond + cfg_scale * (v_pred_cond - v_pred_uncond)
+    return v_pred.to(latents.dtype)
+</code></pre>
+<p>CFG applied to <em>velocities</em> — exactly notes <code>11 §7</code>: guidance is linear in
+the score, the velocity is affine in the score, so the same
+<code>u_∅ + s·(u_c − u_∅)</code> combination is valid. Returns (B, 4, 32, 32).</p>
+<h3>S2 — <code>v2x0_sampler</code>: the few-step generator's sampler = backward simulation ★</h3>
+<p>The in-file comment sets the frame: <em>"In dmd, we always hypo that the model
+predicting x0, so we need to modify the sampling process accordingly. We
+only implement sde sampling here."</em> — i.e. treat each model call as an
+x̂₀-predictor and re-noise with fresh noise between steps, the same
+consistency-style stochastic sampler as DMD2's <code>sample_backward</code>
+(DMD2 §U2), now in flow-matching clothes. This function is BOTH the
+student's inference sampler AND the training-input factory (called under
+<code>no_grad</code> at the top of every training iteration, §T2).</p>
+<pre><code class="language-python">    t_steps = torch.linspace(1.0, 0.0, num_steps + 1, dtype=latents.dtype)
+    t_steps = shift * t_steps / (1 + (shift - 1) * t_steps)
+    t_steps[-1] = 0.0
+</code></pre>
+<p>The student's grid, descending from t=1 (noise) to t=0 (data). The second
+line is the SD3-style <strong>timestep shift</strong> — warp the grid toward high noise
+for <code>shift &gt; 1</code> (useful at high resolution); the scripts use <code>shift = 1</code>,
+making it the identity, and the <code>t_steps[-1] = 0.0</code> guard is then redundant
+but harmless. With <code>num_steps = 1</code> (the recommended demo): grid = [1.0, 0.0].</p>
+<pre><code class="language-python">    with torch.no_grad():
+        for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])):
+            ...
+            d_cur = model(model_input.to(dtype=_dtype), time_input.to(dtype=_dtype), **kwargs)
+</code></pre>
+<p>March the grid pairwise (same off-by-one discipline as MIT lab 1, Cell 2);
+one model call per step gives the velocity <code>d_cur</code> (B, 4, 32, 32). Note the
+call goes straight to <code>model</code>, not <code>pred_v</code> — no CFG, no LoRA: this is the
+plain student.</p>
+<pre><code class="language-python">            x_0 = x_cur + (0 - t_cur) * d_cur
+            all_x0.append(x_0)
+            x_next = (1 - t_next) * x_0 + t_next * torch.randn_like(x_0)
+    return x_next, all_x0, t_steps[:-1]
+</code></pre>
+<p>Three lines that ARE the sampler. Line 1: ride the current velocity all the
+way to t=0 — on the linear path <code>x_t = (1−t)x₀ + t·ε</code> with <code>v = ε − x₀</code>,
+algebra gives <code>x₀ = x_t − t·v</code> exactly; this is the flow-matching sibling of
+DMD2's <code>get_x0_from_noise</code> (DMD2 §0), with no ᾱ buffer and no float64
+rescue needed. Line 2: keep <em>every</em> intermediate x̂₀ — the training loop
+will sample from this list to build inputs at intermediate grid times
+(DMD2 discarded all but the chosen prefix; here the whole trajectory of
+estimates is returned). Line 3: re-noise the estimate down to the next grid
+level with FRESH noise — the "SDE" of the comment, DMD2 §U2's η=1-flavored
+jump. Returns the final sample, the list of estimates, and the grid times
+they were made at.</p>
+<p>For <code>num_steps = 1</code> the whole function collapses to: <code>x₀ = z − v(z, t=1)</code>,
+<code>all_x0 = [x₀]</code>, grid = [1.0] — <strong>one model call, noise to image.</strong> (The
+first return is named <code>xT</code> at the call site but holds the final <em>clean</em>
+sample; quirk ledger.)</p>
+<h3>S3 — <code>euler_sampler</code> (grouped — teacher reference only)</h3>
+<p>A standard deterministic Euler ODE sampler (<code>x ← x + (t_next − t_cur)·v</code>,
+MIT lab 1 Cell 3 with the SiT velocity as drift), with optional Heun
+second-order correction and a CFG window (<code>guidance_low/high</code>) — SiT-repo
+heritage. In this codebase it is called exactly once, before training, with
+250 steps and <code>cfg_scale = args.cfg_r</code>, to render a reference grid from the
+freshly loaded <code>gen_model</code> — which at step 0 still <em>is</em> the teacher (same
+weights), so the saved <code>mutistep_teacher_*.png</code> shows what the student is
+being distilled from. Two details worth noting and moving on: its CFG
+batch order is cond-first (<code>[y, y_null]</code>, opposite of <code>pred_v</code>, each
+internally consistent), and the saved filename says <code>500nfe</code> assuming
+CFG-doubled calls even when <code>cfg_r = 0</code> makes it 250.</p>
+<hr />
+<h2>§H — <code>utils.py</code>: the annealed samplers and the reward preprocessing</h2>
+<h3>H1 — <code>sample_continue</code> / <code>sample_discrete</code>: dynamic strategy #1 ★</h3>
+<pre><code class="language-python">def sample_continue(B, alpha=4.0, beta=1.5, s_type=&quot;logit_normal&quot;, step=0, dynamic_step=1000):
+    ...
+    elif s_type == &quot;logit_normal&quot;:
+        if dynamic_step &gt; 0:
+            progress = min(step / dynamic_step, 1.0)
+            cosine_decay = 0.5 * (1.0 + torch.cos(torch.tensor(progress * 3.141593)))
+            alpha = 1.0 + (alpha - 1.0) * cosine_decay
+            beta = 1.0 + (beta - 1.0) * cosine_decay
+        t = torch.distributions.Beta(alpha, beta).sample((B,))
+        return t.reshape(B,1,1,1)
+</code></pre>
+<p>Where training <em>timesteps</em> come from — and where the first "dynamic
+distillation strategy" lives. Despite the name, the <code>"logit_normal"</code> branch
+draws from a <strong>Beta distribution</strong> (naming quirk; the scripts' <code>--gui-a 4.0
+--gui-b 1.5</code> are Beta parameters). Beta(4, 1.5) has mode ≈0.86 and mean
+≈0.73 — in this codebase t=1 is pure noise, so early training concentrates
+both the fake-score fitting (§T3) and the DMD queries (§T4) on the
+high-noise regime, where a 1-step student's errors are biggest and coarsest.
+The <code>cosine_decay</code> block interpolates (α, β) from (4, 1.5) at step 0 to
+(1, 1) — i.e. <strong>Uniform(0,1)</strong> — over <code>dynamic_step = 10000</code> generator
+steps, then stays uniform. Compare DMD2, which sampled the DM loss's t
+uniformly on [2%, 98%] for the whole run (DMD2 §G1): DMDR replaces the fixed
+window with a curriculum. Returned shape (B, 1, 1, 1), ready to broadcast
+against latents. The <code>"uniform"</code> branch (used nowhere for continuous t in
+the scripts) draws Uniform[0.001, 1).</p>
+<p><code>sample_discrete</code> is the same machinery restricted to a <em>grid</em>: given the
+student's <code>t_steps</code>, it draws a Beta (or uniform) sample and snaps it to the
+nearest grid value (<code>argmin |t − grid|</code>), with the identical cosine
+annealing. The training loop uses it with <code>--s-type-gen uniform</code> to pick
+<em>which grid step</em> the generator trains at — for <code>num_steps = 1</code> the grid is
+[1.0] and every draw returns 1.0, so all of this is future-proofing for the
+multi-step setting.</p>
+<h3>H2 — <code>get_sample</code>: pick the matching x̂₀ off the simulated trajectory</h3>
+<pre><code class="language-python">def get_sample(x0_all, sample_t, t_steps):
+    stacked_x0 = torch.stack(x0_all, dim=0)
+    s_to_index = {value.item(): idx for idx, value in enumerate(t_steps)}
+    indices = torch.tensor([s_to_index[value.item()] for value in sample_t])
+    sample = stacked_x0[indices, torch.arange(b)]
+</code></pre>
+<p>Stack the per-grid-step x̂₀ list into (num_steps, B, 4, 32, 32), build a
+value→index map for the grid, and for each batch item select the x̂₀ that
+was predicted at that item's sampled grid time — a gather across the
+simulated trajectory. Shape out: (B, 4, 32, 32). One honest flag for the
+multi-step case: the x̂₀ <em>predicted at</em> grid time tᵢ is then re-noised back
+<em>to</em> level tᵢ (§T2), whereas at inference the input at tᵢ is built from the
+estimate of the <em>previous, noisier</em> step tᵢ₋₁ — an off-by-one relative to
+strict inference matching (DMD2 §U2 used the previous step's estimate). At
+<code>num_steps = 1</code> this is moot: ts is always 1.0 and <code>(1−1)·x̂₀ + 1·noise</code>
+erases the choice entirely.</p>
+<h3>H3 — The rest (grouped)</h3>
+<p><code>mean_flat(x)</code> — per-sample mean over (C, H, W): (B,4,32,32) → (B,).
+<code>DINOv2ProcessorWithGrad</code> — the reward model's preprocessing as
+<em>differentiable tensor ops</em>: ImageNet mean/std normalization + bicubic
+resize to 224. The "WithGrad" in the name is the whole point — the stock
+HF image processor works on PIL/NumPy and would sever the graph; this one
+keeps the reward differentiable end-to-end (ReFL's requirement, M5).
+<code>ckpt_path_to_accelerator_path</code> — string surgery mapping the tiny
+<code>torch_units/step-N.pt</code> bookkeeping file to the two DeepSpeed state
+directories (<code>accelerator_1/step-N</code>, <code>accelerator_2/step-N</code>) for resume.</p>
+<hr />
+<h2>§T — <code>train_sitxl_refl_deepspeed.py</code>: the loop</h2>
+<h3>T0 — Module-level helpers (grouped)</h3>
+<p><code>array2grid</code> — clamp/scale a batch to a uint8 image grid for saving.
+<code>sample_posterior</code> — VAE-moments sampler, <strong>defined and never called</strong>
+(there is no data to encode; a fossil from the data-loading trainer this
+was pruned from). <code>update_ema</code> — a standard EMA step, <strong>also never called</strong>:
+despite the tutorial-brief's expectations, this demo keeps NO EMA of the
+student (same dead-EMA situation as DMD2's unused <code>EMA</code> class, DMD2 §0).
+<code>copy_main_weights(source, target)</code> — copies every non-<code>lora</code> parameter by
+name; this is how the guidance model's frozen body gets the teacher weights.
+<code>create_logger</code>, <code>requires_grad</code> — cosmetics and a flag-flipper.</p>
+<h3>T1 — Setup (grouped — five decisions that matter)</h3>
+<ol>
+<li><strong>Two Accelerators, two DeepSpeed engines.</strong> DeepSpeed fuses
+   model+optimizer+scheduler into one engine per <code>prepare()</code> call, so two
+   independently-optimized models need two plugins (<code>z2_a</code>, <code>z2_b</code>, both
+   ZeRO stage-2 from <code>configs/z2.json</code>) and two <code>Accelerator</code> objects
+   sharing global state; <code>gen_model</code>+<code>optimizer_gen</code> prepare under plugin a,
+   <code>guidance_model</code>+<code>optimizer_gui</code> under plugin b, and micro-batch size is
+   copied across. This replaces DMD2's FSDP arrangement (DMD2 §T1) — same
+   two-parameter-group structure, different sharding stack. <code>fp16</code> mixed
+   precision throughout (<code>--mixed-precision fp16</code>; DMD2 used bf16 —
+   fp16 works here partly because flow-matching x̂₀ conversion has no
+   near-t=1 blow-up).</li>
+<li><strong>The two models.</strong> <code>gen_model</code> = SiT-XL/2, <code>load_state_dict(...,
+   strict=False)</code> from the converted REPA checkpoint
+   (<code>convert_weight/sit_conver.py</code> downloads the REPA SiT-XL and strips its
+   projector heads), fully trainable. <code>guidance_model</code> = same class with
+   <code>use_lora=True, lora_rank=32</code>; <code>copy_main_weights</code> clones the body; then
+   the loop over parameters freezes everything without <code>lora</code> in its name
+   and collects LoRA params into <code>params_model</code> — the ONLY trainable
+   guidance parameters (with <code>--lora-rank 0</code> it would fall through to full
+   finetuning; see the quirk ledger for why that mode only makes sense with
+   CFG). <code>optimizer_gui</code> gets just this group, weight decay 0; the generator
+   gets AdamW with wd 0.01 (same "yes, wd on a diffusion backbone" shrug as
+   DMD2 §T1).</li>
+<li><strong>Frozen VAE + frozen reward model.</strong> <code>AutoencoderKL</code> (sd-vae-ft-ema,
+   the SD latent space — SiT-on-ImageNet convention, <code>latents_scale =
+   0.18215</code>). If <code>--encoder-type dinov2</code>: <code>torch.hub.load(...,
+   'dinov2_vitl14_lc')</code> — DINOv2 ViT-L/14 <strong>with its linear ImageNet
+   classifier head</strong> — cast to fp16, <code>requires_grad_(False)</code>. Frozen ≠ cut
+   off: gradients still flow <em>through</em> it to the generator. Stage 1 passes
+   no encoder type and never builds it.</li>
+<li><strong>The dummy dataloader.</strong> Random tensors, wrapped in a DataLoader, passed
+   to <code>accelerator.prepare</code> and never iterated: DeepSpeed needs a loader to
+   deduce batch sizing. This is the "there is no dataset" fact of M3 made
+   concrete.</li>
+<li><strong>Resume + reference grid.</strong> Resume loads the two DeepSpeed states via
+   <code>ckpt_path_to_accelerator_path</code> and restores the two step counters. Then
+   the pre-training <code>euler_sampler</code> grid (§S3) is rendered — the teacher
+   baseline every later <code>samples_step_*.png</code> gets compared against.</li>
+</ol>
+<h3>T2 — The inner loop: skeleton and backward simulation</h3>
+<pre><code class="language-python">    for inflop in range(inner_step, int(args.max_train_steps * args.ratio_update + 100)):
+        with accelerator.accumulate([gen_model, guidance_model]):
+            gen_model.eval()
+            guidance_model.train()
+</code></pre>
+<p>The loop counts <strong>inner steps</strong> = guidance updates; generator updates happen
+every <code>ratio_update = 5</code> inner steps, so the loop bound is
+<code>max_train_steps × 5</code> (+100 slack so the final checkpoint lands). This is
+DMD2's two-time-scale rule (DMD2 §M4.3/§T2) with inverted bookkeeping: DMD2
+looped over generator steps and gated the generator's <em>loss</em>; DMDR loops
+over guidance steps and gates the generator's <em>turn</em>. Net effect identical —
+the fake score gets 5 looks at the student per student move.</p>
+<pre><code class="language-python">            latent = torch.randn(local_batch_size, in_channels, latent_size, latent_size)...
+            ys = torch.randint(args.num_classes, size=(local_batch_size,), device=device)
+            with torch.no_grad():
+                with accelerator.autocast():
+                    xT, all_x0, t_steps = v2x0_sampler(model=gen_model, latents=latent,
+                                                       y=ys, num_steps=args.num_steps, shift=args.shift)
+</code></pre>
+<p>Fresh noise (B, 4, 32, 32) and random classes (B,), then ONE no-grad run of
+the student's own sampler (§S2). <code>xT</code> (misnamed — it is the final <em>clean</em>
+sample) is unused below; what matters is <code>all_x0</code>, the trajectory of the
+student's x̂₀ estimates. <strong>This single simulation feeds both turns</strong> — the
+economy mirrors DMD2's one-forward-two-turns trick (DMD2 §T2), shifted one
+level up: one <em>simulation</em> per iteration, consumed by the guidance loss now
+and (on every 5th iteration) the generator loss too. No per-sample
+<code>broadcast</code> of the step choice is needed (contrast DMD2 §U2): the full
+trajectory is kept, so every rank runs the same number of model calls by
+construction.</p>
+<pre><code class="language-python">            ts = sample_discrete(bsz, t_steps.flip(0), alpha=args.gen_a, beta=args.gen_b,
+                                 s_type=args.s_type_gen, step=global_step, dynamic_step=args.dynamic_step)...
+            input_latent_clean = get_sample(all_x0, ts, t_steps)...
+            noise_i = torch.randn_like(input_latent_clean)
+            input_latent_gen = (1 - ts) * input_latent_clean + ts * noise_i
+            v_target = noise_i - input_latent_clean  # may not use
+</code></pre>
+<p>Build the generator's training input: pick a grid time per sample (§H1;
+uniform over the grid per the scripts), fetch the student's own x̂₀ at that
+time (§H2), and re-noise to that level via the linear path — DMD2 §U3's
+<code>prepare_denoising_data</code>, flow-matching edition. For <code>num_steps = 1</code>:
+<code>ts ≡ 1.0</code>, so <code>input_latent_gen = noise_i</code> exactly — pure noise in, no
+mask needed (DMD2 needed an explicit <code>pure_noise_mask</code>; here the t=1
+arithmetic does it for free). <code>v_target</code> is computed and never used — the
+comment admits it (a hook for an optional regression term that isn't in
+this demo).</p>
+<h3>T3 — Guidance update: the fake score chases the student (every inner step)</h3>
+<pre><code class="language-python">            ts_gui = sample_continue(bsz, alpha=args.gui_a, beta=args.gui_b,
+                                     s_type=args.s_type_gui, step=global_step, dynamic_step=args.dynamic_step)...
+            noise = torch.randn_like(input_latent_clean)
+            input_latent_gui = (1 - ts_gui) * input_latent_clean + ts_gui * noise
+            gt_diff = noise - input_latent_clean
+</code></pre>
+<p>A <em>continuous</em> annealed timestep (Beta(4,1.5)→Uniform, §H1 — dynamic
+strategy #1 acting on the fake score's training distribution), a fresh
+noising of the student's sample, and the flow-matching target
+<code>v = ε − x₀</code>. <code>input_latent_clean</code> came out of a <code>no_grad</code> block, so it is
+already detached — the generator cannot receive gradient from its critic's
+training (DMD2 §G4's first-line <code>detach()</code>, achieved here by construction).</p>
+<pre><code class="language-python">            with accelerator2.autocast():
+                v_pred_fake = pred_v(guidance_model, input_latent_gui, ts_gui, ys,
+                                     cfg_scale=0, lora_scale=args.lora_scale_f)
+                diffusion_loss = mean_flat((v_pred_fake - gt_diff) ** 2)
+                loss_gui = diffusion_loss.mean()
+            accelerator2.backward(loss_gui)
+            ...
+            optimizer_gui.step()
+            optimizer_gui.zero_grad(set_to_none=True)
+            optimizer_gen.zero_grad(set_to_none=True)  # important! ...
+</code></pre>
+<p>The <strong>vanilla flow-matching loss on generator samples</strong> — DMD2 §G4 with
+<code>‖ε̂ − ε‖²</code> swapped for <code>‖v̂ − v‖²</code>. Two method-bearing details: <code>cfg_scale=0</code>
+(no CFG on the fake branch — DMD2 asserted the same, §G1: <code>p_fake</code> is what
+the student actually emits) and <code>lora_scale=args.lora_scale_f = 2.0</code> — the
+LoRA delta is applied at scale 2 both when trained and when queried, so
+"fake score" consistently means "teacher + 2×LoRA". Only the LoRA factors
+receive gradient (everything else is frozen), so this loss <em>sculpts the
+delta between the two distributions directly</em>. Backward runs through
+<code>accelerator2</code> (the guidance engine); the trailing generator <code>zero_grad</code> is
+the same belt-and-braces cross-contamination insurance DMD2 wore (§T2).</p>
+<h3>T4 — Generator update ★ (every 5th inner step): reward + DMD, one backward</h3>
+<pre><code class="language-python">            if (inner_step % args.ratio_update == 0) and inner_step &gt; 0:
+                gen_model.train()
+                guidance_model.eval()
+                with accelerator.autocast():
+                    v_pred_gen = pred_v(gen_model, input_latent_gen, ts, ys, cfg_scale=0, lora_scale=0)
+                x0 = input_latent_gen + (0.0 - ts) * v_pred_gen
+</code></pre>
+<p>The student's entire generative act: one graph-carrying call at the sampled
+grid time (t=1 in the demo: <code>x0 = noise − v̂</code>), then the ride-to-zero
+conversion. <code>x0</code> (B, 4, 32, 32) is the only tensor in this whole block
+attached to the generator's autograd graph — everything below either feeds
+on it with gradient (reward), or measures it and injects a hand-made
+gradient (DMD).</p>
+<p><strong>The reward (ReFL) term</strong> — new in this sequel:</p>
+<pre><code class="language-python">                if global_step &gt;= args.cold_start_iter:
+                    if args.encoder_type is not None:
+                        with accelerator.autocast():
+                            latent_x0 = (x0 - latents_bias) / latents_scale
+                            samples = vae.decode(latent_x0).sample
+                            samples = ((samples + 1) / 2.).clamp(0, 1)
+                            samples = transform_rep(samples)
+                            logistics = rep_model(samples)
+                            dino_loss = criterion(logistics, ys)
+                            reward_loss_dino_mean = dino_loss.mean()
+</code></pre>
+<p>Gate first: the reward only exists past <code>cold_start_iter</code> AND when a reward
+model was built — in stage 1 neither holds, in stage 2 both do from the
+first resumed step (M4). Then the differentiable reward chain, every link
+frozen but grad-transparent: un-scale the latent → <strong>VAE decode WITH
+gradient</strong> (B,4,32,32)→(B,3,256,256) — this is the expensive line, and why
+stage 2's batch drops to 24 → map [−1,1]→[0,1] → differentiable
+normalize+resize to (B,3,224,224) (§H3) → DINOv2+linear head → (B,1000)
+logits → cross-entropy against the <em>conditioning class</em> <code>ys</code>. Minimizing CE
+= maximizing <code>log p_DINO(y|x)</code> = the README's "directly maximize the
+classification accuracy score". This is ReFL's backprop-through-reward (M5)
+with a classifier standing in for a human-preference model. Note what is
+absent, honestly: no reward baseline, no KL-to-old-policy term, no sampling
+of rewards — the <em>only</em> thing standing between this term and classic
+classifier reward-hacking (adversarial DINOv2-fooling textures) is the DMD
+loss sharing the same backward. <code>reward_loss_dino_mean</code> is initialized to a
+zeros tensor before the loop so the joint sum below is well-defined when the
+gate is closed.</p>
+<p><strong>Dynamic strategy #2 — the annealed real branch:</strong></p>
+<pre><code class="language-python">                if global_step &lt; args.dynamic_step:
+                    cosine_factor = 0.5 * (1 + math.cos(math.pi * global_step / args.dynamic_step))
+                    lora_scale_r = args.lora_scale_r * cosine_factor
+                else:
+                    lora_scale_r = 0.0
+</code></pre>
+<p>The real-score estimator's LoRA scale: <code>0.75 → 0</code> along a cosine over the
+first 10k generator steps, then exactly 0 forever. Early on, the "real"
+branch is teacher + 0.75×(the fake delta trained at scale 2) — i.e. the
+matching target starts partway toward the student's own distribution, which
+shrinks <code>x̂₀_fake − x̂₀_real</code> and softens the DMD gradient while the student
+is farthest from the teacher; as training proceeds the target hardens into
+the pure frozen teacher. By stage 2 (<code>global_step ≥ 20000</code>) this is always
+the pure teacher. (Interpretation is mine from the mechanics; the paper's
+name for this schedule isn't verifiable from the demo — M4.)</p>
+<p><strong>The DMD loss</strong> — DMD2 §G3, velocity edition:</p>
+<pre><code class="language-python">                ts_dmd = sample_continue(bsz, alpha=args.gui_a, beta=args.gui_b, ...)
+                noise = torch.randn_like(input_latent_gen)
+                input_latent_dmd = (1 - ts_dmd) * x0 + ts_dmd * noise
+                with accelerator.autocast():
+                    with torch.no_grad():
+                        v_pred_fake = pred_v(guidance_model, input_latent_dmd, ts_dmd, ys,
+                                             cfg_scale=0, lora_scale=args.lora_scale_f)
+                        v_pred_real = pred_v(guidance_model, input_latent_dmd, ts_dmd, ys,
+                                             cfg_scale=args.cfg_r, lora_scale=lora_scale_r)
+</code></pre>
+<p>Diffuse the student's sample to a random annealed level (same Beta
+curriculum as the fake score's training — the two sides of the KL are
+matched at the same t-distribution), then query <strong>the same network twice</strong>:
+once as the fake score (LoRA at 2.0, no CFG), once as the real score (LoRA
+at the annealed <code>lora_scale_r</code>, CFG at <code>cfg_r</code> — which the ImageNet scripts
+set to 0, i.e. <em>unguided</em>; contrast DMD2's CFG-6–8 real branch, §G3, and
+see M4 for why). Both under <code>no_grad</code> — the scores are measured, never
+backpropagated through.</p>
+<pre><code class="language-python">                    x0_r = input_latent_dmd + (0.0 - ts_dmd) * v_pred_real
+                    x0_f = input_latent_dmd + (0.0 - ts_dmd) * v_pred_fake
+                    p_real = x0 - x0_r
+                    p_fake = x0 - x0_f
+                    grad = (p_real - p_fake) / (torch.abs(p_real).mean(dim=[1, 2, 3], keepdim=True) + 1e-8)
+                    grad = torch.nan_to_num(grad)
+                    dmd_loss = 0.5 * torch.nn.functional.mse_loss(x0.float(),
+                                          (x0 - grad).detach().float(), reduction='mean')
+</code></pre>
+<p>Line for line the DMD2 gradient (DMD2 §M2.2/§G3): convert both velocity
+predictions to x̂₀, form <code>grad ∝ x̂₀_fake − x̂₀_real</code> (descending it moves the
+student's sample toward teacher-land and away from where the student
+over-produces), normalize by the per-sample mean <code>|x − x̂₀_real|</code>
+((B,1,1,1), broadcast), and inject via the detached-target trick — fourth
+sighting after our KAIST SDS, PDS, and DMD2. Two deltas vs DMD2: an explicit
+<code>+1e-8</code> in the denominator (DMD2 relied on <code>nan_to_num</code> alone), and no
+float64 anywhere (the flow conversion <code>x_t − t·v</code> is benign). One subtlety
+for careful readers: <code>input_latent_dmd</code> is built from the <em>graph-connected</em>
+<code>x0</code>, so <code>p_real</code>/<code>p_fake</code> technically carry graph — but <code>grad</code> is consumed
+only inside <code>.detach()</code>, so the sole gradient path into the generator is the
+first <code>mse_loss</code> argument, exactly as intended (the stray subgraph is wasted
+memory, not wrong math).</p>
+<p><strong>The joint update — the line the paper is named after:</strong></p>
+<pre><code class="language-python">                    loss_gen = dmd_loss_mean + args.dino_loss_weight * reward_loss_dino_mean
+                accelerator.backward(loss_gen)
+                ...
+                optimizer_gen.step()
+                optimizer_gen.zero_grad(set_to_none=True)
+                optimizer_gui.zero_grad(set_to_none=True)
+</code></pre>
+<p>One backward carries both gradients into the same parameters at the same
+step: the reward's "concentrate where DINOv2 scores my class highly" and the
+DMD term's "stay on the teacher's distribution". Per M2's identity this sum
+IS reverse-KL against the reward-tilted teacher <code>p_real·e^{0.05·r}/Z</code> — the
+tilt is the alignment, the KL is the anti-hacking regularizer, and neither
+exists as a separate training phase. Clip at norm 1.0, step, zero both
+optimizers (mirror insurance).</p>
+<h3>T5 — Bookkeeping (grouped)</h3>
+<p>The remaining ~90 lines: a <code>logs</code> dict (note: on the 4-of-5 guidance-only
+iterations, the <code>dmd</code>/<code>dino</code> entries are stale values from the last
+generator turn) appended as JSONL to <code>loss_gui_log</code> every inner step and
+<code>loss_gen_log</code> every generator step; <code>global_step</code> incremented only on
+generator turns (so <code>--max-train-steps</code> counts generator updates);
+checkpointing = the two DeepSpeed <code>save_state</code> directories plus a tiny
+<code>torch_units/step-N.pt</code> holding only the two step counters (the resume path
+of §T1 reassembles all three); periodic sampling = one no-grad
+<code>v2x0_sampler</code> run on fixed <code>(xz, yz)</code> noise/classes, VAE-decoded and saved
+as a grid next to the teacher reference from §T1 — the visual A/B this
+method lives and dies by.</p>
+<hr />
+<h2>Quirk ledger (honesty section)</h2>
+<ul>
+<li><strong><code>guidance_units.py</code> is not where the guidance math lives.</strong> It holds
+  30 lines of LoRA parameters; the DMD gradient, the reward chain, and the
+  fake-score loss are all inline in <code>train_sitxl_refl_deepspeed.py</code> §T3–T4.
+  The name refers to the trainable <em>units</em> of the guidance model.</li>
+<li><strong>Stage-1 "Reward-Tilted Distribution Matching" is not in this demo.</strong>
+  The cold-start script trains pure DMD (no reward model is constructed);
+  reward-tilting only appears as stage 2's additive loss. The abstract
+  places tilted matching in stage 1 for the full method — whatever that
+  entails beyond this demo is paper-only and not covered here.</li>
+<li><strong>"logit_normal" is a Beta distribution.</strong> Both samplers' branch of that
+  name draws <code>torch.distributions.Beta(alpha, beta)</code>; the docstrings talk
+  about means and standard deviations of a logit-normal that is never used.</li>
+<li><strong>Invalid argparse defaults.</strong> <code>--s-type-gen/--s-type-gui</code> default to
+  <code>"normal"</code>, which is not in <code>choices</code> — argparse does not validate
+  defaults (verified), so omitting the flags crashes later in
+  <code>sample_continue</code>'s <code>ValueError</code>. The scripts always pass values.</li>
+<li><strong>README documents a flag that doesn't exist.</strong> <code>--use-lora-gen</code> (LoRA
+  for the <em>generator</em>) appears in <code>train_cc/sit/README.md</code> but not in
+  <code>arguments.py</code> — the demo's generator is always fully finetuned.
+  Similarly the README's "LoRA rank of the few-step diffusion model will be
+  set to twice this value" describes code that isn't here.</li>
+<li><strong><code>--lora-rank 0</code> would silently break DMD.</strong> With LoRA disabled the
+  guidance model fully finetunes, and real/fake become the SAME network —
+  with <code>cfg_r = 0</code> they return identical predictions and <code>grad ≡ 0</code>. Full
+  finetuning only makes sense with <code>cfg_r &gt; 1</code>, where "real" becomes the
+  CFG-boosted fake network — which is exactly the Decoupled-DMD reading
+  (M4). The scripts always use rank 32.</li>
+<li><strong>Dead code:</strong> <code>sample_posterior</code> and <code>update_ema</code> are defined and never
+  called — <strong>no EMA of the student is kept</strong>, and no data is ever encoded.
+  <code>v_target</code> is computed and unused ("# may not use"). <code>xT</code>, the sampler's
+  final sample, is discarded by the training loop.</li>
+<li><strong>The multi-step input is off by one grid step</strong> (§H2): x̂₀ predicted at
+  tᵢ is re-noised to tᵢ, not tᵢ₊₁ — harmless at <code>num_steps = 1</code> (the demo's
+  setting), a train/inference mismatch to check before using <code>num_steps &gt; 1</code>.</li>
+<li><strong>Opposite CFG batch orders</strong> in <code>euler_sampler</code> (cond-first) and <code>pred_v</code>
+  (uncond-first); each pairs its own chunks correctly.</li>
+<li><strong>Stale log entries</strong> on guidance-only steps; the same <code>logs</code> dict goes to
+  both JSONL files.</li>
+<li><strong><code>dmd_loss</code>'s <code>reduction='mean'</code></strong> divides the injected gradient by
+  B·C·H·W, and <code>torch.abs(p_real).mean()</code> in the denominator carries a
+  wasted autograd subgraph — both cosmetic (DMD2 had the first too).</li>
+<li><strong>Misnamed/typo'd</strong>: <code>num_of_calsses</code>, <code>inflop</code> (the loop variable),
+  <code>logistics</code> (the logits), <code>mutistep</code> in the saved filename.</li>
+</ul>
+<hr />
+<h2>What to carry forward (DMDR → everything else)</h2>
+<ol>
+<li><strong>RLHF and distillation compose as ONE loss</strong>: <code>KL(p_fake‖p_real) −
+   w·E[r]</code> = reverse-KL to the reward-tilted teacher <code>p_real·e^{w·r}</code>. The
+   reward tilts the target (preference-aware distillation); the DMD term is
+   the live regularizer against reward hacking. One backward, no sequential
+   pipeline — and <code>w</code> is an explicit quality↔diversity dial (README table:
+   IS 232→416, Recall 0.64→0.40).</li>
+<li><strong>A differentiable reward is the cheapest RL there is</strong> (ReFL): freeze
+   the reward model, keep every preprocessing op in tensor-land
+   (<code>DINOv2ProcessorWithGrad</code>), decode with grad, backprop CE through the
+   student's single generative step. No policy gradients needed — but also
+   no protection except the anchor loss you pair it with.</li>
+<li><strong>LoRA scale as a distribution dial</strong>: one frozen teacher body + rank-32
+   q/v deltas gives <code>s_real</code> (scale 0), <code>s_fake</code> (scale 2.0), and anything
+   between (the annealed real branch) — DMD2's two full copies collapsed to
+   a float argument. Fake-score-as-LoRA is VSD's idea rehabilitated at
+   modern scale.</li>
+<li><strong>Curricula over constants</strong>: DMD2's fixed t-window and fixed real target
+   become two cosine schedules — timestep sampling Beta(4,1.5)→Uniform, and
+   real-branch LoRA leakage 0.75→0 — both keyed to one <code>dynamic_step</code> knob
+   and both OFF by the time RL switches on. Cold-start pure-DMD first, then
+   joint DMD+RL: the two-stage recipe.</li>
+<li><strong>DMD can run data-free</strong>: no dataset, no GAN — teacher weights + reward
+   model are the only signal sources (the dummy dataloader exists for
+   DeepSpeed, not for data). What DMD2 bought with a GAN-on-real-data
+   (beating the teacher on realism), DMDR buys with a reward model — and on
+   ImageNet, <em>without</em> CFG in the real branch (<code>cfg_r = 0</code>), whose
+   quality↔diversity trade-off is instead exposed as an explicit knob
+   (README; the T2I story, where CFG is load-bearing, is Decoupled-DMD's).</li>
+<li><strong>Flow matching simplifies every DMD line</strong>: <code>x̂₀ = x_t − t·v̂</code> replaces
+   the ᾱ gymnastics, t=1 arithmetic replaces the pure-noise mask, and no
+   float64 rescue is needed anywhere.</li>
+</ol></div></body></html>

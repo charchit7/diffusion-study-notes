@@ -32,7 +32,7 @@
   th { font-size:.7rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
   a { color:var(--accent); }
 </style></head><body>
-<div class="wrap"><p class="eyebrow">Distillation 1/5 · <a href="index.html">index</a></p><h1>Text-to-Image Diffusion Distillation — The Field, Four Ways</h1>
+<div class="wrap"><p class="eyebrow">Distillation 1/6 · <a href="index.html">index</a></p><h1>Text-to-Image Diffusion Distillation — The Field, Four Ways</h1>
 <p><em>Master overview for the line-by-line tutorials in this folder. Read this
 first; then each method's tutorial (methodology section + annotated code).
 Prerequisites: our notes 06 (flow matching/Reflow), 10 (DDIM, x̂₀ identity,
@@ -60,7 +60,10 @@ WHAT is matched: trajectories, distributions, geometry, or realism.</p>
 </code></pre>
 <p>Modern SOTA systems are HYBRIDS: DMD2 = B + D; PCM = A + D; SANA-Sprint =
 A(continuous) + D; FLUX-schnell reportedly = D on latents. Family C is the
-odd one out — it changes the object being learned rather than the loss.</p>
+odd one out — it changes the object being learned rather than the loss.
+The newest axis (late 2025) is <strong>B + RL</strong>: DMDR ★ ("DMD meets Reinforcement
+Learning", the recipe behind Z-Image-Turbo) makes the reward model and the
+distillation loss train JOINTLY — see §3b.</p>
 <hr />
 <h2>2. Family A — Trajectory distillation → LCM → PCM</h2>
 <h3>The core idea (consistency)</h3>
@@ -122,7 +125,7 @@ is the Variational Score Distillation idea (ProlificDreamer) applied to
 2D generation. Same detached-gradient implementation trick we wrote in
 <code>guidance/sd.py</code>.</li>
 </ul>
-<h3>DMD → DMD2 (Yin et al. 2024, NeurIPS oral)</h3>
+<h3>DMD → DMD2 (Yin et al. 2024, NeurIPS oral)  {#dmd2}</h3>
 <p>DMD1 needed an expensive regression anchor (teacher-sampled noise→image
 pairs + LPIPS) to stay stable. DMD2: (1) drop it; stabilize with
 <strong>two-time-scale updates</strong> (fake score updated 5–10× per generator update —
@@ -133,6 +136,19 @@ few-step generators via <strong>backward simulation</strong> — train the 4-ste
 at its own intermediate states, not the forward-process states, killing the
 train/inference mismatch. Distills SDXL to 1–4 steps at near-teacher (or
 better) quality; the de-facto open SOTA of this family.</p>
+<h3>3b. DMDR: distillation meets RLHF (Jiang et al. 2025) — the sequel</h3>
+<p>The production pipeline after DMD2 was sequential: distill, THEN align with
+human preferences (RL on a reward model). Both steps fight each other: RL on
+a few-step student <strong>reward-hacks</strong> (drifts off the data manifold chasing the
+reward), and plain DMD compresses the WHOLE distribution uniformly instead of
+the region people actually prefer. DMDR optimizes both jointly: the reward
+<strong>tilts</strong> the distribution being matched (preference-aware distillation)
+while the DMD term anchors the student to the teacher — distillation as the
+regularizer that prevents reward hacking, reward as the weighting that makes
+distillation selective. Two stages: reward-tilted matching with dynamic
+distillation strategies, then joint DMD+RL. This is the recipe behind
+Z-Image-Turbo, and the open demo code (ImageNet SiT) builds directly on the
+DMD2 codebase — our DMDR tutorial reads as a diff against the DMD2 one.</p>
 <hr />
 <h2>4. Family C — Straighten, then step → InstaFlow</h2>
 <h3>The core idea</h3>
@@ -236,6 +252,9 @@ schedule at all) + latent adversarial distillation, with code in NVlabs/Sana.</p
 </tr>
 </tbody>
 </table></div>
+<p>(DMDR extends the DMD2 column: same costs plus a reward model in the loop;
+choose it when the goal is few-step AND preference-aligned — the current
+frontier for production systems.)</p>
 <p>Rules of thumb: need cheap acceleration of an existing fine-tuned model →
 LCM-LoRA/PCM-LoRA. Need maximum 1–4-step quality and can afford training
 two networks → DMD2. Doing research on fast sampling → understand all four;
@@ -259,5 +278,6 @@ family C composes with A/B/D (straighten first, then distill by any method).</p>
 <li><a href="https://github.com/gnobitab/InstaFlow">InstaFlow repo</a> · <a href="https://arxiv.org/abs/2209.03003">Rectified Flow paper</a></li>
 <li><a href="https://github.com/luosiallen/latent-consistency-model">LCM repo</a></li>
 <li><a href="https://arxiv.org/abs/2503.09641">SANA-Sprint</a> · <a href="https://github.com/NVlabs/Sana">Sana repo</a></li>
+<li><a href="https://github.com/vvvvvjdy/dmdr">DMDR repo</a> · <a href="https://arxiv.org/abs/2511.13649">DMDR paper</a> · <a href="https://huggingface.co/Tongyi-MAI/Z-Image-Turbo">Z-Image-Turbo</a></li>
 <li>Survey context: <a href="https://www.emergentmind.com/topics/distribution-matching-distillation-dmd">DMD topic page</a>, <a href="https://arxiv.org/pdf/2412.08871">Inference-time distillation survey</a></li>
 </ul></div></body></html>

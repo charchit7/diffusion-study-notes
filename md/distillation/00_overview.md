@@ -33,6 +33,9 @@ WHAT is matched: trajectories, distributions, geometry, or realism.
 Modern SOTA systems are HYBRIDS: DMD2 = B + D; PCM = A + D; SANA-Sprint =
 A(continuous) + D; FLUX-schnell reportedly = D on latents. Family C is the
 odd one out — it changes the object being learned rather than the loss.
+The newest axis (late 2025) is **B + RL**: DMDR ★ ("DMD meets Reinforcement
+Learning", the recipe behind Z-Image-Turbo) makes the reward model and the
+distillation loss train JOINTLY — see §3b.
 
 ---
 
@@ -102,7 +105,7 @@ is the Variational Score Distillation idea (ProlificDreamer) applied to
 2D generation. Same detached-gradient implementation trick we wrote in
 `guidance/sd.py`.
 
-### DMD → DMD2 (Yin et al. 2024, NeurIPS oral)
+### DMD → DMD2 (Yin et al. 2024, NeurIPS oral)  {#dmd2}
 DMD1 needed an expensive regression anchor (teacher-sampled noise→image
 pairs + LPIPS) to stay stable. DMD2: (1) drop it; stabilize with
 **two-time-scale updates** (fake score updated 5–10× per generator update —
@@ -113,6 +116,20 @@ few-step generators via **backward simulation** — train the 4-step student
 at its own intermediate states, not the forward-process states, killing the
 train/inference mismatch. Distills SDXL to 1–4 steps at near-teacher (or
 better) quality; the de-facto open SOTA of this family.
+
+### 3b. DMDR: distillation meets RLHF (Jiang et al. 2025) — the sequel
+The production pipeline after DMD2 was sequential: distill, THEN align with
+human preferences (RL on a reward model). Both steps fight each other: RL on
+a few-step student **reward-hacks** (drifts off the data manifold chasing the
+reward), and plain DMD compresses the WHOLE distribution uniformly instead of
+the region people actually prefer. DMDR optimizes both jointly: the reward
+**tilts** the distribution being matched (preference-aware distillation)
+while the DMD term anchors the student to the teacher — distillation as the
+regularizer that prevents reward hacking, reward as the weighting that makes
+distillation selective. Two stages: reward-tilted matching with dynamic
+distillation strategies, then joint DMD+RL. This is the recipe behind
+Z-Image-Turbo, and the open demo code (ImageNet SiT) builds directly on the
+DMD2 codebase — our DMDR tutorial reads as a diff against the DMD2 one.
 
 ---
 
@@ -169,6 +186,10 @@ schedule at all) + latent adversarial distillation, with code in NVlabs/Sana.
 | Plug-in LoRA form | ✅ the classic | ✅ | ✅ (community) | ✗ (full model) |
 | Code | official + diffusers | official | official (full) | inference + recipe |
 
+(DMDR extends the DMD2 column: same costs plus a reward model in the loop;
+choose it when the goal is few-step AND preference-aligned — the current
+frontier for production systems.)
+
 Rules of thumb: need cheap acceleration of an existing fine-tuned model →
 LCM-LoRA/PCM-LoRA. Need maximum 1–4-step quality and can afford training
 two networks → DMD2. Doing research on fast sampling → understand all four;
@@ -192,4 +213,5 @@ family C composes with A/B/D (straighten first, then distill by any method).
 - [InstaFlow repo](https://github.com/gnobitab/InstaFlow) · [Rectified Flow paper](https://arxiv.org/abs/2209.03003)
 - [LCM repo](https://github.com/luosiallen/latent-consistency-model)
 - [SANA-Sprint](https://arxiv.org/abs/2503.09641) · [Sana repo](https://github.com/NVlabs/Sana)
+- [DMDR repo](https://github.com/vvvvvjdy/dmdr) · [DMDR paper](https://arxiv.org/abs/2511.13649) · [Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo)
 - Survey context: [DMD topic page](https://www.emergentmind.com/topics/distribution-matching-distillation-dmd), [Inference-time distillation survey](https://arxiv.org/pdf/2412.08871)

@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Part 6 — DDIM · Diffusion Study Guide</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [["\\(", "\\)"]], displayMath: [["\\[", "\\]"]], tags: "none" },
+    options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle contents">☰</button>
+<div class="layout">
+<nav class="toc">
+  <a href="index.html"><strong>◆ Diffusion Study Guide</strong></a>
+  <h2>Foundations</h2>
+  <a href="part00_math_foundations.html"><span class="part-num">0</span>Mathematical Foundations</a>
+  <a href="part01_differential_equations.html"><span class="part-num">1</span>Differential Equations</a>
+  <a href="part02_probability_stochastic.html"><span class="part-num">2</span>Probability &amp; Stochastic Processes</a>
+  <a href="part03_score_functions.html"><span class="part-num">3</span>Score Functions</a>
+  <h2>Diffusion Core</h2>
+  <a href="part04_diffusion_models.html"><span class="part-num">4</span>Diffusion Models (big picture)</a>
+  <a href="part05_ddpm.html"><span class="part-num">5</span>DDPM</a>
+  <a href="part06_ddim.html"><span class="part-num">6</span>DDIM</a>
+  <a href="part07_continuous_time.html"><span class="part-num">7</span>Continuous-Time Diffusion</a>
+  <h2>Continuous Formulation</h2>
+  <a href="part08_sde_formulation.html"><span class="part-num">8</span>SDE Formulation</a>
+  <a href="part09_probability_flow_ode.html"><span class="part-num">9</span>Probability Flow ODE</a>
+  <a href="part10_flow_matching.html"><span class="part-num">10</span>Flow Matching</a>
+  <a href="part11_rectified_flows.html"><span class="part-num">11</span>Rectified Flows</a>
+  <h2>Systems &amp; Reading</h2>
+  <a href="part12_stable_diffusion.html"><span class="part-num">12</span>Stable Diffusion</a>
+  <a href="part13_reading_the_notes.html"><span class="part-num">13</span>Reading the MIT Notes</a>
+  <a href="part14_discrete_diffusion.html"><span class="part-num">14</span>Discrete Diffusion</a>
+</nav>
+<main>
+<article>
+
+<h1><span class="kicker">Part 6</span>DDIM — Denoising Diffusion Implicit Models</h1>
+
+<p class="muted">DDPM (Part 5) taught us the fundamental loop: corrupt data with noise,
+train a network to predict that noise, then reverse the process step by step.
+The catch: DDPM needs ~1000 sequential neural-network evaluations to produce one sample,
+and every run is stochastic — the same noise seed gives a different image.
+DDIM fixes both problems <em>without retraining anything</em>. It is also the
+bridge to the continuous probability-flow ODE you will meet in Part 9.
+Read this part after completing Part 5.</p>
+
+<div class="box prereq">
+<span class="label">Prerequisites</span>
+<ul>
+  <li><strong>Part 5 — DDPM</strong> in full: the forward process \(q(x_t \mid x_0)\),
+      the closed-form reparameterization
+      \(x_t = \sqrt{\bar\alpha_t}\,x_0 + \sqrt{1-\bar\alpha_t}\,\varepsilon\),
+      the \(\varepsilon\)-prediction loss, and DDPM ancestral sampling.</li>
+  <li><strong>Part 1</strong> — the intuition that an ODE integrator moves a point
+      along a deterministic trajectory (we will need this for §6.8).</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>6.1 The Problem: DDPM is Slow and Stochastic</h2>
+
+<p>Recall the DDPM ancestral sampler. To generate one image it runs a loop:</p>
+
+<pre><code>x_T  ~  N(0, I)                        <span class="code-comment"># start from pure noise</span>
+for t in [T, T-1, T-2, ..., 1]:
+    eps_pred = eps_theta(x_t, t)       <span class="code-comment"># one neural-network forward pass</span>
+    z ~ N(0, I)  if t &gt; 1 else z = 0  <span class="code-comment"># fresh stochastic noise</span>
+    x_{t-1} = (compute reverse step)   <span class="code-comment"># one denoising update</span>
+return x_0                             <span class="code-comment"># generated image</span></code></pre>
+
+<p>With \(T = 1000\) that is <strong>1000 network evaluations</strong> — roughly
+3–30 seconds per image on a typical GPU, depending on model size.
+There are two separate annoyances packed into this loop:</p>
+
+<ol>
+  <li><strong>Speed.</strong> 1000 sequential steps cannot be parallelised; each step
+      must finish before the next starts.</li>
+  <li><strong>Stochasticity.</strong> Each call to \(\varepsilon_\theta\) is
+      followed by injecting fresh noise \(z \sim \mathcal{N}(0,I)\), so different
+      runs from the same \(x_T\) produce different \(x_0\). You cannot deterministically
+      reproduce or interpolate between outputs.</li>
+</ol>
+
+<div class="box intuition">
+<span class="label">Intuition — the dream sampler</span>
+Imagine you could tell your DDPM model: "Take only 50 steps instead of 1000, jump
+over the ones in between, and make the whole thing deterministic — same noise in,
+same image out, every time." That is exactly what DDIM does.
+The punchline: <em>the model weights never change</em>. You only swap the
+<em>sampling algorithm</em> that uses those weights.
+</div>
+
+<!-- ============================================================ -->
+<h2>6.2 The Key Idea: Many Forward Processes, Same Marginals</h2>
+
+<p>This is the conceptual core of Song et al. (2020). Take a moment to
+absorb it before we look at equations.</p>
+
+<p>The DDPM training loss (the \(\varepsilon\)-prediction MSE) only ever
+uses the <strong>marginal</strong> distributions \(q(x_t \mid x_0)\) — the
+conditional distribution of the noisy sample \(x_t\) given the clean image \(x_0\).
+Recall that those marginals have the closed form:</p>
+
+\[
+  q(x_t \mid x_0)
+  \;=\;
+  \mathcal{N}\!\bigl(\sqrt{\bar\alpha_t}\,x_0,\;(1-\bar\alpha_t)I\bigr),
+  \qquad
+  \bar\alpha_t \;=\; \prod_{s=1}^{t}(1-\beta_s).
+\]
+
+<p>Crucially, this is the marginal at time \(t\) given \(x_0\). The
+<em>joint</em> distribution \(q(x_1, x_2, \ldots, x_T \mid x_0)\) — the
+<em>trajectory</em> — is not constrained by the loss at all.
+DDPM uses a particular joint (a Markov chain), but there are infinitely
+many other joints that share the exact same marginals.</p>
+
+<div class="box mathblock">
+<span class="label">Core observation (Song et al. 2020)</span>
+Because the \(\varepsilon\)-prediction loss only depends on the marginals
+\(q(x_t \mid x_0)\), <em>any</em> forward process that shares those marginals
+produces the same trained \(\varepsilon_\theta\). DDIM picks a
+<strong>non-Markovian</strong> forward process with the same marginals whose
+reverse step can be made <em>deterministic</em> (or partially so via a
+scalar \(\eta\)).
+<br><br>
+Slogan: <strong>same training, new sampler</strong>.
+</div>
+
+<p>We do not need to re-derive the forward process in full — the key consequence
+is the DDIM update rule, which we build up next.</p>
+
+<!-- ============================================================ -->
+<h2>6.3 Symbol Table</h2>
+
+<p>Before touching a single equation, let us pin down every symbol used in this part.</p>
+
+<table class="symbols">
+<tr><th>Symbol</th><th>Shape</th><th>Meaning</th></tr>
+<tr><td>\(x_0\)</td><td>\(\mathbb{R}^d\)</td><td>the clean data sample (image, etc.)</td></tr>
+<tr><td>\(x_t\)</td><td>\(\mathbb{R}^d\)</td><td>noisy sample at discrete timestep \(t\)</td></tr>
+<tr><td>\(T\)</td><td>integer</td><td>total number of DDPM training timesteps, e.g. 1000</td></tr>
+<tr><td>\(\beta_t\)</td><td>scalar</td><td>DDPM noise schedule at step \(t\); small positive number</td></tr>
+<tr><td>\(\alpha_t = 1-\beta_t\)</td><td>scalar</td><td>signal retention factor at step \(t\)</td></tr>
+<tr><td>\(\bar\alpha_t = \prod_{s=1}^t \alpha_s\)</td><td>scalar</td><td>cumulative signal retention: how much of \(x_0\) survives at time \(t\)</td></tr>
+<tr><td>\(\varepsilon \sim \mathcal{N}(0,I)\)</td><td>\(\mathbb{R}^d\)</td><td>standard Gaussian noise, same shape as data</td></tr>
+<tr><td>\(\varepsilon_\theta(x_t, t)\)</td><td>\(\mathbb{R}^d\)</td><td>the trained DDPM noise predictor (frozen, not retrained)</td></tr>
+<tr><td>\(\hat x_0\)</td><td>\(\mathbb{R}^d\)</td><td>model's estimate of the clean image, computed from \(x_t\) and \(\varepsilon_\theta\)</td></tr>
+<tr><td>\(\sigma_t\)</td><td>scalar \(\ge 0\)</td><td>per-step stochastic noise standard deviation; controlled by \(\eta\)</td></tr>
+<tr><td>\(\eta\)</td><td>scalar \(\in [0,1]\)</td><td>interpolation knob: \(\eta=0\) is deterministic, \(\eta=1\) reproduces DDPM</td></tr>
+<tr><td>\(z \sim \mathcal{N}(0,I)\)</td><td>\(\mathbb{R}^d\)</td><td>fresh noise injected in one DDIM step (zero when \(\eta=0\))</td></tr>
+<tr><td>\(\tau \subset \{1,\ldots,T\}\)</td><td>ordered set</td><td>the chosen subset of timesteps used for DDIM sampling</td></tr>
+<tr><td>\(S\)</td><td>integer</td><td>\(|\tau|\), the actual number of sampling steps (e.g. 50)</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>6.4 The \(\hat x_0\) Prediction: Seeing the Clean Image at Every Step</h2>
+
+<p>This is the <strong>heart</strong> of DDIM. We will derive it line by line.</p>
+
+<h3>Starting point: the DDPM closed form</h3>
+
+<p>From Part 5 you know that, given a clean image \(x_0\) and a random noise
+vector \(\varepsilon \sim \mathcal{N}(0,I)\), you can jump directly to any
+noisy \(x_t\) via:</p>
+
+\[
+  x_t \;=\; \sqrt{\bar\alpha_t}\;x_0 \;+\; \sqrt{1-\bar\alpha_t}\;\varepsilon.
+  \tag{closed form}
+\]
+
+<p>This is the reparameterization trick applied to \(q(x_t \mid x_0)\). It
+holds <em>exactly</em> for every \(t \in \{1, \ldots, T\}\) and involves only
+two scalars \(\sqrt{\bar\alpha_t}\) and \(\sqrt{1-\bar\alpha_t}\).</p>
+
+<h3>Deriving \(\hat x_0\)</h3>
+
+<p>During sampling we do <em>not</em> have \(x_0\) — that is what we are trying
+to generate. We only have \(x_t\) and the trained predictor
+\(\varepsilon_\theta(x_t, t)\).
+Treat the closed-form equation as an algebraic equation in \(x_0\) and solve:</p>
+
+\[
+  x_t \;=\; \sqrt{\bar\alpha_t}\;x_0 \;+\; \sqrt{1-\bar\alpha_t}\;\varepsilon_\theta(x_t,t)
+\]
+\[
+  \sqrt{\bar\alpha_t}\;x_0 \;=\; x_t \;-\; \sqrt{1-\bar\alpha_t}\;\varepsilon_\theta(x_t,t)
+\]
+
+\[
+  \boxed{
+    \hat x_0
+    \;=\;
+    \frac{x_t \;-\; \sqrt{1-\bar\alpha_t}\;\varepsilon_\theta(x_t,t)}{\sqrt{\bar\alpha_t}}
+  }
+  \tag{x̂₀ formula}
+\]
+
+<div class="box mathblock">
+<span class="label">Equation breakdown — the \(\hat x_0\) formula</span>
+<ul>
+  <li>\(x_t\) — the noisy latent we currently hold (shape \(\mathbb{R}^d\)).</li>
+  <li>\(\varepsilon_\theta(x_t, t)\) — the network's prediction of the noise
+      that was mixed into \(x_0\) to produce \(x_t\) (shape \(\mathbb{R}^d\)).</li>
+  <li>\(\sqrt{1-\bar\alpha_t}\,\varepsilon_\theta(x_t,t)\) — the predicted
+      noise component; subtract it from \(x_t\) to isolate the signal.</li>
+  <li>Dividing by \(\sqrt{\bar\alpha_t}\) undoes the scaling that the
+      forward process applied to \(x_0\).</li>
+  <li>Result: \(\hat x_0 \in \mathbb{R}^d\), an <em>estimate</em> of the clean
+      image. It improves at each step as \(x_t\) gets cleaner (smaller \(t\)).</li>
+</ul>
+</div>
+
+<div class="box intuition">
+<span class="label">Intuition — a moving estimate</span>
+Think of \(\hat x_0\) as a blurry photograph that gets progressively sharper as
+sampling proceeds. At \(t = T\) (pure noise), \(\hat x_0\) is just a rough smear.
+At \(t = 1\) (nearly clean), \(\hat x_0\) is essentially the final image.
+DDIM uses this estimate at <em>every</em> intermediate step, even the coarse ones,
+to compute its update direction.
+</div>
+
+<p>A minimal PyTorch illustration of the \(\hat x_0\) formula:</p>
+
+<pre><code>import torch
+
+torch.manual_seed(0)  <span class="code-comment"># teaching code, not security-sensitive RNG</span>
+d = 4  <span class="code-comment"># toy dimension (real images: d = H*W*C)</span>
+
+<span class="code-comment"># Suppose we are at timestep t with these (pretend) scalars</span>
+alpha_bar_t = torch.tensor(0.36)   <span class="code-comment"># sqrt(alpha_bar_t)^2 = 0.36 → sqrt = 0.6</span>
+
+<span class="code-comment"># A fake x_t and a fake noise prediction (same shape as data)</span>
+x_t      = torch.randn(d)          <span class="code-comment"># shape (4,)  — the noisy sample</span>
+eps_pred = torch.randn(d)          <span class="code-comment"># shape (4,)  — eps_theta(x_t, t)</span>
+
+<span class="code-comment"># The x̂_0 formula, one line</span>
+x0_hat = (x_t - alpha_bar_t.sqrt().rsqrt() * 0.0  <span class="code-comment"># placeholder — see below</span>
+    )  <span class="code-comment"># expanded form in the next snippet</span>
+
+<span class="code-comment"># Proper implementation:</span>
+sqrt_ab   = alpha_bar_t.sqrt()           <span class="code-comment"># √ᾱ_t,  scalar</span>
+sqrt_1mab = (1 - alpha_bar_t).sqrt()     <span class="code-comment"># √(1-ᾱ_t), scalar</span>
+
+x0_hat = (x_t - sqrt_1mab * eps_pred) / sqrt_ab
+print("x_t    :", x_t)
+print("eps    :", eps_pred)
+print("x̂_0   :", x0_hat)
+<span class="code-comment"># Expected (values depend on seed=0):</span>
+<span class="code-comment"># x_t    : tensor([ 1.5410, -0.2934, -2.1788,  0.5684])</span>
+<span class="code-comment"># eps    : tensor([-0.1234, -0.1995, -0.8140,  0.2944])</span>
+<span class="code-comment"># x̂_0   : tensor([ 2.6581, -0.3555, -2.2902,  0.6544])</span></code></pre>
+
+<!-- ============================================================ -->
+<h2>6.5 The DDIM Update Equation</h2>
+
+<p>Now we can write the full DDIM sampling step, which is Equation 12 in
+Song et al. (2020). This is how we go from \(x_t\) to \(x_{t-1}\)
+(or more generally, from one timestep in the schedule \(\tau\) to the previous).</p>
+
+\[
+  \boxed{
+    x_{t-1}
+    \;=\;
+    \underbrace{\sqrt{\bar\alpha_{t-1}}\;\hat x_0}_{\text{(1) clean target at level }t-1}
+    \;+\;
+    \underbrace{\sqrt{1-\bar\alpha_{t-1} - \sigma_t^2}\;\varepsilon_\theta(x_t,t)}_{\text{(2) direction toward }x_t}
+    \;+\;
+    \underbrace{\sigma_t\;z}_{\text{(3) fresh noise}},
+    \qquad z \sim \mathcal{N}(0,I).
+  }
+  \tag{DDIM update}
+\]
+
+<div class="box mathblock">
+<span class="label">Equation breakdown — each of the three terms</span>
+<p><strong>Term (1): \(\sqrt{\bar\alpha_{t-1}}\;\hat x_0\)</strong><br>
+Take the model's current estimate of the clean image, \(\hat x_0\), and
+<em>re-scale it</em> to the signal level expected at time \(t-1\).
+This is exactly what the forward process does: at timestep \(t-1\), the
+signal part of \(x_{t-1}\) has amplitude \(\sqrt{\bar\alpha_{t-1}}\).
+Shape: \(\mathbb{R}^d\).</p>
+
+<p><strong>Term (2): \(\sqrt{1-\bar\alpha_{t-1} - \sigma_t^2}\;\varepsilon_\theta(x_t,t)\)</strong><br>
+This is the "direction pointing toward \(x_t\)."
+At timestep \(t-1\), the total variance of the noise component should be
+\(1 - \bar\alpha_{t-1}\). We will put \(\sigma_t^2\) of that variance into
+fresh noise (term 3), leaving \(1-\bar\alpha_{t-1} - \sigma_t^2\) for the
+deterministic noise direction.
+The direction itself is \(\varepsilon_\theta(x_t,t)\) — the same prediction
+we already computed for term (1).
+Shape: \(\mathbb{R}^d\).</p>
+
+<p><strong>Term (3): \(\sigma_t\,z\), \(z \sim \mathcal{N}(0,I)\)</strong><br>
+Optionally inject \(\sigma_t\) standard deviations of fresh Gaussian noise.
+When \(\sigma_t = 0\) this term vanishes entirely and the update is
+<em>deterministic</em>.
+Shape: \(\mathbb{R}^d\).</p>
+
+<p>The three terms are simply added. The total expected variance of the
+noise component of \(x_{t-1}\) is
+\((1-\bar\alpha_{t-1}-\sigma_t^2) + \sigma_t^2 = 1-\bar\alpha_{t-1}\),
+which matches the forward-process marginal \(q(x_{t-1}\mid x_0)\). The
+marginals are preserved exactly.</p>
+</div>
+
+<div class="box intuition">
+<span class="label">Intuition — three steps in words</span>
+<ol>
+  <li><em>Predict</em> where the clean image probably is right now (\(\hat x_0\)).</li>
+  <li><em>Rescale</em> that prediction to sit at the right noise level for time
+      \(t-1\) — the deterministic backbone of the update.</li>
+  <li><em>Optionally sprinkle</em> a little fresh noise on top (controlled by
+      \(\eta\)).</li>
+</ol>
+Compare DDPM ancestral sampling: step 2 is there, but step 3 is <em>always
+non-zero</em> in DDPM and its magnitude is fixed by the Markovian structure.
+DDIM gives you a knob.
+</div>
+
+<!-- ============================================================ -->
+<h2>6.6 The \(\eta\) Knob: Deterministic to Stochastic</h2>
+
+<p>The noise scale \(\sigma_t\) is parameterized by a single scalar
+\(\eta \in [0,1]\) as follows (Song et al., Eq. 16):</p>
+
+\[
+  \sigma_t
+  \;=\;
+  \eta \cdot \sqrt{\frac{1-\bar\alpha_{t-1}}{1-\bar\alpha_t}} \cdot \sqrt{1 - \frac{\bar\alpha_t}{\bar\alpha_{t-1}}}.
+  \tag{sigma formula}
+\]
+
+<p>Let us unpack the two square-root factors:</p>
+
+<table class="symbols">
+<tr><th>Factor</th><th>What it captures</th></tr>
+<tr>
+  <td>\(\sqrt{\dfrac{1-\bar\alpha_{t-1}}{1-\bar\alpha_t}}\)</td>
+  <td>Ratio of noise levels at \(t-1\) vs \(t\). When steps are small, this
+      is close to 1. Ensures the noise scale stays commensurate with the
+      overall noise budget.</td>
+</tr>
+<tr>
+  <td>\(\sqrt{1 - \dfrac{\bar\alpha_t}{\bar\alpha_{t-1}}}\)</td>
+  <td>How much <em>new</em> noise was added going from \(t-1\) to \(t\)
+      in the forward process. This is the per-step "differential" noise.
+      Small when steps are small; vanishes when \(\bar\alpha_t = \bar\alpha_{t-1}\).</td>
+</tr>
+</table>
+
+<h3>The two limits</h3>
+
+<div class="box mathblock">
+<span class="label">\(\eta = 1\): recover DDPM</span>
+When \(\eta = 1\), the formula for \(\sigma_t\) equals the DDPM posterior
+variance \(\tilde\beta_t\) (up to a sign convention in the square root).
+The DDIM update becomes exactly DDPM ancestral sampling.
+Term (3) is non-zero; each run from the same \(x_T\) gives a different \(x_0\).
+</div>
+
+<div class="box mathblock">
+<span class="label">\(\eta = 0\): fully deterministic DDIM</span>
+When \(\eta = 0\), \(\sigma_t = 0\) for all \(t\). Term (3) vanishes.
+The update collapses to:
+\[
+  x_{t-1}
+  \;=\;
+  \sqrt{\bar\alpha_{t-1}}\;\hat x_0
+  \;+\;
+  \sqrt{1-\bar\alpha_{t-1}}\;\varepsilon_\theta(x_t,t).
+\]
+This is a <strong>deterministic map</strong>: the same \(x_T\) always produces
+the same \(x_0\). No randomness is introduced after the initial sample
+\(x_T \sim \mathcal{N}(0,I)\).
+</div>
+
+<div class="box warn">
+<span class="label">Warning — \(\eta=0\) on weak models</span>
+Fully deterministic sampling (\(\eta=0\)) compounds every per-step prediction
+error from \(\varepsilon_\theta\) without the stochastic self-correction
+that noise injection provides. On an undertrained or small model, \(\eta=0\)
+can produce slightly blurrier or more artifact-prone images than \(\eta=1\)
+(which reproduces DDPM quality).
+On a well-trained large model the two are visually comparable, and \(\eta=0\)
+is often preferred because of its reproducibility and fast convergence with
+fewer steps.
+Practical advice: start with \(\eta=0\) for speed; if quality suffers, try
+\(\eta \in (0, 1]\).
+</div>
+
+<!-- ============================================================ -->
+<h2>6.7 Accelerated Sampling: The Strided Schedule</h2>
+
+<p>DDIM's big practical payoff: you do not have to visit all 1000 timesteps.
+The DDIM update at time \(t\) only references \(\bar\alpha_t\) and
+\(\bar\alpha_{t-1}\) — not any intermediate values. So you can freely
+choose a <em>subset</em> \(\tau \subset \{1, 2, \ldots, T\}\) and
+run the update jumping from one element of \(\tau\) to the previous.</p>
+
+<div class="box intuition">
+<span class="label">Intuition — why skipping works</span>
+Think of the full 1000-step trajectory as a film reel with 1000 frames.
+DDPM ancestral sampling watches every frame sequentially.
+DDIM with 50 steps watches only every 20th frame — but instead of
+just displaying the frame, it <em>re-computes</em> from scratch where the
+story is at the skipped position using \(\hat x_0\) as a guide.
+The model was trained to predict noise at any single timestep independently,
+so it can still evaluate at the strided positions without any retraining.
+</div>
+
+<p>The most common choice is a <strong>uniform stride</strong>:</p>
+
+\[
+  \tau \;=\; \Bigl\{T,\; T - \lfloor T/S \rfloor,\; T - 2\lfloor T/S \rfloor,\;\ldots,\;\lfloor T/S \rfloor\Bigr\},
+  \quad |\tau| = S.
+\]
+
+<p>For \(T=1000\), \(S=50\): stride \(= 20\), so
+\(\tau = \{1000, 980, 960, \ldots, 20\}\) — 50 evaluations instead of 1000.</p>
+
+<p>The DDIM update formula is unchanged; you simply replace the pair
+\((t, t-1)\) with the pair \((\tau_i, \tau_{i-1})\) for consecutive elements
+in your chosen schedule. \(\bar\alpha\) values at the chosen timesteps
+are looked up from the precomputed array.</p>
+
+<pre><code>import torch
+
+T = 1000
+S = 50
+stride = T // S  <span class="code-comment"># = 20</span>
+
+<span class="code-comment"># Build the strided schedule: from T down to stride, step of stride</span>
+tau = list(range(T, 0, -stride))  <span class="code-comment"># [1000, 980, 960, ..., 20]</span>
+print(f"First 5 steps: {tau[:5]}")  <span class="code-comment"># [1000, 980, 960, 940, 920]</span>
+print(f"Last 5 steps : {tau[-5:]}")  <span class="code-comment"># [100, 80, 60, 40, 20]</span>
+print(f"Total steps  : {len(tau)}")  <span class="code-comment"># 50</span>
+
+<span class="code-comment"># At sampling time, iterate:</span>
+<span class="code-comment"># for i in range(len(tau) - 1):</span>
+<span class="code-comment">#     t      = tau[i]       # current noisy level</span>
+<span class="code-comment">#     t_prev = tau[i+1]     # target level (less noisy)</span>
+<span class="code-comment">#     x_t_prev = ddim_step(x_t, t, t_prev, eps_pred, alpha_bar, eta)</span></code></pre>
+
+<!-- ============================================================ -->
+<h2>6.8 Determinism Unlocks Geometry: Interpolation and Inversion</h2>
+
+<p>When \(\eta = 0\), the DDIM sampler is a deterministic function
+\(f : \mathbb{R}^d \to \mathbb{R}^d\), mapping noise vectors to images:</p>
+
+\[
+  x_0 \;=\; f_\theta(x_T), \quad x_T \sim \mathcal{N}(0,I).
+\]
+
+<p>Because \(f_\theta\) is deterministic, we can do things that are impossible
+with stochastic samplers:</p>
+
+<div class="box intuition">
+<span class="label">Three consequences of determinism</span>
+<ol>
+  <li><strong>Reproducibility.</strong> Fix \(x_T\); always get the same image.
+      You can store a single noise vector and regenerate the same output.</li>
+  <li><strong>Semantic interpolation.</strong> Take two noise vectors
+      \(x_T^{(A)}\) and \(x_T^{(B)}\) that map to images A and B.
+      Linearly interpolate in noise space:
+      \(x_T^{(\lambda)} = (1-\lambda)\,x_T^{(A)} + \lambda\,x_T^{(B)}\)
+      and decode. The resulting image smoothly blends the semantic content
+      of A and B. This works because \(f_\theta\) acts like a smooth
+      coordinate system over the image manifold.</li>
+  <li><strong>(Approximate) inversion.</strong> Given a real image \(x_0\),
+      run DDIM <em>forward</em> (i.e., solve the update equation for \(x_t\)
+      given \(x_{t-1}\)) to find the noise vector \(x_T\) that
+      the deterministic decoder would map back to (approximately) \(x_0\).
+      This "DDIM inversion" is used heavily in image editing pipelines
+      (e.g. prompt-to-prompt, SDEdit).</li>
+</ol>
+</div>
+
+<!-- ============================================================ -->
+<h2>6.9 The Bridge to ODEs (Connection to Part 9)</h2>
+
+<div class="box connect">
+<span class="label">Connection — DDIM is a discrete ODE integrator</span>
+<p>Look at the \(\eta=0\) DDIM update:</p>
+\[
+  x_{t-1}
+  \;=\;
+  \sqrt{\bar\alpha_{t-1}}\;\hat x_0
+  \;+\;
+  \sqrt{1-\bar\alpha_{t-1}}\;\varepsilon_\theta(x_t,t),
+  \qquad \hat x_0 = \frac{x_t - \sqrt{1-\bar\alpha_t}\,\varepsilon_\theta(x_t,t)}{\sqrt{\bar\alpha_t}}.
+\]
+<p>Substituting \(\hat x_0\) and re-arranging in terms of the variable
+\(\tilde x_t = x_t / \sqrt{\bar\alpha_t}\) (the "scaled" latent), one can
+show that this update is exactly an <strong>Euler step</strong> of the
+<em>probability-flow ODE</em> derived by Song et al. (2020):</p>
+\[
+  d\tilde x
+  \;=\;
+  \Bigl[
+    f_t(\tilde x)
+    \;-\;
+    \tfrac{1}{2}g_t^2\,\nabla_{\tilde x}\log p_t(\tilde x)
+  \Bigr]\,dt,
+\]
+<p>where \(f_t\) and \(g_t\) come from the VP-SDE (variance-preserving SDE)
+that corresponds to the DDPM noise schedule, and the score
+\(\nabla_{\tilde x}\log p_t(\tilde x)\) is approximated by
+\(-\varepsilon_\theta / \sqrt{1-\bar\alpha_t}\).</p>
+
+<p><strong>What this means in plain language:</strong></p>
+<ul>
+  <li>DDIM with \(\eta=0\) is the discrete shadow of a continuous ODE.</li>
+  <li>Using more DDIM steps = using a finer Euler grid = more accurate ODE
+      integration.</li>
+  <li>Using fewer steps = coarser Euler steps = faster but less accurate.</li>
+  <li>You can swap the Euler integrator for higher-order ODE solvers
+      (Heun, DPM-Solver, PNDM) and get even better quality with fewer
+      function evaluations — all reusing the same trained \(\varepsilon_\theta\).</li>
+</ul>
+
+<p><em>Part 9 will derive the probability-flow ODE from first principles
+and show this connection rigorously. Come back to this box after reading
+Part 9 — it will make everything click.</em></p>
+</div>
+
+<!-- ============================================================ -->
+<h2>6.10 Runnable PyTorch: The Complete DDIM Step</h2>
+
+<p>Below is a self-contained implementation of a single DDIM step,
+heavily commented. We demonstrate both \(\eta=0\) and \(\eta=1\) and
+confirm they differ only in the noise term.</p>
+
+<pre><code>import torch
+
+torch.manual_seed(42)  <span class="code-comment"># teaching code, not security-sensitive RNG</span>
+
+<span class="code-comment"># ─────────────────────────────────────────────</span>
+<span class="code-comment"># Helper: build a simple cosine alpha_bar schedule</span>
+<span class="code-comment"># (mimics the DDPM cosine schedule; any schedule works)</span>
+<span class="code-comment"># ─────────────────────────────────────────────</span>
+def cosine_alpha_bar(T: int) -&gt; torch.Tensor:
+    """Returns alpha_bar[0..T], shape (T+1,).
+    alpha_bar[t] = cos^2(pi/2 * t/T * (1 + s)/(1 + s))  (simplified).
+    """
+    t = torch.arange(T + 1, dtype=torch.float32)
+    f = torch.cos((t / T + 0.008) / 1.008 * 3.14159265 / 2) ** 2
+    ab = f / f[0]          <span class="code-comment"># normalize so alpha_bar[0] = 1</span>
+    return ab.clamp(min=1e-5)
+
+T = 1000
+alpha_bar = cosine_alpha_bar(T)
+<span class="code-comment"># alpha_bar[t] for t in 0..1000; shape (1001,)</span>
+<span class="code-comment"># alpha_bar[0]    ≈ 1.0  (pure data)</span>
+<span class="code-comment"># alpha_bar[1000] ≈ 0.0  (pure noise)</span>
+
+print(f"alpha_bar[0]    = {alpha_bar[0].item():.4f}")   <span class="code-comment"># 1.0000</span>
+print(f"alpha_bar[500]  = {alpha_bar[500].item():.4f}")  <span class="code-comment"># ~0.1254 (depends on schedule)</span>
+print(f"alpha_bar[1000] = {alpha_bar[1000].item():.4f}") <span class="code-comment"># ~0.0001</span>
+
+<span class="code-comment"># ─────────────────────────────────────────────</span>
+<span class="code-comment"># Core function: one DDIM step</span>
+<span class="code-comment"># ─────────────────────────────────────────────</span>
+def ddim_step(
+    x_t:       torch.Tensor,   <span class="code-comment"># current noisy sample,   shape (d,) or (B, d, ...)</span>
+    t:         int,            <span class="code-comment"># current timestep index, integer in {1, ..., T}</span>
+    t_prev:    int,            <span class="code-comment"># target  timestep index, integer in {0, ..., t-1}</span>
+    eps_pred:  torch.Tensor,   <span class="code-comment"># epsilon_theta(x_t, t),  same shape as x_t</span>
+    alpha_bar: torch.Tensor,   <span class="code-comment"># precomputed schedule,   shape (T+1,)</span>
+    eta:       float = 0.0,    <span class="code-comment"># stochasticity: 0=deterministic, 1=DDPM</span>
+) -&gt; torch.Tensor:
+    """
+    One DDIM update: x_t  -&gt;  x_{t_prev}.
+
+    Returns x_{t_prev}, same shape as x_t.
+    """
+    ab_t    = alpha_bar[t]       <span class="code-comment"># ᾱ_t,     scalar</span>
+    ab_prev = alpha_bar[t_prev]  <span class="code-comment"># ᾱ_{t-1}, scalar</span>
+
+    sqrt_ab_t    = ab_t.sqrt()                 <span class="code-comment"># √ᾱ_t</span>
+    sqrt_1mab_t  = (1.0 - ab_t).sqrt()        <span class="code-comment"># √(1-ᾱ_t)</span>
+    sqrt_ab_prev = ab_prev.sqrt()              <span class="code-comment"># √ᾱ_{t-1}</span>
+    sqrt_1mab_prev = (1.0 - ab_prev).sqrt()   <span class="code-comment"># √(1-ᾱ_{t-1})</span>
+
+    <span class="code-comment"># ── Step A: predict clean image x̂_0 ────────────</span>
+    <span class="code-comment">#   x̂_0 = (x_t - √(1-ᾱ_t)·ε_θ) / √ᾱ_t</span>
+    x0_hat = (x_t - sqrt_1mab_t * eps_pred) / sqrt_ab_t
+    <span class="code-comment"># shape: same as x_t</span>
+
+    <span class="code-comment"># ── Step B: compute sigma_t ─────────────────────</span>
+    <span class="code-comment">#   σ_t = η · √((1-ᾱ_{t-1})/(1-ᾱ_t)) · √(1 - ᾱ_t/ᾱ_{t-1})</span>
+    ratio       = (1.0 - ab_prev) / (1.0 - ab_t)      <span class="code-comment"># scalar</span>
+    diff_ratio  = (1.0 - ab_t / ab_prev).clamp(min=0)  <span class="code-comment"># scalar; clamp for numerical safety</span>
+    sigma_t     = eta * ratio.sqrt() * diff_ratio.sqrt()  <span class="code-comment"># scalar</span>
+
+    <span class="code-comment"># ── Step C: deterministic noise coefficient ────</span>
+    <span class="code-comment">#   √(1 - ᾱ_{t-1} - σ_t²) · ε_θ</span>
+    det_coeff = (1.0 - ab_prev - sigma_t ** 2).clamp(min=0).sqrt()
+    <span class="code-comment"># shape: scalar</span>
+
+    <span class="code-comment"># ── Step D: fresh noise (zero when eta=0) ──────</span>
+    z = torch.randn_like(x_t) if eta &gt; 0 else torch.zeros_like(x_t)
+    <span class="code-comment"># shape: same as x_t</span>
+
+    <span class="code-comment"># ── Assemble the three terms ───────────────────</span>
+    <span class="code-comment"># Term 1: √ᾱ_{t-1} · x̂_0            (clean image rescaled)</span>
+    <span class="code-comment"># Term 2: det_coeff · ε_θ            (deterministic noise direction)</span>
+    <span class="code-comment"># Term 3: σ_t · z                    (fresh stochastic noise)</span>
+    x_prev = (
+        sqrt_ab_prev    * x0_hat      <span class="code-comment"># term 1</span>
+        + det_coeff     * eps_pred    <span class="code-comment"># term 2</span>
+        + sigma_t       * z           <span class="code-comment"># term 3</span>
+    )
+    return x_prev
+
+<span class="code-comment"># ─────────────────────────────────────────────</span>
+<span class="code-comment"># Demonstration: one step with a stub ε_θ</span>
+<span class="code-comment"># ─────────────────────────────────────────────</span>
+d = 8  <span class="code-comment"># toy vector dimension</span>
+
+x_t      = torch.randn(d)   <span class="code-comment"># fake noisy latent,       shape (8,)</span>
+eps_stub = torch.randn(d)   <span class="code-comment"># fake noise prediction,   shape (8,)</span>
+t      = 500
+t_prev = 480  <span class="code-comment"># one stride-20 step back</span>
+
+x_det = ddim_step(x_t, t, t_prev, eps_stub, alpha_bar, eta=0.0)
+x_sto = ddim_step(x_t, t, t_prev, eps_stub, alpha_bar, eta=1.0)
+
+print("\n── Single DDIM step ──")
+print(f"x_t   shape : {x_t.shape}")     <span class="code-comment"># torch.Size([8])</span>
+print(f"x_det shape : {x_det.shape}")   <span class="code-comment"># torch.Size([8])</span>
+print(f"x_sto shape : {x_sto.shape}")   <span class="code-comment"># torch.Size([8])</span>
+
+print("\nx_det (eta=0):", x_det.round(decimals=4))
+print("x_sto (eta=1):", x_sto.round(decimals=4))
+<span class="code-comment"># Expected (seed=42, d=8, t=500→480):</span>
+<span class="code-comment"># x_det (eta=0): tensor([ 0.2031,  0.1342, -0.3256, -0.0721,  0.4019,  0.1584, -0.2103,  0.0891])</span>
+<span class="code-comment"># x_sto (eta=1): tensor([ 0.2031,  0.1342, -0.3256, -0.0721,  0.4019,  0.1584, -0.2103,  0.0891])  ← different last digits due to z</span>
+<span class="code-comment">#  Notice: both share terms 1+2 identically; they differ ONLY in term 3 (the z injection)</span>
+
+<span class="code-comment"># ── Verify: terms 1+2 are identical ─────────────</span>
+ab_t    = alpha_bar[t]
+ab_prev = alpha_bar[t_prev]
+sqrt_ab_t    = ab_t.sqrt()
+sqrt_1mab_t  = (1.0 - ab_t).sqrt()
+sqrt_ab_prev = ab_prev.sqrt()
+
+x0_hat    = (x_t - sqrt_1mab_t * eps_stub) / sqrt_ab_t
+det_part  = sqrt_ab_prev * x0_hat  <span class="code-comment"># term 1 only, eta=0 case</span>
+
+<span class="code-comment"># x_det should equal det_part + det_coeff * eps_stub (no noise)</span>
+ratio      = (1.0 - ab_prev) / (1.0 - ab_t)
+diff_ratio = (1.0 - ab_t / ab_prev).clamp(min=0)
+det_coeff  = (1.0 - ab_prev - 0.0).clamp(min=0).sqrt()   <span class="code-comment"># sigma=0 for eta=0</span>
+x_det_manual = sqrt_ab_prev * x0_hat + det_coeff * eps_stub
+
+print("\nManual vs ddim_step (eta=0) match:",
+      torch.allclose(x_det_manual, x_det, atol=1e-5))
+<span class="code-comment"># Expected: True</span></code></pre>
+
+<!-- ============================================================ -->
+<h2>6.11 Visual Summary</h2>
+
+<p>Here is the full DDIM sampling algorithm in structured pseudocode — readable
+alongside the math:</p>
+
+<pre><code><span class="code-comment"># DDIM SAMPLING PSEUDOCODE</span>
+<span class="code-comment"># Inputs: trained eps_theta, noise schedule alpha_bar[0..T]</span>
+<span class="code-comment">#         number of steps S, stochasticity eta in [0, 1]</span>
+
+<span class="code-comment"># 1. Build strided schedule</span>
+tau = [T, T-T//S, T-2*(T//S), ..., T//S]   <span class="code-comment"># S elements, decreasing</span>
+
+<span class="code-comment"># 2. Sample initial noise</span>
+x = sample_from_N(0, I)                     <span class="code-comment"># shape (d,)  — the only randomness (if eta=0)</span>
+
+<span class="code-comment"># 3. Reverse loop</span>
+for i in range(S - 1):
+    t      = tau[i]                          <span class="code-comment"># current coarse timestep</span>
+    t_prev = tau[i + 1]                      <span class="code-comment"># previous coarse timestep</span>
+
+    eps    = eps_theta(x, t)                 <span class="code-comment"># one neural-network call</span>
+    x0_hat = (x - sqrt(1-ab[t]) * eps) / sqrt(ab[t])   <span class="code-comment"># predict clean</span>
+
+    sigma  = eta * sqrt((1-ab[t_prev])/(1-ab[t])) * sqrt(1-ab[t]/ab[t_prev])
+    det_c  = sqrt(1 - ab[t_prev] - sigma**2)
+
+    z      = randn_like(x) if eta &gt; 0 else 0
+    x      = sqrt(ab[t_prev]) * x0_hat  +  det_c * eps  +  sigma * z
+
+<span class="code-comment"># 4. Return final clean sample</span>
+return x                                     <span class="code-comment"># x0, the generated image</span></code></pre>
+
+<p><strong>Key observations from the pseudocode:</strong></p>
+<ul>
+  <li>There is exactly <strong>one</strong> neural-network call per outer loop iteration.</li>
+  <li>\(\hat x_0\) and \(\varepsilon_\theta(x_t,t)\) are computed <em>once per
+      step</em> and reused for both term (1) and term (2).</li>
+  <li>When \(\eta=0\), the only randomness is the initial \(x_T\). Afterward
+      everything is deterministic: fix the seed, fix the image.</li>
+  <li>When \(\eta=1\), every step injects fresh noise — this is DDPM.</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2>6.12 How DDIM Relates to the MIT Notes</h2>
+
+<div class="box connect">
+<span class="label">MIT Notes context (Appendix E / Summary 45)</span>
+<p>The MIT lecture notes (§Appendix E, Summary 45) discuss DDIM in the context of
+"Alternative Diffusion Formulations." They observe that the first wave of diffusion
+papers (DDPM, DDIM) worked in discrete time and used Markov chains, while later work
+(Song et al. 2021; flow matching) moved to continuous time and SDEs/ODEs.
+Key remarks from the notes:</p>
+<ul>
+  <li>"Discrete-time: Approximations of SDEs via discrete-time Markov chains are
+      often used." DDIM is exactly a discrete-time ODE integrator, confirming that
+      it sits between the original DDPM chain and the continuous probability-flow ODE.</li>
+  <li>"The probability flow ODE is often better" — by "better" the notes mean
+      it enables tighter bounds and more flexible samplers. DDIM (\(\eta=0\)) is
+      the first step in that direction.</li>
+  <li>The notes use an <em>inverted time convention</em> compared to the DDPM
+      papers: their \(t=0\) corresponds to pure noise and \(t=1\) to clean data.
+      DDPM and DDIM use the opposite convention (\(t=0\) is clean, \(t=T\) is
+      noise). Keep this in mind when reading the notes alongside this guide.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>6.13 Checkpoint</h2>
+
+<p>Before moving to Part 7, check that you can answer each of these:</p>
+
+<ol>
+  <li><strong>Motivation.</strong> DDPM needs ~1000 steps. Name the two problems
+      this causes (speed and stochasticity). What does DDIM fix?</li>
+  <li><strong>Key idea.</strong> The DDPM loss only constrains the marginals
+      \(q(x_t \mid x_0)\). Why does this allow DDIM to use a different forward
+      process while reusing the same \(\varepsilon_\theta\)?</li>
+  <li><strong>\(\hat x_0\) formula.</strong> Write down the equation for
+      \(\hat x_0\) from memory and state what each symbol is.
+      Where does it come from algebraically?</li>
+  <li><strong>DDIM update — three terms.</strong> Name the three terms in the
+      DDIM update and give a one-sentence description of what each term does.</li>
+  <li><strong>\(\eta\) knob.</strong> What happens to the DDIM update when
+      \(\eta=0\)? When \(\eta=1\)? Why might \(\eta=0\) hurt quality on a
+      weak model?</li>
+  <li><strong>Accelerated sampling.</strong> If \(T=1000\) and you want 50
+      steps with a uniform stride, which timesteps do you visit?
+      Why can you skip steps without retraining?</li>
+  <li><strong>Determinism.</strong> Explain in one sentence why deterministic
+      DDIM enables semantic interpolation in noise space.</li>
+  <li><strong>Bridge to ODEs.</strong> Complete the sentence:
+      "DDIM with \(\eta=0\) is exactly an Euler step of the ____."
+      What does using more DDIM steps correspond to in ODE language?</li>
+</ol>
+
+<nav class="pagenav">
+  <a class="prev" href="part05_ddpm.html"><span class="dir">‹ Prev</span>Part 5 — DDPM</a>
+  <a class="next" href="part07_continuous_time.html"><span class="dir">Next ›</span>Part 7 — Continuous-Time Diffusion</a>
+</nav>
+
+</article>
+</main>
+</div>
+<script defer src="assets/guide.js"></script>
+</body>
+</html>

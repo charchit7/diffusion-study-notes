@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Part 10 — Flow Matching · Diffusion Study Guide</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [["\\(", "\\)"]], displayMath: [["\\[", "\\]"]], tags: "none" },
+    options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle contents">☰</button>
+<div class="layout">
+<nav class="toc">
+  <a href="index.html"><strong>◆ Diffusion Study Guide</strong></a>
+  <h2>Foundations</h2>
+  <a href="part00_math_foundations.html"><span class="part-num">0</span>Mathematical Foundations</a>
+  <a href="part01_differential_equations.html"><span class="part-num">1</span>Differential Equations</a>
+  <a href="part02_probability_stochastic.html"><span class="part-num">2</span>Probability &amp; Stochastic Processes</a>
+  <a href="part03_score_functions.html"><span class="part-num">3</span>Score Functions</a>
+  <h2>Diffusion Core</h2>
+  <a href="part04_diffusion_models.html"><span class="part-num">4</span>Diffusion Models (big picture)</a>
+  <a href="part05_ddpm.html"><span class="part-num">5</span>DDPM</a>
+  <a href="part06_ddim.html"><span class="part-num">6</span>DDIM</a>
+  <a href="part07_continuous_time.html"><span class="part-num">7</span>Continuous-Time Diffusion</a>
+  <h2>Continuous Formulation</h2>
+  <a href="part08_sde_formulation.html"><span class="part-num">8</span>SDE Formulation</a>
+  <a href="part09_probability_flow_ode.html"><span class="part-num">9</span>Probability Flow ODE</a>
+  <a href="part10_flow_matching.html"><span class="part-num">10</span>Flow Matching</a>
+  <a href="part11_rectified_flows.html"><span class="part-num">11</span>Rectified Flows</a>
+  <h2>Systems &amp; Reading</h2>
+  <a href="part12_stable_diffusion.html"><span class="part-num">12</span>Stable Diffusion</a>
+  <a href="part13_reading_the_notes.html"><span class="part-num">13</span>Reading the MIT Notes</a>
+  <a href="part14_discrete_diffusion.html"><span class="part-num">14</span>Discrete Diffusion</a>
+</nav>
+<main>
+<article>
+
+<h1><span class="kicker">Part 10</span>Flow Matching</h1>
+
+<div class="box prereq">
+<span class="label">Prerequisites</span>
+<p>You need Parts 1 (ODEs and Euler), 3 (score functions and the marginalization identity), and 9 (probability-flow ODE). The central idea here — learning a time-dependent velocity field whose ODE flow pushes noise to data — is exactly what Part 9 set up. Flow matching is the clean, direct training recipe for that velocity field.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>10.0 The Goal, Restated as a Flow</h2>
+
+<div class="box intuition">
+<span class="label">Intuition</span>
+<p>Every generative model we have studied so far ultimately samples by integrating some ODE (or SDE) that transports a simple noise distribution into the data distribution. In diffusion, we learned the <em>score</em> \(\nabla_x \log p_t(x)\) and then derived a velocity from it. Flow matching asks: why not learn the velocity <em>directly</em>? Skip the score entirely. Learn the vector field; Euler-integrate at test time; done.</p>
+</div>
+
+<p>Formally, we want a neural network \(u_t^\theta : \mathbb{R}^d \times [0,1] \to \mathbb{R}^d\) such that simulating the ODE</p>
+\[
+\frac{dX_t}{dt} = u_t^\theta(X_t), \qquad X_0 \sim p_{\text{init}} = \mathcal{N}(0, I_d)
+\]
+<p>produces \(X_1 \sim p_{\text{data}}\). Sampling at test time is a single Euler (or Runge–Kutta) integration from \(t=0\) to \(t=1\), exactly as in Part 1.</p>
+
+<div class="box connect">
+<span class="label">Connection to Part 9</span>
+<p>In Part 9 we showed that every diffusion model has a <em>probability-flow ODE</em> whose marginal distributions match the forward process. That ODE's velocity field is a linear combination of the score and the drift. Flow matching learns <em>the same kind of object</em> — a time-dependent velocity field that transports densities — but specifies it from first principles without any SDE. No score needed, no reverse SDE, no Tweedie's formula: just a regression target we can write down in closed form.</p>
+</div>
+
+<h3>Why not just regress against \(u_t^{\text{target}}(x)\) directly?</h3>
+<p>The marginal field \(u_t^{\text{target}}(x)\) is an integral over all data points:</p>
+\[
+u_t^{\text{target}}(x) = \int u_t^{\text{target}}(x|z)\, p_t(z|x)\, dz
+\]
+<p>This integral is intractable — you cannot evaluate it for a given \(x\). Flow matching sidesteps this by constructing a <em>conditional</em> target \(u_t^{\text{target}}(x|z)\) that is analytically available, and then proving (Theorem 12) that regressing against the conditional target is equivalent to regressing against the marginal one.</p>
+
+<!-- ============================================================ -->
+<h2>10.1 Conditional and Marginal Probability Paths</h2>
+<p><em>MIT notes §3.1 — Equation (11), (12), (13)</em></p>
+
+<div class="box intuition">
+<span class="label">Intuition</span>
+<p>Think of a <em>probability path</em> as a movie: at \(t=0\) the frame is pure Gaussian noise; at \(t=1\) the frame is the data distribution. The frames in between are a smooth interpolation. We get to <em>choose</em> what the intermediate frames look like — this is our design freedom, and it determines both the training target and the quality of the learned flow.</p>
+</div>
+
+<h3>Conditional probability path — for a single data point \(z\)</h3>
+
+<table class="symbols">
+  <tr><th>Symbol</th><th>Shape / type</th><th>Meaning</th></tr>
+  <tr><td>\(z\)</td><td>\(\mathbb{R}^d\)</td><td>A fixed data point (e.g. one image)</td></tr>
+  <tr><td>\(\delta_z\)</td><td>distribution on \(\mathbb{R}^d\)</td><td>Dirac delta at \(z\); sampling always returns \(z\)</td></tr>
+  <tr><td>\(p_t(\cdot|z)\)</td><td>distribution on \(\mathbb{R}^d\), indexed by \(t\in[0,1]\)</td><td>Conditional probability path given \(z\)</td></tr>
+  <tr><td>\(p_{\text{init}}\)</td><td>distribution on \(\mathbb{R}^d\)</td><td>\(\mathcal{N}(0,I_d)\) — the noise distribution at \(t=0\)</td></tr>
+</table>
+
+<p>A <strong>conditional probability path</strong> is a family of distributions \(\{p_t(\cdot|z)\}_{t\in[0,1]}\) satisfying the boundary conditions:</p>
+
+\[
+p_0(\cdot|z) = p_{\text{init}} = \mathcal{N}(0,I_d), \qquad p_1(\cdot|z) = \delta_z.
+\]
+
+<p>At \(t=0\): the distribution is standard Gaussian — no information about \(z\). At \(t=1\): the distribution is the point mass at \(z\) — total certainty. In between: a smooth transition parameterized by our choice of path.</p>
+
+<h3>Marginal probability path — averaged over all data</h3>
+
+<table class="symbols">
+  <tr><th>Symbol</th><th>Meaning</th></tr>
+  <tr><td>\(p_{\text{data}}(z)\)</td><td>The true data distribution</td></tr>
+  <tr><td>\(p_t(x)\)</td><td>Marginal probability path: the distribution obtained by averaging the conditional path over the data</td></tr>
+</table>
+
+<p>Given a conditional path, the <strong>marginal probability path</strong> is:</p>
+
+\[
+p_t(x) = \int p_t(x|z)\, p_{\text{data}}(z)\, dz
+\]
+
+<p><strong>How to read this:</strong> To sample \(X_t \sim p_t\), first draw \(z \sim p_{\text{data}}\), then draw \(X_t \sim p_t(\cdot|z)\). We can <em>sample</em> from \(p_t\) easily — but we cannot <em>evaluate</em> \(p_t(x)\) for a given \(x\), because the integral is intractable. This asymmetry drives the whole design of flow matching.</p>
+
+<div class="box mathblock">
+<span class="label">Boundary conditions of the marginal path</span>
+<p>Because the conditional path satisfies \(p_0(\cdot|z)=p_{\text{init}}\) and \(p_1(\cdot|z)=\delta_z\), the marginal path satisfies:</p>
+\[
+p_0(x) = \int p_{\text{init}}(x)\, p_{\text{data}}(z)\, dz = p_{\text{init}}(x)
+\]
+\[
+p_1(x) = \int \delta_z(x)\, p_{\text{data}}(z)\, dz = p_{\text{data}}(x)
+\]
+<p>So the marginal path automatically interpolates from noise to data — exactly what we need.</p>
+</div>
+
+<h3>The Gaussian CondOT Path (Example 13 / Algorithm 3)</h3>
+
+<div class="box intuition">
+<span class="label">Mental picture</span>
+<p>Imagine a Gaussian blob centered at the origin at \(t=0\). As \(t\) increases, the blob <em>slides</em> toward \(z\) while simultaneously <em>shrinking</em>. At \(t=1\) it collapses onto the point \(z\). The path traces a straight-line interpolation in mean-space, with the variance shrinking to zero.</p>
+</div>
+
+<p>The most important choice — used by Stable Diffusion 3, Movie Gen, and virtually all state-of-the-art models — is the <strong>Gaussian CondOT</strong> path with \(\alpha_t = t\), \(\beta_t = 1-t\):</p>
+
+\[
+p_t(\cdot|z) = \mathcal{N}(tz,\; (1-t)^2 I_d)
+\]
+
+<p>Let us break down every part:</p>
+
+<table class="symbols">
+  <tr><th>Part</th><th>Meaning</th></tr>
+  <tr><td>\(\alpha_t = t\)</td><td>Mean schedule: the mean slides from \(0\) (at \(t=0\)) to \(z\) (at \(t=1\))</td></tr>
+  <tr><td>\(\beta_t = 1-t\)</td><td>Std-dev schedule: the spread shrinks from \(1\) (at \(t=0\)) to \(0\) (at \(t=1\))</td></tr>
+  <tr><td>\((1-t)^2 I_d\)</td><td>Variance: a scalar multiple of the identity (isotropic Gaussian at every \(t\))</td></tr>
+  <tr><td>\(\mathcal{N}(tz, (1-t)^2 I_d)\)</td><td>Full conditional distribution at time \(t\)</td></tr>
+</table>
+
+<p><strong>Boundary check:</strong></p>
+<ul>
+  <li>At \(t=0\): \(\mathcal{N}(0\cdot z, 1^2 I_d) = \mathcal{N}(0,I_d) = p_{\text{init}}\). ✓</li>
+  <li>At \(t=1\): \(\mathcal{N}(1\cdot z, 0^2 I_d) = \delta_z\). ✓</li>
+</ul>
+
+<p><strong>How to sample:</strong> Given \(z\) and \(t\), draw \(\varepsilon \sim \mathcal{N}(0,I_d)\) and set:</p>
+
+\[
+x_t = t\,z + (1-t)\,\varepsilon
+\]
+
+<p>This is a <em>deterministic linear interpolation</em> (in the sample, not just in distribution): the sample at time \(t\) is literally a convex combination of the noise \(\varepsilon\) and the data point \(z\).</p>
+
+<!-- ============================================================ -->
+<h2>10.2 Conditional and Marginal Vector Fields</h2>
+<p><em>MIT notes §3.2 — Equations (17), (18), (20)</em></p>
+
+<div class="box intuition">
+<span class="label">Intuition</span>
+<p>A probability path specifies <em>what distributions</em> we want at each time \(t\). A vector field specifies <em>how particles move</em> to achieve those distributions. For every fixed data point \(z\), we can work out — analytically, on paper — the exact velocity that a particle needs to have to follow the conditional path \(p_t(\cdot|z)\). This is the conditional vector field, and its closed form is the key that makes flow matching tractable.</p>
+</div>
+
+<h3>Conditional vector field \(u_t^{\text{target}}(x|z)\)</h3>
+
+<table class="symbols">
+  <tr><th>Symbol</th><th>Meaning</th></tr>
+  <tr><td>\(u_t^{\text{target}}(x|z)\)</td><td>The velocity at point \(x\) and time \(t\), given that we are targeting data point \(z\)</td></tr>
+  <tr><td>\(\psi_t^{\text{target}}(x_0|z)\)</td><td>The flow map: where does the initial point \(x_0\) land at time \(t\) when targeting \(z\)?</td></tr>
+</table>
+
+<p>The conditional vector field is <em>any</em> vector field whose ODE flow generates the conditional probability path. That is:</p>
+\[
+\frac{d}{dt} X_t = u_t^{\text{target}}(X_t|z), \quad X_0 \sim p_{\text{init}} \implies X_t \sim p_t(\cdot|z) \text{ for all } t.
+\]
+
+<h3>Deriving the conditional vector field for the CondOT path (Example 10)</h3>
+
+<p>The CondOT path samples as \(x_t = \alpha_t z + \beta_t \varepsilon\) with \(\varepsilon \sim \mathcal{N}(0,I)\). We can think of this as a <em>flow map</em>:</p>
+
+\[
+\psi_t^{\text{target}}(x_0|z) = \alpha_t z + \beta_t x_0
+\]
+
+<p>where \(x_0 \sim \mathcal{N}(0,I)\) plays the role of \(\varepsilon\). Let's verify: if \(X_0 \sim \mathcal{N}(0,I)\), then \(X_t = \alpha_t z + \beta_t X_0 \sim \mathcal{N}(\alpha_t z, \beta_t^2 I)\). This matches the conditional path exactly.</p>
+
+<p>Now extract the velocity from the flow. By definition of a flow (Part 1), the vector field is the time-derivative of the flow map evaluated at the current point:</p>
+
+\[
+u_t^{\text{target}}(x|z) = \frac{d}{dt}\psi_t^{\text{target}}(x_0|z) \Bigg|_{x_0 = (\psi_t^{\text{target}})^{-1}(x|z)}
+\]
+
+<p>Step 1: differentiate the flow map with respect to \(t\):</p>
+\[
+\frac{d}{dt}\psi_t(x_0|z) = \dot\alpha_t z + \dot\beta_t x_0
+\]
+
+<p>Step 2: invert the flow map — solve \(x = \alpha_t z + \beta_t x_0\) for \(x_0\):</p>
+\[
+x_0 = \frac{x - \alpha_t z}{\beta_t}
+\]
+
+<p>Step 3: substitute back:</p>
+\[
+u_t^{\text{target}}(x|z) = \dot\alpha_t z + \dot\beta_t \cdot \frac{x - \alpha_t z}{\beta_t}
+= \frac{\dot\beta_t}{\beta_t} x + \left(\dot\alpha_t - \frac{\dot\beta_t \alpha_t}{\beta_t}\right) z
+\]
+
+<p>For the CondOT path \(\alpha_t = t,\; \beta_t = 1-t\), we have \(\dot\alpha_t = 1,\; \dot\beta_t = -1\), so:</p>
+
+\[
+u_t^{\text{target}}(x|z) = \frac{-1}{1-t} x + \left(1 - \frac{-t}{1-t}\right) z = \frac{-1}{1-t} x + \frac{1}{1-t} z = \frac{z - x}{1-t}
+\]
+
+<div class="box mathblock">
+<span class="label">CondOT conditional velocity (closed form)</span>
+\[
+u_t^{\text{target}}(x|z) = \frac{z - x}{1 - t}
+\]
+<p><strong>Reading this:</strong> The velocity always points <em>from the current position \(x\) toward the target \(z\)</em>, scaled by \(1/(1-t)\). As \(t \to 1\), the scaling diverges — the particle accelerates to reach \(z\) exactly at \(t=1\). This is the "straight-line" interpolation made precise.</p>
+<p>Equivalently, using the reparameterization \(x_t = tz + (1-t)\varepsilon\):</p>
+\[
+u_t^{\text{target}}(x_t|z) = z - \varepsilon
+\]
+<p>This is a <strong>constant velocity</strong> along the straight line from \(\varepsilon\) to \(z\). Beautifully simple.</p>
+</div>
+
+<h3>Marginal vector field \(u_t^{\text{target}}(x)\)</h3>
+
+<p>The conditional field is great for a known \(z\), but at test time we don't know \(z\). What we need is the <em>marginal</em> field — the one that generates the marginal probability path \(p_t(x)\). By the marginalization trick (Theorem 9, below), it is:</p>
+
+\[
+u_t^{\text{target}}(x) = \int u_t^{\text{target}}(x|z)\, p_t(z|x)\, dz = \mathbb{E}\!\left[u_t^{\text{target}}(x|z) \,\big|\, X_t = x\right]
+\]
+
+<p>This is a <em>posterior-weighted average</em> of conditional velocities: for a particle currently at \(x\), the marginal field says "average over all data points \(z\), weighting each by how likely it is that the particle at \(x\) came from \(z\)." The weight is the posterior \(p_t(z|x)\).</p>
+
+<!-- ============================================================ -->
+<h2>10.3 Theorem 9 — The Marginalization Trick</h2>
+<p><em>MIT notes Theorem 9, §3.2</em></p>
+
+<div class="box intuition">
+<span class="label">Why this theorem is the conceptual centerpiece</span>
+<p>We have two things: (a) conditional vector fields \(u_t^{\text{target}}(x|z)\) that are easy to compute analytically; (b) the marginal vector field \(u_t^{\text{target}}(x)\) that we actually need for generation, but can't compute directly. This theorem says they are connected by a simple expectation. If we train a model to match the conditional field in expectation, it automatically learns the marginal field. This is the flow-matching analogue of the score-matching identity from Part 3.</p>
+</div>
+
+<div class="box mathblock">
+<span class="label">Theorem 9 (Marginalization Trick)</span>
+<p>Let \(u_t^{\text{target}}(\cdot|z)\) be a conditional vector field that generates the conditional probability path \(p_t(\cdot|z)\). Define the marginal vector field by</p>
+\[
+u_t^{\text{target}}(x) \;=\; \int u_t^{\text{target}}(x|z)\, \frac{p_t(x|z)\, p_{\text{data}}(z)}{p_t(x)}\, dz
+\;=\; \mathbb{E}\!\left[u_t^{\text{target}}(x|z) \,\big|\, X_t = x\right].
+\]
+<p>Then the marginal vector field generates the marginal probability path: the ODE \(\dot X_t = u_t^{\text{target}}(X_t)\) with \(X_0 \sim p_{\text{init}}\) satisfies \(X_t \sim p_t\) for all \(t\). In particular, \(X_1 \sim p_{\text{data}}\).</p>
+</div>
+
+<h3>Breaking down the formula, symbol by symbol</h3>
+
+<table class="symbols">
+  <tr><th>Symbol</th><th>Meaning</th></tr>
+  <tr><td>\(u_t^{\text{target}}(x|z)\)</td><td>The conditional velocity at point \(x\), time \(t\), targeting data point \(z\). This is analytically known.</td></tr>
+  <tr><td>\(p_t(x|z)\)</td><td>The conditional path density at \(x\) given \(z\). This is analytically known (e.g., Gaussian).</td></tr>
+  <tr><td>\(p_{\text{data}}(z)\)</td><td>The prior over data points. This is the data distribution.</td></tr>
+  <tr><td>\(p_t(x) = \int p_t(x|z)\,p_{\text{data}}(z)\,dz\)</td><td>The marginal density at \(x\). This is <em>intractable</em> to evaluate.</td></tr>
+  <tr><td>\(\frac{p_t(x|z)\,p_{\text{data}}(z)}{p_t(x)} = p_t(z|x)\)</td><td>The posterior over \(z\) given the observation \(x\) at time \(t\). This is Bayes' theorem.</td></tr>
+</table>
+
+<p>The posterior weight \(p_t(z|x)\) tells us: "given that a particle is at position \(x\) at time \(t\), how likely is it that it originated from the data point \(z\)?" We take a weighted average of the conditional velocities (each pointing toward some \(z\)) and the weights encode our belief about where the particle is going.</p>
+
+<h3>Why this makes training tractable</h3>
+<p>The marginal field is a posterior expectation — intractable because we'd need to integrate over all data points. But we can <em>sample</em> from that expectation: pick a random \(z \sim p_{\text{data}}\), sample \(x \sim p_t(\cdot|z)\), and compute \(u_t^{\text{target}}(x|z)\). This is an unbiased estimate of the posterior average. Minimizing a squared loss against this estimate is equivalent to minimizing against the true marginal target — exactly what Theorem 12 will prove.</p>
+
+<div class="box connect">
+<span class="label">Mirror: Score Matching Identity (Part 3)</span>
+<p>In Part 3, the score marginalization identity said: \(\nabla_x \log p_t(x) = \mathbb{E}[\nabla_x \log p_t(x|z) \mid X_t = x]\). The structure is identical to Theorem 9. The conditional score is analytically known; the marginal score is the posterior average; training against the conditional in expectation gives you the marginal. Flow matching and score matching are the same structural idea, applied to velocity fields and score functions respectively.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>10.4 Theorem 11 — The Continuity Equation</h2>
+<p><em>MIT notes Theorem 11, §3.2 — Equation (23)</em></p>
+
+<div class="box intuition">
+<span class="label">Intuition from physics</span>
+<p>Imagine a crowd of particles, each following the ODE \(\dot X_t = u_t(X_t)\). The density \(p_t(x)\) tells you how crowded each location \(x\) is at time \(t\). How does that density change? If the vector field is pushing particles <em>into</em> a region, the density there should increase. If particles are flowing <em>out</em>, density decreases. The divergence \(\nabla \cdot (p_t u_t)\) measures the net outflow of probability mass at \(x\). The continuity equation says: the time-rate-of-change of density equals the negative net outflow.</p>
+</div>
+
+<table class="symbols">
+  <tr><th>Symbol</th><th>Meaning</th></tr>
+  <tr><td>\(\partial_t p_t(x)\)</td><td>Time derivative of the density at the point \(x\): how fast is the probability mass at \(x\) changing?</td></tr>
+  <tr><td>\(\nabla \cdot v\) or \(\text{div}(v)\)</td><td>Divergence of a vector field \(v\): \(\sum_{i=1}^d \partial_{x_i} v_i\). Measures net outflow rate.</td></tr>
+  <tr><td>\(\nabla \cdot (p_t u_t)\)</td><td>Divergence of the probability flux \(p_t(x) u_t(x)\): net rate at which probability mass leaves \(x\).</td></tr>
+</table>
+
+<div class="box mathblock">
+<span class="label">Theorem 11 (Continuity Equation)</span>
+<p>A vector field \(u_t\) generates the probability path \(p_t\) (i.e., the ODE \(\dot X_t = u_t(X_t)\) with \(X_0 \sim p_0\) gives \(X_t \sim p_t\)) <em>if and only if</em> the continuity equation holds:</p>
+\[
+\partial_t p_t(x) = -\nabla \cdot (p_t(x)\, u_t(x))
+\]
+</div>
+
+<p>This is the certification criterion for a vector field. If you have a candidate \(u_t\) and want to verify it generates a given density evolution \(p_t\), you just plug into this PDE and check. This is how Example 10 was verified (footnote in the notes), and it is the tool used to prove Theorem 9.</p>
+
+<div class="box connect">
+<span class="label">Connection to Part 9</span>
+<p>The probability-flow ODE from Part 9 was derived precisely by finding a deterministic vector field satisfying the continuity equation for the same density evolution as the SDE. The key insight there was that many vector fields can generate the same density path. Flow matching exploits this freedom: we design a convenient conditional path, find its conditional vector field analytically, and build the marginal via Theorem 9 — all while satisfying the continuity equation by construction.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>10.5 Training: The Conditional Flow Matching Loss</h2>
+<p><em>MIT notes §3.3 — Theorem 12, Algorithm 3</em></p>
+
+<div class="box intuition">
+<span class="label">The core tension</span>
+<p>We want \(u_t^\theta \approx u_t^{\text{target}}\) (marginal). The loss that measures this directly is the flow matching (FM) loss. But evaluating \(u_t^{\text{target}}(x)\) requires an intractable integral. So we replace the target with \(u_t^{\text{target}}(x|z)\) (conditional), which we can compute analytically. Theorem 12 proves this substitution is exactly correct: the two losses have the same gradients with respect to \(\theta\).</p>
+</div>
+
+<h3>Flow Matching (FM) loss — the ideal but intractable version</h3>
+
+\[
+\mathcal{L}_{\text{FM}}(\theta) = \mathbb{E}_{t \sim \text{Unif}[0,1],\; x \sim p_t} \left\| u_t^\theta(x) - u_t^{\text{target}}(x) \right\|^2
+\]
+
+<p>This says: at a random time \(t\), sample a point from the marginal path, and penalize the squared difference between the model output and the true marginal velocity. Unattainable in practice because \(u_t^{\text{target}}(x)\) and even \(p_t(x)\) are intractable.</p>
+
+<h3>Conditional Flow Matching (CFM) loss — the tractable version</h3>
+
+\[
+\mathcal{L}_{\text{CFM}}(\theta) = \mathbb{E}_{t \sim \text{Unif}[0,1],\; z \sim p_{\text{data}},\; x \sim p_t(\cdot|z)} \left\| u_t^\theta(x) - u_t^{\text{target}}(x|z) \right\|^2
+\]
+
+<table class="symbols">
+  <tr><th>Symbol</th><th>Meaning</th></tr>
+  <tr><td>\(t \sim \text{Unif}[0,1]\)</td><td>Random time step, drawn uniformly</td></tr>
+  <tr><td>\(z \sim p_{\text{data}}\)</td><td>A data sample (from the training set)</td></tr>
+  <tr><td>\(x \sim p_t(\cdot|z)\)</td><td>A noisy version of \(z\) at time \(t\), i.e. \(x = tz + (1-t)\varepsilon\) for \(\varepsilon \sim \mathcal{N}(0,I)\)</td></tr>
+  <tr><td>\(u_t^\theta(x)\)</td><td>Neural network output: predicted velocity at \((x, t)\)</td></tr>
+  <tr><td>\(u_t^{\text{target}}(x|z)\)</td><td>Analytic conditional velocity: for CondOT, this is \((z-x)/(1-t)\) or equivalently \(z - \varepsilon\)</td></tr>
+  <tr><td>\(\|\cdot\|^2\)</td><td>Squared Euclidean norm (summed over all \(d\) dimensions)</td></tr>
+</table>
+
+<p>Every quantity in \(\mathcal{L}_{\text{CFM}}\) is either sampleable or analytically computable. This is what makes flow matching "simulation-free": we never run the ODE during training.</p>
+
+<div class="box mathblock">
+<span class="label">Theorem 12 — Gradients of FM and CFM are identical</span>
+<p>The marginal and conditional flow matching losses differ by a constant \(C\) that does not depend on \(\theta\):</p>
+\[
+\mathcal{L}_{\text{FM}}(\theta) = \mathcal{L}_{\text{CFM}}(\theta) + C
+\]
+<p>Therefore their gradients are equal:</p>
+\[
+\nabla_\theta \mathcal{L}_{\text{FM}}(\theta) = \nabla_\theta \mathcal{L}_{\text{CFM}}(\theta)
+\]
+<p>In particular, the minimizer \(\theta^*\) of \(\mathcal{L}_{\text{CFM}}\) satisfies \(u_t^{\theta^*} = u_t^{\text{target}}\) (assuming a sufficiently expressive neural network).</p>
+</div>
+
+<h3>Proof sketch — why the constant appears</h3>
+<p>Expand \(\|a - b\|^2 = \|a\|^2 - 2a^\top b + \|b\|^2\). Applying this to the FM loss with \(a = u_t^\theta(x)\) and \(b = u_t^{\text{target}}(x)\):</p>
+\[
+\mathcal{L}_{\text{FM}}(\theta) = \mathbb{E}\left[\|u_t^\theta\|^2\right] - 2\,\mathbb{E}\left[{u_t^\theta}^\top u_t^{\text{target}}\right] + \underbrace{\mathbb{E}\left[\|u_t^{\text{target}}\|^2\right]}_{=C_1,\;\text{const. in }\theta}
+\]
+<p>The crucial step is the cross-term. By the marginalization trick (Theorem 9), \(u_t^{\text{target}}(x) = \mathbb{E}[u_t^{\text{target}}(x|z) \mid X_t = x]\), so:</p>
+\[
+\mathbb{E}_x\!\left[{u_t^\theta(x)}^\top u_t^{\text{target}}(x)\right] = \mathbb{E}_{x,z}\!\left[{u_t^\theta(x)}^\top u_t^{\text{target}}(x|z)\right]
+\]
+<p>Substituting this back and completing the square with \(\|u_t^{\text{target}}(x|z)\|^2\) gives exactly \(\mathcal{L}_{\text{CFM}}(\theta) + C\). The constant \(C\) absorbs the \(\|u_t^{\text{target}}\|^2\) and \(\|u_t^{\text{target}}(\cdot|z)\|^2\) terms, neither of which depends on \(\theta\).</p>
+
+<h3>Algorithm 3 — Flow Matching Training (CondOT path)</h3>
+
+<div class="box mathblock">
+<span class="label">Algorithm 3 (MIT notes, §3.3)</span>
+<p><strong>Input:</strong> Dataset of samples \(z \sim p_{\text{data}}\), neural network \(u_t^\theta\).</p>
+<ol>
+  <li>For each mini-batch of data:</li>
+  <li>Sample a data example \(z\) from the dataset.</li>
+  <li>Sample a random time \(t \sim \text{Unif}[0,1]\).</li>
+  <li>Sample noise \(\varepsilon \sim \mathcal{N}(0, I_d)\).</li>
+  <li>Form the noisy sample: \(x_t = t\,z + (1-t)\,\varepsilon\).</li>
+  <li>Compute the loss: \(\mathcal{L}(\theta) = \|u_t^\theta(x_t) - (z - \varepsilon)\|^2\).</li>
+  <li>Update \(\theta \leftarrow \text{grad\_update}(\mathcal{L}(\theta))\).</li>
+  <li>End for.</li>
+</ol>
+<p>Note: the target velocity \((z - \varepsilon)\) for the CondOT path follows from \(u_t^{\text{target}}(x|z) = (z-x)/(1-t)\) with \(x = tz + (1-t)\varepsilon\):</p>
+\[
+\frac{z - (tz + (1-t)\varepsilon)}{1-t} = \frac{(1-t)z - (1-t)\varepsilon}{1-t} = z - \varepsilon.
+\]
+</div>
+
+<div class="box warn">
+<span class="label">Why the target simplifies to \(z - \varepsilon\)</span>
+<p>This simplification only holds for the CondOT path (\(\alpha_t = t,\, \beta_t = 1-t\)). For general noise schedulers, the target is \(\dot\alpha_t z + \dot\beta_t \varepsilon\). The CondOT case is special because both \(\dot\alpha_t = 1\) and \(\dot\beta_t = -1\) are <em>constant</em>, making the target independent of \(t\). This is one reason CondOT is preferred: the regression target doesn't change with time.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>10.6 Connection to Diffusion: The Triangle Extended</h2>
+<p><em>MIT notes §3, Summary 14 — relationships between FM, score, and diffusion</em></p>
+
+<div class="box connect">
+<span class="label">How Flow Matching Generalizes Diffusion</span>
+<p>In Part 3, we saw a triangle: the noise prediction \(\hat\varepsilon\), the score \(\nabla_x \log p_t\), and the denoised prediction \(\hat x_0\) are linear reparameterizations of each other. Flow matching adds a fourth vertex to this triangle: the FM velocity \(u_t\).</p>
+<p>For a Gaussian diffusion forward process with \(\alpha_t z + \sigma_t \varepsilon\), the FM velocity and the probability-flow ODE velocity (Part 9) are related by:</p>
+\[
+u_t^{\text{FM}}(x) = \dot\alpha_t \hat{z}_\theta(x,t) + \dot\sigma_t \hat\varepsilon_\theta(x,t)
+\]
+<p>where \(\hat z_\theta\) is the denoised data prediction and \(\hat\varepsilon_\theta\) is the noise prediction. For the CondOT path this becomes \(u_t^{\text{FM}} = \hat z_\theta - \hat\varepsilon_\theta = \hat z_\theta - \hat\varepsilon_\theta\), a constant-velocity straight line.</p>
+<p><strong>The key insight:</strong> The PF-ODE from Part 9 and the FM ODE are the same mathematical object when trained correctly. Flow matching is simply the cleanest, most direct way to <em>train</em> a PF-ODE velocity field — no SDE, no Tweedie's formula, no reverse process derivation needed. The CFM loss is a direct regression, the target is analytically known, and the training is simulation-free.</p>
+<p><strong>Why FM is preferred in practice:</strong></p>
+<ul>
+  <li><em>Straighter trajectories:</em> CondOT paths are straight lines in sample space, so fewer Euler steps are needed at inference.</li>
+  <li><em>Flexibility:</em> Any probability path works — FM is not tied to Gaussian diffusion.</li>
+  <li><em>Simplicity:</em> Algorithm 3 is arguably the simplest possible generative model training loop.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>10.7 Runnable PyTorch: 2D Toy Flow Matching</h2>
+
+<div class="box warn">
+<span class="label">Teaching code</span>
+<p>This code is for illustration only. It shows the exact operations of Algorithm 3 on a tiny 2D problem. Do not interpret it as production code.</p>
+</div>
+
+<pre><code><span class="code-comment"># Flow Matching: 2D toy example</span>
+<span class="code-comment"># teaching code, not security-sensitive RNG</span>
+<span class="code-comment"># All tensor shapes are annotated inline.</span>
+
+import torch
+import torch.nn as nn
+
+torch.manual_seed(42)
+
+<span class="code-comment"># ---- Data distribution: a simple 2D mixture of two Gaussians ----</span>
+def sample_data(n):
+    <span class="code-comment"># Returns shape: (n, 2)</span>
+    centers = torch.tensor([[2.0, 2.0], [-2.0, -2.0]])  <span class="code-comment"># shape: (2, 2)</span>
+    idx = torch.randint(0, 2, (n,))                      <span class="code-comment"># shape: (n,)</span>
+    z = centers[idx] + 0.3 * torch.randn(n, 2)          <span class="code-comment"># shape: (n, 2)</span>
+    return z
+
+<span class="code-comment"># ---- A tiny MLP that takes (x, t) and outputs velocity ----</span>
+class VelocityMLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        <span class="code-comment"># Input: x (2-dim) concatenated with t (1-dim) = 3-dim</span>
+        self.net = nn.Sequential(
+            nn.Linear(3, 64),  <span class="code-comment"># (3,) -&gt; (64,)</span>
+            nn.SiLU(),
+            nn.Linear(64, 64),
+            nn.SiLU(),
+            nn.Linear(64, 2),  <span class="code-comment"># (64,) -&gt; (2,)  = predicted velocity</span>
+        )
+
+    def forward(self, x, t):
+        <span class="code-comment"># x: (batch, 2), t: (batch, 1)</span>
+        xt_input = torch.cat([x, t], dim=-1)  <span class="code-comment"># (batch, 3)</span>
+        return self.net(xt_input)             <span class="code-comment"># (batch, 2)</span>
+
+model = VelocityMLP()
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+<span class="code-comment"># ---- compute_loss: implements Algorithm 3, lines 2-6 ----</span>
+def compute_loss(model, z):
+    <span class="code-comment"># z: (batch, 2)  — one mini-batch of data points</span>
+    batch = z.shape[0]
+
+    <span class="code-comment"># Step 3: sample t ~ Unif[0, 1]</span>
+    t = torch.rand(batch, 1)              <span class="code-comment"># shape: (batch, 1)</span>
+
+    <span class="code-comment"># Step 4: sample noise epsilon ~ N(0, I)</span>
+    eps = torch.randn_like(z)             <span class="code-comment"># shape: (batch, 2)</span>
+
+    <span class="code-comment"># Step 5: form x_t = t*z + (1-t)*eps  (CondOT interpolation)</span>
+    x_t = t * z + (1 - t) * eps          <span class="code-comment"># shape: (batch, 2)</span>
+
+    <span class="code-comment"># Analytic target velocity for CondOT: u_t(x|z) = z - eps</span>
+    <span class="code-comment"># (constant along each straight-line trajectory)</span>
+    v_target = z - eps                    <span class="code-comment"># shape: (batch, 2)</span>
+
+    <span class="code-comment"># Step 6: compute CFM loss = ||model(x_t, t) - v_target||^2</span>
+    v_pred = model(x_t, t)               <span class="code-comment"># shape: (batch, 2)</span>
+    loss = ((v_pred - v_target) ** 2).mean()  <span class="code-comment"># scalar</span>
+    return loss
+
+<span class="code-comment"># ---- Training loop (abbreviated; run ~2000 steps for convergence) ----</span>
+for step in range(500):
+    z_batch = sample_data(256)           <span class="code-comment"># shape: (256, 2)</span>
+    loss = compute_loss(model, z_batch)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    if step % 100 == 0:
+        print(f"step {step:4d}  loss {loss.item():.4f}")
+<span class="code-comment"># Expected output (approx): step    0  loss 5.0xxx</span>
+<span class="code-comment">#                           step  100  loss 0.9xxx</span>
+<span class="code-comment">#                           step  400  loss 0.25xx</span>
+
+<span class="code-comment"># ---- Sampling: Euler-integrate from p_init to p_data ----</span>
+def sample(model, n=512, steps=50):
+    <span class="code-comment"># No gradients needed at inference time</span>
+    model.eval()
+    dt = 1.0 / steps                     <span class="code-comment"># scalar: Euler step size</span>
+
+    <span class="code-comment"># Start at t=0: X_0 ~ N(0, I_2)</span>
+    x = torch.randn(n, 2)               <span class="code-comment"># shape: (n, 2)</span>
+
+    with torch.no_grad():
+        for i in range(steps):
+            t_val = i * dt               <span class="code-comment"># current time in [0, 1)</span>
+            t_tensor = torch.full((n, 1), t_val)  <span class="code-comment"># shape: (n, 1)</span>
+
+            <span class="code-comment"># Euler update: x_{t+dt} = x_t + dt * u_theta(x_t, t)</span>
+            v = model(x, t_tensor)       <span class="code-comment"># shape: (n, 2)</span>
+            x = x + dt * v              <span class="code-comment"># shape: (n, 2)</span>
+
+    <span class="code-comment"># x now approximates samples from p_data</span>
+    return x                             <span class="code-comment"># shape: (n, 2)</span>
+
+samples = sample(model, n=512, steps=50)
+print("samples shape:", samples.shape)  <span class="code-comment"># Expected: torch.Size([512, 2])</span>
+print("samples mean:", samples.mean(0)) <span class="code-comment"># Expected: near [~0, ~0] (mixture center)</span>
+print("samples std: ", samples.std(0))  <span class="code-comment"># Expected: near [~2.x, ~2.x] (spread of mixture)</span>
+</code></pre>
+
+<!-- ============================================================ -->
+<h2>10.8 Summary 14 — Flow Matching at a Glance</h2>
+<p><em>MIT notes Summary 14, §3</em></p>
+
+<div class="box mathblock">
+<span class="label">Summary 14 (MIT notes)</span>
+<p><strong>Goal:</strong> Learn the marginal vector field \(u_t^{\text{target}}\) such that \(\dot X_t = u_t^{\text{target}}(X_t)\), \(X_0 \sim p_{\text{init}}\) gives \(X_1 \sim p_{\text{data}}\).</p>
+<p><strong>Step 1 — Choose a conditional probability path:</strong></p>
+\[
+p_t(\cdot|z) \text{ with } p_0(\cdot|z) = p_{\text{init}},\quad p_1(\cdot|z) = \delta_z
+\]
+<p><strong>Step 2 — Derive the conditional vector field analytically:</strong></p>
+\[
+u_t^{\text{target}}(x|z) \text{ such that its flow satisfies } \psi_t(\cdot|z)_\sharp p_{\text{init}} = p_t(\cdot|z)
+\]
+<p><strong>Step 3 — Build the marginal field via the marginalization trick:</strong></p>
+\[
+u_t^{\text{target}}(x) = \mathbb{E}\!\left[u_t^{\text{target}}(x|z) \mid X_t = x\right]
+\]
+<p><strong>Step 4 — Train by minimizing the CFM loss:</strong></p>
+\[
+\mathcal{L}_{\text{CFM}}(\theta) = \mathbb{E}_{t,z,\varepsilon}\!\left[\left\|u_t^\theta(tz + (1-t)\varepsilon) - (z - \varepsilon)\right\|^2\right]
+\]
+<p><strong>Gaussian CondOT specialization</strong> (\(\alpha_t = t,\, \beta_t = 1-t\)):</p>
+\[
+p_t(\cdot|z) = \mathcal{N}(tz,\; (1-t)^2 I_d), \quad
+x_t = tz + (1-t)\varepsilon, \quad
+u_t^{\text{target}}(x_t|z) = z - \varepsilon
+\]
+</div>
+
+<!-- ============================================================ -->
+<h2>Checkpoint</h2>
+
+<p>Before moving on, make sure you can answer these:</p>
+
+<ol>
+  <li><strong>Conditional path:</strong> Write the sampling equation for \(x_t\) on the CondOT path. What are the boundary conditions on \(\alpha_t\) and \(\beta_t\)?</li>
+  <li><strong>Marginal path:</strong> How do you sample from \(p_t(x)\) without computing the intractable integral? What is the two-step procedure?</li>
+  <li><strong>Conditional velocity:</strong> Derive \(u_t^{\text{target}}(x|z) = (z-x)/(1-t)\) from the flow map \(\psi_t(x_0|z) = tz + (1-t)x_0\) using differentiation and inversion.</li>
+  <li><strong>Marginalization trick:</strong> Theorem 9 says the marginal field is a posterior average. What is the posterior, and why does this make the conditional field useful for training?</li>
+  <li><strong>Continuity equation:</strong> State the continuity equation. What does the divergence \(\nabla \cdot (p_t u_t)\) measure physically? How is it used to certify that a vector field generates a given density path?</li>
+  <li><strong>CFM loss:</strong> Why is \(\mathcal{L}_{\text{FM}}\) intractable? What makes \(\mathcal{L}_{\text{CFM}}\) tractable? What does Theorem 12 guarantee?</li>
+  <li><strong>Target simplification:</strong> Show algebraically that \(u_t^{\text{target}}(x_t|z) = z - \varepsilon\) for the CondOT path with \(x_t = tz + (1-t)\varepsilon\).</li>
+  <li><strong>Algorithm 3:</strong> Reconstruct Algorithm 3 from memory. Which step makes it "simulation-free"?</li>
+  <li><strong>FM vs diffusion:</strong> In one sentence, explain what probability-flow ODE (Part 9) and flow matching are training, and why flow matching is considered cleaner.</li>
+  <li><strong>Sampling:</strong> At test time, no data points are available. Describe the full sampling procedure: starting distribution, ODE, and ending distribution.</li>
+</ol>
+
+<nav class="pagenav">
+  <a class="prev" href="part09_probability_flow_ode.html"><span class="dir">&#8249; Prev</span>Part 9 — Probability Flow ODE</a>
+  <a class="next" href="part11_rectified_flows.html"><span class="dir">Next &#8250;</span>Part 11 — Rectified Flows</a>
+</nav>
+
+</article>
+</main>
+</div>
+<script defer src="assets/guide.js"></script>
+</body>
+</html>

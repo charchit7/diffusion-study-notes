@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Part 0 — Mathematical Foundations · Diffusion Study Guide</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [["\\(", "\\)"]], displayMath: [["\\[", "\\]"]], tags: "none" },
+    options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle contents">☰</button>
+<div class="layout">
+<nav class="toc">
+  <a href="index.html"><strong>◆ Diffusion Study Guide</strong></a>
+  <h2>Foundations</h2>
+  <a href="part00_math_foundations.html"><span class="part-num">0</span>Mathematical Foundations</a>
+  <a href="part01_differential_equations.html"><span class="part-num">1</span>Differential Equations</a>
+  <a href="part02_probability_stochastic.html"><span class="part-num">2</span>Probability &amp; Stochastic Processes</a>
+  <a href="part03_score_functions.html"><span class="part-num">3</span>Score Functions</a>
+  <h2>Diffusion Core</h2>
+  <a href="part04_diffusion_models.html"><span class="part-num">4</span>Diffusion Models (big picture)</a>
+  <a href="part05_ddpm.html"><span class="part-num">5</span>DDPM</a>
+  <a href="part06_ddim.html"><span class="part-num">6</span>DDIM</a>
+  <a href="part07_continuous_time.html"><span class="part-num">7</span>Continuous-Time Diffusion</a>
+  <h2>Continuous Formulation</h2>
+  <a href="part08_sde_formulation.html"><span class="part-num">8</span>SDE Formulation</a>
+  <a href="part09_probability_flow_ode.html"><span class="part-num">9</span>Probability Flow ODE</a>
+  <a href="part10_flow_matching.html"><span class="part-num">10</span>Flow Matching</a>
+  <a href="part11_rectified_flows.html"><span class="part-num">11</span>Rectified Flows</a>
+  <h2>Systems &amp; Reading</h2>
+  <a href="part12_stable_diffusion.html"><span class="part-num">12</span>Stable Diffusion</a>
+  <a href="part13_reading_the_notes.html"><span class="part-num">13</span>Reading the MIT Notes</a>
+  <a href="part14_discrete_diffusion.html"><span class="part-num">14</span>Discrete Diffusion</a>
+</nav>
+<main>
+<article>
+
+<h1><span class="kicker">Part 0</span>Mathematical Foundations</h1>
+
+<p class="muted">Everything in flow matching and diffusion is built from five primitive
+ideas: <strong>vectors</strong>, <strong>functions of time</strong>,
+<strong>derivatives</strong>, <strong>probability densities</strong>, and the
+<strong>Gaussian</strong>. This part teaches each from zero, with the exact
+notation the MIT notes use, so that when later parts write \(u_t(x)\) or
+\(\nabla_x \log p_t(x)\) or \(\mathbb{E}_{z\sim p_{\text{data}}}[\cdot]\), every
+symbol is already familiar. Nothing here assumes more than high-school algebra.</p>
+
+<div class="box intuition">
+<span class="label">Intuition for the whole field</span>
+A generative model turns <em>easy-to-sample noise</em> into <em>data</em> by
+following a sequence of tiny steps. To describe "tiny steps along a direction"
+mathematically you need calculus (derivatives) and to describe "noise" and "a
+cloud of possible images" you need probability (densities, the Gaussian). Part 0
+is just those two toolboxes.
+</div>
+
+<h2>0.1 Vectors: objects as points in \(\mathbb{R}^d\)</h2>
+
+<p>The MIT notes open with <em>Key Idea 1: objects are vectors</em>. An image with
+\(H\times W\) pixels and 3 color channels is a list of \(d = H\cdot W\cdot 3\)
+real numbers. Stack those numbers into a single column and you have a
+<strong>vector</strong> \(z \in \mathbb{R}^d\) — a single point in a
+\(d\)-dimensional space.</p>
+
+<table class="symbols">
+<tr><th>Symbol</th><th>Meaning</th><th>Shape</th></tr>
+<tr><td>\(\mathbb{R}\)</td><td>the real numbers (any value on the number line)</td><td>scalar</td></tr>
+<tr><td>\(\mathbb{R}^d\)</td><td>the set of all length-\(d\) lists of reals — "\(d\)-dimensional space"</td><td>—</td></tr>
+<tr><td>\(z \in \mathbb{R}^d\)</td><td>one object (image/video/molecule) flattened to a vector</td><td>\((d,)\)</td></tr>
+<tr><td>\(d\)</td><td>dimensionality; for a 64×64 RGB image \(d = 64\cdot64\cdot3 = 12288\)</td><td>scalar</td></tr>
+</table>
+
+<div class="box intuition">
+<span class="label">Mental model</span>
+A \(28\times28\) grayscale MNIST digit (\(d=784\)) is one point in 784-dimensional
+space. "The set of all images that look like a 7" is a <em>cloud of points</em> in
+that space. Generation = produce a fresh point inside that cloud.
+</div>
+
+<h3>Operations you must recognize</h3>
+<ul>
+<li><strong>Addition</strong> \(x + y\): elementwise; same shape in, same shape out.
+Geometrically, place vectors tip-to-tail.</li>
+<li><strong>Scaling</strong> \(\alpha x\) for scalar \(\alpha\): stretch (\(|\alpha|&gt;1\))
+or shrink (\(|\alpha|&lt;1\)) the arrow; negative flips its direction.</li>
+<li><strong>Linear combination</strong> \(\alpha x + \beta y\): the single most common
+pattern in this course. The forward process \(x_t = \sqrt{\bar\alpha_t}\,x_0 +
+\sqrt{1-\bar\alpha_t}\,\varepsilon\) (Part 5) is <em>literally</em> a linear
+combination of a data point and a noise vector.</li>
+<li><strong>Norm</strong> \(\|x\| = \sqrt{\sum_i x_i^2}\): the length of the arrow /
+distance from the origin. The squared norm \(\|x\|^2\) is what appears in every
+loss function we will write.</li>
+<li><strong>Inner product</strong> \(x^\top y = \sum_i x_i y_i\): measures
+alignment; \(=0\) means perpendicular.</li>
+</ul>
+
+<h4>Tiny PyTorch example</h4>
+<pre><code>import torch
+torch.manual_seed(0)                  <span class="code-comment"># reproducible: no security-sensitive RNG here, just teaching</span>
+
+x = torch.tensor([3.0, 4.0])          <span class="code-comment"># a vector in R^2, shape (2,)</span>
+y = torch.tensor([1.0, 0.0])          <span class="code-comment"># shape (2,)</span>
+
+print(x + y)                          <span class="code-comment"># tensor([4., 4.])   elementwise add, shape (2,)</span>
+print(2.0 * x)                        <span class="code-comment"># tensor([6., 8.])   scaling</span>
+print(x.norm())                       <span class="code-comment"># tensor(5.)         sqrt(3^2+4^2)=5</span>
+print(torch.dot(x, y))                <span class="code-comment"># tensor(3.)         inner product 3*1+4*0</span></code></pre>
+
+<h2>0.2 Functions, and functions <em>of time</em></h2>
+
+<p>A function \(f: A \to B\) takes an input from set \(A\) and returns an output in
+set \(B\). The arrow notation tells you the shapes. Two function types dominate this
+course:</p>
+
+<div class="box mathblock">
+<span class="label">The two function signatures you will see everywhere</span>
+\[
+\underbrace{X:\;[0,1]\to\mathbb{R}^d}_{\text{a trajectory: time}\,\to\,\text{position}},
+\qquad\qquad
+\underbrace{u:\;\mathbb{R}^d\times[0,1]\to\mathbb{R}^d}_{\text{a vector field: (position, time)}\,\to\,\text{velocity}}
+\]
+</div>
+
+<table class="symbols">
+<tr><th>Object</th><th>Reads as</th><th>Returns</th></tr>
+<tr><td>\(X_t\) or \(X(t)\)</td><td>"where the particle is at time \(t\)"</td><td>a point in \(\mathbb{R}^d\)</td></tr>
+<tr><td>\(u_t(x)\) or \(u(x,t)\)</td><td>"the velocity to use if you are at position \(x\) at time \(t\)"</td><td>a vector in \(\mathbb{R}^d\)</td></tr>
+<tr><td>\(t\in[0,1]\)</td><td>time, conventionally normalized to the unit interval</td><td>scalar</td></tr>
+</table>
+
+<div class="box intuition">
+<span class="label">Why both?</span>
+The <em>vector field</em> \(u_t\) is the rule ("at this spot, move this way"); the
+<em>trajectory</em> \(X_t\) is the path you trace when you obey the rule. A neural
+network will learn the rule \(u_t\); sampling = following the rule to trace a path
+from noise to data. This single distinction is the heart of Parts 1, 7, and 10.
+</div>
+
+<h2>0.3 Derivatives: the rate of change</h2>
+
+<p>The derivative of a function answers: <em>if I nudge the input a little, how much
+does the output change, and in what direction?</em></p>
+
+<h3>Scalar case</h3>
+<div class="box mathblock">
+<span class="label">Definition (derivative as a limit)</span>
+\[
+f'(t) \;=\; \frac{d f}{d t} \;=\; \lim_{h\to 0}\frac{f(t+h)-f(t)}{h}.
+\]
+</div>
+<p>Read it literally: take a small step \(h\) in the input, measure the change in
+output \(f(t+h)-f(t)\), divide by the step size to get a <em>rate</em>, then shrink
+\(h\) to zero. The result \(f'(t)\) is the <strong>instantaneous slope</strong>.</p>
+
+<div class="box intuition">
+<span class="label">Picture</span>
+Zoom into the graph of \(f\) at time \(t\) until the curve looks straight. The
+slope of that straight line is \(f'(t)\). "Velocity" is exactly the derivative of
+position with respect to time — which is why \(\frac{d}{dt}X_t\) (Part 1) is a
+velocity vector.
+</div>
+
+<h3>Vector case: position in, vector out</h3>
+<p>If \(X_t \in \mathbb{R}^d\) is a trajectory, its derivative
+\(\frac{d}{dt}X_t \in \mathbb{R}^d\) is taken componentwise — one slope per
+coordinate — and the resulting vector is the velocity of the moving point. This is
+the left-hand side of every ODE in this course.</p>
+
+<h3>Gradient: scalar out, vector in</h3>
+<p>When the <em>input</em> is a vector \(x\in\mathbb{R}^d\) and the output is a single
+number \(f(x)\in\mathbb{R}\), the analogue of the derivative is the
+<strong>gradient</strong> \(\nabla_x f(x) \in \mathbb{R}^d\): the vector of partial
+derivatives, one per input coordinate.</p>
+
+<div class="box mathblock">
+<span class="label">Gradient</span>
+\[
+\nabla_x f(x) \;=\; \left(\frac{\partial f}{\partial x_1},\ \frac{\partial f}{\partial x_2},\ \dots,\ \frac{\partial f}{\partial x_d}\right)^\top \in \mathbb{R}^d.
+\]
+Each \(\frac{\partial f}{\partial x_i}\) is just the scalar derivative taken while
+holding every other coordinate fixed.
+</div>
+
+<div class="box connect">
+<span class="label">Where this returns</span>
+The <strong>score function</strong> (Part 3) is a gradient:
+\(\nabla_x \log p_t(x)\). It points in the direction along which the (log) density
+increases fastest — i.e. "toward more probable data." Score matching trains a
+network to output this vector. You cannot read Part 3, 4, 8, or 9 without this
+definition, so make sure \(\nabla_x\) means "vector of slopes, one per pixel."
+</div>
+
+<h4>PyTorch: autograd computes gradients for you</h4>
+<pre><code>import torch
+
+x = torch.tensor([2.0, -3.0], requires_grad=True)  <span class="code-comment"># track operations on x</span>
+f = (x ** 2).sum()                                  <span class="code-comment"># f(x) = x1^2 + x2^2, a scalar</span>
+f.backward()                                        <span class="code-comment"># fill x.grad with df/dx</span>
+print(x.grad)                                       <span class="code-comment"># tensor([ 4., -6.])  since df/dxi = 2*xi</span>
+<span class="code-comment"># Check by hand: d/dx1 (x1^2+x2^2) = 2*x1 = 4; d/dx2 = 2*x2 = -6.  matches.</span></code></pre>
+
+<h2>0.4 Integrals: adding up infinitely many tiny pieces</h2>
+<p>An integral \(\int_a^b g(t)\,dt\) is the continuous sum of \(g(t)\) over the
+interval, weighted by the infinitesimal width \(dt\). Two facts are all we need:</p>
+<ul>
+<li><strong>Integration undoes differentiation</strong> (Fundamental Theorem):
+if \(X_t\) has velocity \(u_t\), then
+\(X_b = X_a + \int_a^b u_t\,dt\). Following a velocity over time = integrating it.
+This is why "simulating an ODE" (Part 1) literally means "approximating an
+integral."</li>
+<li><strong>A probability density integrates to 1</strong>:
+\(\int_{\mathbb{R}^d} p(x)\,dx = 1\) (next section).</li>
+</ul>
+
+<div class="box intuition">
+<span class="label">Euler's method in one line</span>
+We almost never integrate exactly. Instead we approximate
+\(\int_t^{t+h} u_s\,ds \approx h\,u_t(X_t)\) — "velocity now times the time step."
+That single approximation, repeated, is the Euler method and the backbone of every
+sampler in this guide (Parts 1, 5, 6, 10).
+</div>
+
+<h2>0.5 Probability from first principles</h2>
+
+<h3>Random variable and density</h3>
+<p>A <strong>random variable</strong> is a quantity whose value is uncertain. For
+continuous values in \(\mathbb{R}^d\), the uncertainty is described by a
+<strong>probability density</strong> \(p:\mathbb{R}^d\to\mathbb{R}_{\ge 0}\). The
+density is <em>not</em> a probability itself; it is a probability <em>per unit
+volume</em>. Probabilities come from integrating it over a region:</p>
+<div class="box mathblock">
+<span class="label">Density axioms</span>
+\[
+p(x)\ge 0 \quad\text{for all }x,\qquad\qquad \int_{\mathbb{R}^d} p(x)\,dx = 1.
+\]
+\(\Pr[X \in A] = \int_A p(x)\,dx\) for any region \(A\).
+</div>
+
+<p>The notation \(z \sim p_{\text{data}}\) (MIT <em>Key Idea 2</em>) reads "\(z\) is a
+random sample drawn from the density \(p_{\text{data}}\)." The entire goal of the
+course, stated in Part 0 language: <em>build an algorithm that outputs samples
+\(z\sim p_{\text{data}}\) given only a finite dataset \(z_1,\dots,z_N\sim
+p_{\text{data}}\).</em></p>
+
+<h3>Expectation</h3>
+<div class="box mathblock">
+<span class="label">Expectation (the "average value")</span>
+\[
+\mathbb{E}_{x\sim p}\big[g(x)\big] \;=\; \int g(x)\,p(x)\,dx
+\;\approx\; \frac{1}{N}\sum_{i=1}^N g(x_i),\quad x_i\sim p.
+\]
+</div>
+<p>The right-hand approximation — average over samples — is how every loss in this
+course is actually computed: we cannot do the integral, so we draw a minibatch and
+average. When you see \(\mathbb{E}[\cdot]\) in a training objective (Parts 3, 5,
+10), mentally replace it with "average this over the batch."</p>
+
+<div class="box warn">
+<span class="label">Common confusion</span>
+A density \(p(x)\) can be <em>larger than 1</em> (it is per-volume, not a
+probability). Only its integral is constrained to 1. A narrow Gaussian has a tall
+peak with \(p(x)\gg 1\) near the mean.
+</div>
+
+<h3>Conditional and marginal densities</h3>
+<p>For a pair \((x,y)\): the <strong>joint</strong> \(p(x,y)\), the
+<strong>conditional</strong> \(p(x\mid y)=p(x,y)/p(y)\) ("density of \(x\) once
+\(y\) is fixed"), and the <strong>marginal</strong> \(p(x)=\int p(x,y)\,dy\)
+("integrate out \(y\)"). The flow-matching "marginalization trick" (Part 10) is
+built entirely on moving between a conditional path \(p_t(x\mid z)\) and its
+marginal \(p_t(x)=\int p_t(x\mid z)\,p_{\text{data}}(z)\,dz\) — so lock in these
+three words now.</p>
+
+<h2>0.6 The Gaussian — the one distribution to know cold</h2>
+
+<p>Noise in every diffusion model is Gaussian. The density in \(d\) dimensions with
+mean \(\mu\in\mathbb{R}^d\) and covariance \(\Sigma\in\mathbb{R}^{d\times d}\):</p>
+<div class="box mathblock">
+<span class="label">Multivariate Gaussian</span>
+\[
+\mathcal{N}(x;\mu,\Sigma)=\frac{1}{\sqrt{(2\pi)^d\det\Sigma}}
+\exp\!\Big(-\tfrac12 (x-\mu)^\top \Sigma^{-1}(x-\mu)\Big).
+\]
+</div>
+<table class="symbols">
+<tr><th>Symbol</th><th>Meaning</th></tr>
+<tr><td>\(\mu\)</td><td>mean — the center of the cloud</td></tr>
+<tr><td>\(\Sigma\)</td><td>covariance — how the cloud is stretched/correlated in each direction</td></tr>
+<tr><td>\(I_d\)</td><td>\(d\times d\) identity; \(\mathcal{N}(0,I_d)\) is "isotropic" standard noise</td></tr>
+</table>
+
+<div class="box intuition">
+<span class="label">The only special cases we use</span>
+Almost always \(\Sigma = \sigma^2 I_d\) (every coordinate independent, same spread).
+Then the Gaussian is just "each coordinate is an independent bell curve with std
+\(\sigma\)." The standard normal \(\mathcal{N}(0,I_d)\) is our \(p_{\text{init}}\):
+the easy distribution we start sampling from.
+</div>
+
+<h3>Two properties that make the math work</h3>
+<div class="box mathblock">
+<span class="label">A — Reparameterization</span>
+\[
+x\sim\mathcal{N}(\mu,\sigma^2 I) \iff x=\mu+\sigma\,\varepsilon,\quad \varepsilon\sim\mathcal{N}(0,I).
+\]
+Sampling a Gaussian = take fixed standard noise and shift+scale it. This lets
+gradients flow through the sampling step (used in the VAE, Part 12, and in every
+forward process).
+</div>
+<div class="box mathblock">
+<span class="label">B — Sum of independent Gaussians</span>
+If \(a\sim\mathcal{N}(0,\sigma_a^2 I)\) and \(b\sim\mathcal{N}(0,\sigma_b^2 I)\)
+independently, then \(a+b\sim\mathcal{N}(0,(\sigma_a^2+\sigma_b^2)I)\). Variances
+<em>add</em>. This is the one identity that collapses the DDPM multi-step forward
+process into a single closed form (Part 5).
+</div>
+
+<h4>PyTorch: sampling and reparameterization agree</h4>
+<pre><code>import torch
+torch.manual_seed(0)
+
+mu, sigma = 5.0, 2.0
+direct = torch.normal(mean=mu, std=sigma, size=(100000,))      <span class="code-comment"># sample N(5, 2^2) directly</span>
+
+eps = torch.randn(100000)                                      <span class="code-comment"># eps ~ N(0,1), shape (100000,)</span>
+reparam = mu + sigma * eps                                     <span class="code-comment"># property A: same distribution</span>
+
+print(direct.mean().item(),  direct.std().item())   <span class="code-comment"># ~5.00  ~2.00</span>
+print(reparam.mean().item(), reparam.std().item())  <span class="code-comment"># ~5.00  ~2.00  (matches)</span></code></pre>
+
+<h2>0.7 KL divergence (a teaser for Parts 10 &amp; 12)</h2>
+<p>To say "distribution \(q\) is close to distribution \(p\)" we use the
+<strong>Kullback–Leibler divergence</strong>
+\(D_{\mathrm{KL}}(q\,\|\,p)=\mathbb{E}_{x\sim q}\big[\log\frac{q(x)}{p(x)}\big]\ge
+0\), with equality iff \(q=p\). You only need three facts: it is \(\ge 0\), it is
+zero exactly when the distributions match, and it is <em>not</em> symmetric. The
+VAE objective (Part 12) and the variational view of diffusion are KL minimizations.
+We derive the Gaussian closed form when we need it.</p>
+
+<h2>0.8 Notation cheat-sheet (bookmark this)</h2>
+<table class="symbols">
+<tr><th>Symbol</th><th>Pronunciation / meaning</th><th>First used in</th></tr>
+<tr><td>\(z\in\mathbb{R}^d\)</td><td>a data object as a vector</td><td>Part 0</td></tr>
+<tr><td>\(p_{\text{data}}\), \(p_{\text{init}}\)</td><td>data distribution; starting (noise) distribution</td><td>Parts 0,4</td></tr>
+<tr><td>\(X_t\)</td><td>state of the trajectory at time \(t\)</td><td>Part 1</td></tr>
+<tr><td>\(u_t(x)\), \(u_t^\theta(x)\)</td><td>(true / neural-net) vector field = velocity</td><td>Parts 1,10</td></tr>
+<tr><td>\(\psi_t\)</td><td>flow map: where \(x_0\) lands at time \(t\)</td><td>Part 1</td></tr>
+<tr><td>\(\nabla_x\log p_t(x)\)</td><td>score: direction of increasing density</td><td>Part 3</td></tr>
+<tr><td>\(\mathcal{N}(\mu,\Sigma)\)</td><td>Gaussian with mean \(\mu\), covariance \(\Sigma\)</td><td>Part 0</td></tr>
+<tr><td>\(\varepsilon\sim\mathcal{N}(0,I)\)</td><td>standard noise used in reparameterization</td><td>Parts 0,5</td></tr>
+<tr><td>\(\bar\alpha_t,\beta_t\)</td><td>DDPM noise-schedule scalars</td><td>Part 5</td></tr>
+<tr><td>\(\sigma_t\)</td><td>diffusion coefficient (SDE noise level)</td><td>Parts 2,8</td></tr>
+<tr><td>\(\mathbb{E}[\cdot]\)</td><td>expectation ≈ average over a batch</td><td>Part 0</td></tr>
+</table>
+
+<div class="box connect">
+<span class="label">Where Part 0 plugs into the MIT notes</span>
+This part assembles the prerequisites the notes assume in their
+<em>Section A (Probability reminder)</em> and use silently from Section 1 onward.
+With vectors, derivatives/gradients, densities, expectation, and the Gaussian in
+hand, you can now read <em>Section 2 (Flow and Diffusion Models)</em> — which is
+exactly our Part 1.
+</div>
+
+<h2>0.9 Checkpoint — you should now be able to</h2>
+<ul>
+<li>Read \(u_t(x)\in\mathbb{R}^d\) and say "velocity vector at position \(x\), time \(t\)."</li>
+<li>Explain why \(\frac{d}{dt}X_t\) is a velocity and \(\nabla_x\log p_t(x)\) is a direction in data space.</li>
+<li>Turn \(\mathbb{E}_{x\sim p}[g(x)]\) into a batch average in code.</li>
+<li>Write a Gaussian sample two ways (direct and reparameterized) and know they match.</li>
+<li>State "variances add" and "a density integrates to 1" without hesitation.</li>
+</ul>
+
+<nav class="pagenav">
+  <a class="prev" href="index.html"><span class="dir">‹ Home</span>Guide overview &amp; how to use</a>
+  <a class="next" href="part01_differential_equations.html"><span class="dir">Next ›</span>Part 1 — Differential Equations</a>
+</nav>
+
+</article>
+</main>
+</div>
+<script defer src="assets/guide.js"></script>
+</body>
+</html>

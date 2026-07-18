@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Part 11 — Rectified Flows · Diffusion Study Guide</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [["\\(", "\\)"]], displayMath: [["\\[", "\\]"]], tags: "none" },
+    options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle contents">☰</button>
+<div class="layout">
+<nav class="toc">
+  <a href="index.html"><strong>◆ Diffusion Study Guide</strong></a>
+  <h2>Foundations</h2>
+  <a href="part00_math_foundations.html"><span class="part-num">0</span>Mathematical Foundations</a>
+  <a href="part01_differential_equations.html"><span class="part-num">1</span>Differential Equations</a>
+  <a href="part02_probability_stochastic.html"><span class="part-num">2</span>Probability &amp; Stochastic Processes</a>
+  <a href="part03_score_functions.html"><span class="part-num">3</span>Score Functions</a>
+  <h2>Diffusion Core</h2>
+  <a href="part04_diffusion_models.html"><span class="part-num">4</span>Diffusion Models (big picture)</a>
+  <a href="part05_ddpm.html"><span class="part-num">5</span>DDPM</a>
+  <a href="part06_ddim.html"><span class="part-num">6</span>DDIM</a>
+  <a href="part07_continuous_time.html"><span class="part-num">7</span>Continuous-Time Diffusion</a>
+  <h2>Continuous Formulation</h2>
+  <a href="part08_sde_formulation.html"><span class="part-num">8</span>SDE Formulation</a>
+  <a href="part09_probability_flow_ode.html"><span class="part-num">9</span>Probability Flow ODE</a>
+  <a href="part10_flow_matching.html"><span class="part-num">10</span>Flow Matching</a>
+  <a href="part11_rectified_flows.html"><span class="part-num">11</span>Rectified Flows</a>
+  <h2>Systems &amp; Reading</h2>
+  <a href="part12_stable_diffusion.html"><span class="part-num">12</span>Stable Diffusion</a>
+  <a href="part13_reading_the_notes.html"><span class="part-num">13</span>Reading the MIT Notes</a>
+  <a href="part14_discrete_diffusion.html"><span class="part-num">14</span>Discrete Diffusion</a>
+</nav>
+<main>
+<article>
+
+<h1><span class="kicker">Part 11</span>Rectified Flows</h1>
+
+<div class="box prereq">
+<span class="label">Prerequisites</span>
+You need Part 10 (Flow Matching) firmly in hand: the conditional flow-matching loss
+\(\mathcal{L} = \mathbb{E}\bigl\|\,u_t^\theta(x) - u_t(x\mid z)\bigr\|^2\),
+the linear interpolation \(x_t = (1-t)x_0 + t z\) with constant conditional velocity
+\(u = z - x_0\), and Euler sampling along a probability-flow ODE.
+You do not need to know anything about rectified flows yet.
+</div>
+
+<!-- ============================================================ -->
+<h2>11.1 The Curved-Trajectory Problem</h2>
+
+<div class="box intuition">
+<span class="label">Intuition</span>
+<p>After Part 10 you know how to train a velocity field \(v_\theta(x,t)\) and then generate
+a sample by solving the ODE</p>
+\[\frac{dx}{dt} = v_\theta(x, t), \quad x_0 \sim p_{\text{init}}.\]
+<p>To solve this ODE numerically you use Euler steps:</p>
+\[x_{t+h} \approx x_t + h\,v_\theta(x_t, t).\]
+<p>A single Euler step is <em>exact only when the trajectory is a straight line</em> (constant
+velocity, no curvature). If the trajectory curves, the Euler step veers off it and you
+accumulate error — so you need many small steps.</p>
+<p><strong>Curved path (many steps needed):</strong></p>
+<pre style="font-family:monospace;font-size:0.9em;line-height:1.6;color:var(--fg)">
+  noise x_0                          data x_1
+     *                                   *
+      \  ← true curved trajectory
+       ~--.
+           `--.
+               `--~
+                   \
+                    *  (actual data)
+</pre>
+<p><strong>Straight path (one step suffices):</strong></p>
+<pre style="font-family:monospace;font-size:0.9em;line-height:1.6;color:var(--fg)">
+  noise x_0 ——————————————————————— data x_1
+     *   →   →   →   →   →   →   →   *
+</pre>
+<p>The central dream of <strong>rectified flows</strong> is to make the learned velocity field
+correspond to straight-line trajectories, enabling fast (ideally one-step) generation.</p>
+</div>
+
+<p><strong>Why does standard flow matching give curved trajectories?</strong>
+Recall that flow matching with the linear interpolation trains the marginal velocity
+\(v_\theta(x, t)\) to match the <em>average</em> of all conditional velocities \(u = z - x_0\)
+that pass through the point \(x\) at time \(t\). If two different straight-line
+segments — say one from \((x_0^a, z^a)\) and another from \((x_0^b, z^b)\) — both
+pass through the same \(x\) at time \(t\), the marginal field learns their average
+direction. Following that averaged field curves away from either original line.
+Individual conditional paths are straight; the <em>learned marginal</em> field is not.</p>
+
+<!-- ============================================================ -->
+<h2>11.2 The Rectified-Flow Objective</h2>
+
+<p>Rectified flow (Liu et al., 2022, "Flow Straight and Fast") is flow matching with the
+<strong>linear interpolation path</strong> — which you already know from Part 10 — but with one
+crucial reframing: instead of conditioning on a single data point \(z\), we explicitly
+talk about <em>pairs</em> \((x_0, x_1)\) drawn jointly from some coupling
+\(\pi(x_0, x_1)\).</p>
+
+<div class="box mathblock">
+<span class="label">Formal Object</span>
+<p>Let \(p_{\text{init}}\) be the initial distribution (e.g. \(\mathcal{N}(0,I)\)) and
+\(p_{\text{data}}\) be the data distribution. A <strong>coupling</strong>
+\(\pi(x_0, x_1)\) is any joint distribution with marginals
+\(\pi(\cdot, x_1) = p_{\text{init}}\) and \(\pi(x_0, \cdot) = p_{\text{data}}\).</p>
+
+<p>Given a coupling, define the linear interpolation at time \(t \in [0,1]\):</p>
+\[x_t = (1-t)\,x_0 + t\,x_1.\]
+
+<p>The <strong>conditional velocity</strong> along this straight line is constant:</p>
+\[u(x_t \mid x_0, x_1) = x_1 - x_0.\]
+
+<p>The <strong>rectified-flow loss</strong> trains a velocity network
+\(v_\theta : \mathbb{R}^d \times [0,1] \to \mathbb{R}^d\) by:</p>
+\[\mathcal{L}_{\text{RF}}(\theta)
+  = \mathbb{E}_{t \sim \mathcal{U}[0,1],\,(x_0, x_1) \sim \pi}
+    \bigl\|\,v_\theta(x_t, t) - (x_1 - x_0)\bigr\|^2.\]
+</div>
+
+<h3>Equation breakdown — every symbol</h3>
+<table class="symbols">
+  <thead><tr><th>Symbol</th><th>Shape / Type</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td>\(v_\theta(x_t,t)\)</td><td>\(\mathbb{R}^d\)</td><td>Neural network predicting velocity at position \(x_t\), time \(t\)</td></tr>
+    <tr><td>\(x_0\)</td><td>\(\mathbb{R}^d\)</td><td>Noise sample drawn from \(p_{\text{init}}\)</td></tr>
+    <tr><td>\(x_1\)</td><td>\(\mathbb{R}^d\)</td><td>Data sample drawn from \(p_{\text{data}}\)</td></tr>
+    <tr><td>\(x_t = (1-t)x_0 + t x_1\)</td><td>\(\mathbb{R}^d\)</td><td>Linearly interpolated point at time \(t\)</td></tr>
+    <tr><td>\(x_1 - x_0\)</td><td>\(\mathbb{R}^d\)</td><td>Target velocity: the constant direction from noise to data along the straight line</td></tr>
+    <tr><td>\(\pi(x_0, x_1)\)</td><td>joint distribution</td><td>The coupling — determines which noise is paired with which data</td></tr>
+    <tr><td>\(t \sim \mathcal{U}[0,1]\)</td><td>scalar</td><td>Uniformly sampled time step</td></tr>
+    <tr><td>\(\|\cdot\|^2\)</td><td>scalar</td><td>Squared Euclidean norm</td></tr>
+  </tbody>
+</table>
+
+<p>Compare to the Part 10 loss
+\(\mathbb{E}\|u_t^\theta(x) - u_t(x\mid z)\|^2\): it is <em>identical</em> with
+\(z \leftrightarrow x_1\) and the conditional velocity being \(x_1 - x_0\).
+Rectified flow is a specific instance of conditional flow matching.</p>
+
+<div class="box warn">
+<span class="label">Subtle Point — Straight Lines vs Straight Field</span>
+<p>Each <em>individual</em> trajectory \(t \mapsto (1-t)x_0 + t x_1\) is a straight line
+with constant velocity \(x_1 - x_0\).
+But the <em>marginal</em> velocity field \(v_\theta(x,t)\) that the network learns is
+<strong>not straight in general</strong>.</p>
+<p>Why? At any given point \((x,t)\), many different pairs \((x_0^a, x_1^a)\) and
+\((x_0^b, x_1^b)\) can satisfy \(x_t = x\). Their straight-line directions
+\(x_1^a - x_0^a\) and \(x_1^b - x_0^b\) may differ. The network, minimising mean
+squared error, learns their <em>conditional average</em>:</p>
+\[v_\theta(x, t) \approx \mathbb{E}[\,x_1 - x_0 \mid x_t = x\,].\]
+<p>Following this averaged direction will in general curve away from any single line.
+This is the crossing problem explained next.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>11.3 The Crossing Problem</h2>
+
+<div class="box intuition">
+<span class="label">Intuition — Averaging Arrows at Intersections</span>
+<p>Imagine many rubber bands stretched across a room: each band goes from a noise point
+\(x_0^i\) straight to a data point \(x_1^i\). If two bands cross at the same point
+in the middle of the room, what direction should the wall (the network) push a particle
+sitting at that crossing? It cannot go both ways, so it averages. The average direction
+leads away from both target data points.</p>
+<p>Visually:</p>
+<pre style="font-family:monospace;font-size:0.9em;line-height:1.6;color:var(--fg)">
+  x_0^a ——————→ x_1^a
+               ×         ← crossing at this point
+  x_0^b ——————→ x_1^b
+
+  Learned velocity at ×: average of (x_1^a − x_0^a) and (x_1^b − x_0^b)
+  → points neither to x_1^a nor to x_1^b exactly.
+</pre>
+<p>The more crossings in a coupling, the more the marginal field deviates from any straight
+line — and the more Euler steps you need to follow it accurately.</p>
+</div>
+
+<p><strong>Why does the independent coupling \(\pi = p_{\text{init}} \otimes p_{\text{data}}\)
+maximise crossings?</strong>
+When \(x_0\) and \(x_1\) are drawn independently, the straight-line segments from noise
+to data crisscross all over the space. The learned marginal field therefore curves
+substantially. This is the regime you train in on the first pass.</p>
+
+<!-- ============================================================ -->
+<h2>11.4 Reflow — The Key Idea</h2>
+
+<p>The insight of Liu et al. is: <em>if we could pair each noise point with the data point
+it actually flows to under the current model, the resulting coupling would have
+far fewer crossings</em>. Fewer crossings → straighter marginal field → fewer Euler
+steps needed. This procedure is called <strong>reflow</strong>.</p>
+
+<div class="box mathblock">
+<span class="label">Why Deterministic Coupling Reduces Crossings</span>
+<p>Suppose two pairs \((x_0^a, x_1^a)\) and \((x_0^b, x_1^b)\) are drawn from a
+<em>deterministic</em> transport (each noise point maps to exactly one data point, like
+an optimal transport map). Then for two line segments to cross at time \(t\), we
+would need:</p>
+\[(1-t)x_0^a + t x_1^a = (1-t)x_0^b + t x_1^b\]
+<p>for some \(t \in (0,1)\). This is a measure-zero event for non-degenerate distributions.
+Therefore, a deterministic coupling is essentially <em>crossing-free</em>, making the
+marginal velocity field match the individual line directions everywhere.</p>
+</div>
+
+<h3>The Reflow Algorithm</h3>
+
+<div class="box mathblock">
+<span class="label">Reflow — Step by Step</span>
+<ol>
+  <li><strong>Train \(v^{(1)}_\theta\)</strong> on the independent coupling
+      \(\pi^{(1)} = p_{\text{init}} \otimes p_{\text{data}}\) using the rectified-flow
+      loss. This is standard flow matching with linear paths.</li>
+
+  <li><strong>Generate paired data (build \(\pi^{(2)}\)).</strong>
+      For each noise sample \(x_0 \sim p_{\text{init}}\), integrate the current
+      model forward:
+      \[x_1^{(1)} = x_0 + \int_0^1 v^{(1)}_\theta(x_t, t)\,dt \approx
+        x_0 + \sum_{k} h\,v^{(1)}_\theta(x_{t_k}, t_k).\]
+      Store the pair \((x_0, x_1^{(1)})\). Crucially this is a
+      <em>deterministic</em> map: the same \(x_0\) always produces the same
+      \(x_1^{(1)}\), so no two pairs can cross (measure-theoretically).</li>
+
+  <li><strong>Train \(v^{(2)}_\theta\)</strong> on the new coupling \(\pi^{(2)}\)
+      (the stored pairs) with the same loss:
+      \[\mathcal{L}^{(2)} = \mathbb{E}_{t,(x_0, x_1^{(1)}) \sim \pi^{(2)}}
+        \bigl\|v_\theta(x_t, t) - (x_1^{(1)} - x_0)\bigr\|^2.\]
+      Because \(\pi^{(2)}\) has far fewer crossings, the learned field
+      \(v^{(2)}\) is straighter.</li>
+
+  <li><strong>Iterate.</strong> Apply step 2–3 again using \(v^{(2)}\) to produce
+      \(\pi^{(3)}\), train \(v^{(3)}\), and so on. Each round further straightens the
+      trajectories.</li>
+</ol>
+</div>
+
+<div class="box intuition">
+<span class="label">Intuition — Why Each Round Helps</span>
+<p>After the first training, the model already pushes noise towards data roughly correctly
+but along a curved path. The reflow step says: "let me actually <em>follow</em> that curved
+path to find out where each noise particle ends up, and then pair them permanently."
+Now when I retrain, every pair has a dedicated straight-line corridor that doesn't
+compete with other pairs. The new model learns a field that is much closer to constant
+along each trajectory.</p>
+<p>Think of it as untangling a bowl of spaghetti: the first cook (training) roughly sorts
+the strands; the reflow step picks up each strand and lays it straight; repeat until
+every strand is fully straight.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>11.5 Distillation to One Step</h2>
+
+<p>After one or two reflow iterations the trajectories are nearly straight. At that point
+you can distill the model into a one-step generator: simply evaluate the (near-straight)
+velocity at \(t=0\) and take a single Euler step of size 1:</p>
+
+\[x_1 \approx x_0 + v_\theta(x_0,\, 0).\]
+
+<p>This works because a perfectly straight trajectory has constant velocity, so the first
+derivative at \(t=0\) already tells you the full displacement. In practice, one or two
+rounds of reflow followed by distillation achieves generation quality competitive with
+many-step methods using a single network evaluation — the core claim of "Flow Straight
+and Fast".</p>
+
+<!-- ============================================================ -->
+<h2>11.6 Connections</h2>
+
+<div class="box connect">
+<span class="label">Connection — Part 10 (Flow Matching)</span>
+<p>Rectified flow is exactly the <strong>linear-interpolation instance of conditional flow
+matching</strong> from Part 10. The CFM loss with \(x_t = (1-t)x_0 + t z\) and
+\(u_t(x\mid z) = z - x_0\) is the rectified-flow loss with \(x_1 \equiv z\) and
+independent coupling. The only new ingredient is the <em>reflow</em> procedure that
+replaces the independent coupling with a deterministic one.</p>
+</div>
+
+<div class="box connect">
+<span class="label">Connection — Part 9 (Probability Flow ODE)</span>
+<p>In Part 9 you learned that the probability-flow ODE has a velocity field
+\(u_t(x) = f_t(x) - \frac{1}{2}g_t^2\,\nabla\log p_t(x)\). For general diffusion
+schedules, this field is highly non-linear in \(x\) and \(t\) — causing trajectory
+curvature. Rectified flow can be viewed as choosing the schedule and training procedure
+so that this field becomes as linear as possible, making the PF-ODE trivially solvable.</p>
+</div>
+
+<div class="box connect">
+<span class="label">Connection — Part 12 (Stable Diffusion 3)</span>
+<p><strong>Stable Diffusion 3</strong> uses exactly the rectified-flow / linear-path flow-matching
+formulation (Esser et al., 2024 "Scaling Rectified Flow Transformers for High-Resolution
+Image Synthesis"). The training loss is the same \(\mathcal{L}_{\text{RF}}\) above. The
+key architectural change is a transformer backbone (DiT-style) instead of a U-Net.
+Part 12 will examine how this scales to image generation; all the mathematics you learn
+here transfers directly.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>11.7 PyTorch — Toy 2-D Example</h2>
+
+<p>We demonstrate three things in 2-D: (a) a single rectified-flow training step, (b) a
+reflow data-generation step, and (c) a sanity check that under a fixed coupling the
+target velocity is constant along the path (it should be — since it equals
+\(x_1 - x_0\) regardless of \(t\)).</p>
+
+<pre><code><span class="code-comment"># teaching code, not security-sensitive RNG</span>
+<span class="code-comment"># Part 11 — Rectified Flows: 2-D toy demonstration</span>
+<span class="code-comment"># Requires: torch (any modern version), no GPU needed.</span>
+
+import torch
+import torch.nn as nn
+
+torch.manual_seed(0)  <span class="code-comment"># reproducibility</span>
+
+<span class="code-comment"># ── Distributions ───────────────────────────────────────────────────────────</span>
+<span class="code-comment"># p_init : isotropic Gaussian in R^2</span>
+<span class="code-comment"># p_data : mixture of two Gaussians ("two moons" proxy)</span>
+
+def sample_noise(n):
+    <span class="code-comment">"""Draw n samples from p_init = N(0, I_2).  Shape: (n, 2)."""</span>
+    return torch.randn(n, 2)
+
+def sample_data(n):
+    <span class="code-comment">"""Draw n samples from p_data (two-cluster mixture).  Shape: (n, 2)."""</span>
+    half = n // 2
+    c1 = torch.randn(half,    2) * 0.3 + torch.tensor([ 2.0,  0.0])
+    c2 = torch.randn(n - half, 2) * 0.3 + torch.tensor([-2.0,  0.0])
+    return torch.cat([c1, c2], dim=0)
+
+<span class="code-comment"># ── Tiny velocity network ────────────────────────────────────────────────────</span>
+<span class="code-comment"># Input : [x (2-D), t (scalar)] → concatenated to a 3-D vector</span>
+<span class="code-comment"># Output: velocity v_theta(x, t) in R^2</span>
+
+class VelocityNet(nn.Module):
+    def __init__(self, hidden=64):
+        super().__init__()
+        <span class="code-comment"># x is 2-D, t is 1-D → input size 3</span>
+        self.net = nn.Sequential(
+            nn.Linear(3, hidden), nn.Tanh(),
+            nn.Linear(hidden, hidden), nn.Tanh(),
+            nn.Linear(hidden, 2),   <span class="code-comment"># output: 2-D velocity</span>
+        )
+    def forward(self, x, t):
+        <span class="code-comment"># x: (batch, 2), t: (batch, 1)  →  concat → (batch, 3)</span>
+        xt = torch.cat([x, t], dim=-1)
+        return self.net(xt)
+
+model = VelocityNet()
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+<span class="code-comment"># ── (a) Rectified-flow training step ────────────────────────────────────────</span>
+<span class="code-comment"># Loss = E_{t, (x0,x1)} || v_theta(x_t, t) - (x1 - x0) ||^2</span>
+
+def rf_train_step(model, optimizer, batch_size=256):
+    model.train()
+    optimizer.zero_grad()
+
+    x0 = sample_noise(batch_size)        <span class="code-comment"># (B, 2) — noise samples</span>
+    x1 = sample_data(batch_size)         <span class="code-comment"># (B, 2) — data samples (independent)</span>
+
+    <span class="code-comment"># Sample t uniformly in [0, 1] for each pair</span>
+    t  = torch.rand(batch_size, 1)       <span class="code-comment"># (B, 1)</span>
+
+    <span class="code-comment"># Linearly interpolate: x_t = (1-t)*x0 + t*x1</span>
+    xt = (1 - t) * x0 + t * x1          <span class="code-comment"># (B, 2)</span>
+
+    <span class="code-comment"># Target velocity: the constant direction from noise to data</span>
+    target = x1 - x0                     <span class="code-comment"># (B, 2) — does NOT depend on t</span>
+
+    pred = model(xt, t)                  <span class="code-comment"># (B, 2) — network prediction</span>
+
+    loss = ((pred - target) ** 2).mean()
+    loss.backward()
+    optimizer.step()
+    return loss.item()
+
+<span class="code-comment"># Quick training loop (50 steps for illustration)</span>
+for step in range(50):
+    loss_val = rf_train_step(model, optimizer)
+
+print(f"Loss after 50 steps: {loss_val:.4f}")
+<span class="code-comment"># Expected output (approximate): Loss after 50 steps: 1.5xxx</span>
+<span class="code-comment"># (high because we only trained 50 steps on a random tiny net)</span>
+
+<span class="code-comment"># ── (b) Reflow: generate new deterministic couplings ────────────────────────</span>
+<span class="code-comment"># For each x0, integrate v_theta forward with Euler steps to get x1'.</span>
+<span class="code-comment"># (x0, x1') is the new coupling — deterministic, fewer crossings.</span>
+
+@torch.no_grad()
+def reflow_generate_pairs(model, n=512, n_steps=50):
+    <span class="code-comment">"""
+    Integrate model from t=0 to t=1 (Euler, n_steps steps).
+    Returns (x0, x1_prime): shape (n, 2) each.
+    These are the new NON-CROSSING pairs for the next reflow round.
+    """</span>
+    model.eval()
+    x0 = sample_noise(n)                 <span class="code-comment"># (n, 2) — fixed noise samples</span>
+    x  = x0.clone()
+    h  = 1.0 / n_steps                   <span class="code-comment"># Euler step size</span>
+
+    for k in range(n_steps):
+        t_k = torch.full((n, 1), k * h)  <span class="code-comment"># (n, 1) — current time</span>
+        v   = model(x, t_k)              <span class="code-comment"># (n, 2) — velocity at (x, t_k)</span>
+        x   = x + h * v                  <span class="code-comment"># Euler step</span>
+
+    x1_prime = x                         <span class="code-comment"># (n, 2) — deterministic endpoint</span>
+    return x0, x1_prime
+
+x0_pairs, x1_pairs = reflow_generate_pairs(model)
+print(f"Reflow pairs shape: x0={x0_pairs.shape}, x1'={x1_pairs.shape}")
+<span class="code-comment"># Expected output: Reflow pairs shape: x0=torch.Size([512, 2]), x1'=torch.Size([512, 2])</span>
+
+<span class="code-comment"># ── (c) Sanity check: constant velocity under a FIXED coupling ───────────────</span>
+<span class="code-comment"># For a FIXED pair (x0, x1), the TARGET velocity x1 - x0 is the SAME at all t.</span>
+<span class="code-comment"># Verify this analytically (no network needed — it is definitional).</span>
+
+x0_fixed = torch.tensor([[1.0, 0.5]])   <span class="code-comment"># one fixed noise point</span>
+x1_fixed = torch.tensor([[3.0, 2.0]])   <span class="code-comment"># one fixed data point</span>
+target_vel = x1_fixed - x0_fixed        <span class="code-comment"># constant direction = [2.0, 1.5]</span>
+
+print("\nTarget velocity at different t values (should be IDENTICAL):")
+for t_val in [0.0, 0.25, 0.5, 0.75, 1.0]:
+    t_tensor = torch.tensor([[t_val]])
+    <span class="code-comment"># x_t changes with t, but the TARGET velocity does not</span>
+    xt = (1 - t_tensor) * x0_fixed + t_tensor * x1_fixed
+    tv  = x1_fixed - x0_fixed          <span class="code-comment"># always the same vector</span>
+    print(f"  t={t_val:.2f} | x_t={xt.squeeze().tolist()} | target_vel={tv.squeeze().tolist()}")
+
+<span class="code-comment"># Expected output:</span>
+<span class="code-comment">#   t=0.00 | x_t=[1.0, 0.5]  | target_vel=[2.0, 1.5]</span>
+<span class="code-comment">#   t=0.25 | x_t=[1.5, 0.875]| target_vel=[2.0, 1.5]</span>
+<span class="code-comment">#   t=0.50 | x_t=[2.0, 1.25] | target_vel=[2.0, 1.5]</span>
+<span class="code-comment">#   t=0.75 | x_t=[2.5, 1.625]| target_vel=[2.0, 1.5]</span>
+<span class="code-comment">#   t=1.00 | x_t=[3.0, 2.0]  | target_vel=[2.0, 1.5]</span>
+<span class="code-comment">#</span>
+<span class="code-comment"># This confirms: the per-pair straight-line target is constant in t.</span>
+<span class="code-comment"># The NETWORK output v_theta(x_t, t) won't be constant (it's averaging over</span>
+<span class="code-comment"># many crossing pairs), but the TARGET is. Reflow makes the coupling</span>
+<span class="code-comment"># deterministic so that the average IS the individual target.</span>
+</code></pre>
+
+<!-- ============================================================ -->
+<h2>11.8 Summary and Checkpoint</h2>
+
+<p>Here is the full arc of Part 11 in one paragraph. Rectified flow is flow matching with
+linear interpolation but with a deliberate procedure — reflow — that replaces the naive
+independent coupling with a deterministic one obtained by following the current model.
+Because deterministic couplings have no crossing lines, the marginal velocity field
+matches the individual target velocities exactly, making trajectories straight and
+enabling one-step generation via distillation. Stable Diffusion 3 applies this idea at
+scale.</p>
+
+<div class="box mathblock">
+<span class="label">Checkpoint — Can You Answer These?</span>
+<ol>
+  <li>Why does a single Euler step give an exact solution when the trajectory is
+      a straight line?</li>
+  <li>Write down the rectified-flow loss \(\mathcal{L}_{\text{RF}}\). Identify each
+      symbol and explain why the target velocity does not depend on \(t\).</li>
+  <li>A network is trained with the rectified-flow loss on an independent coupling.
+      You find that sampling requires 100 Euler steps for good quality. Explain, in
+      terms of crossings and averaging, why the marginal field is curved even though
+      every conditional path is straight.</li>
+  <li>Describe the reflow algorithm in three sentences. Why does the deterministic
+      coupling produced by integrating \(v^{(1)}\) lead to straighter trajectories in
+      \(v^{(2)}\)?</li>
+  <li>After two rounds of reflow the trajectories are almost straight. Explain how
+      you would distill this into a one-step generator. Write the Euler formula.</li>
+  <li>How does the rectified-flow framework relate to the CFM loss from Part 10?
+      In what sense is rectified flow a special case?</li>
+  <li>In the PyTorch code above, <code>target = x1 - x0</code> does not include
+      <code>t</code>. Would the training still work if you mistakenly used
+      <code>target = x1 - xt</code>? Why or why not?</li>
+</ol>
+</div>
+
+<nav class="pagenav">
+  <a class="prev" href="part10_flow_matching.html"><span class="dir">‹ Prev</span>Part 10 — Flow Matching</a>
+  <a class="next" href="part12_stable_diffusion.html"><span class="dir">Next ›</span>Part 12 — Stable Diffusion</a>
+</nav>
+
+</article>
+</main>
+</div>
+<script defer src="assets/guide.js"></script>
+</body>
+</html>

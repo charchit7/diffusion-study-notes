@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Part 8 — SDE Formulation · Diffusion Study Guide</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [["\\(", "\\)"]], displayMath: [["\\[", "\\]"]], tags: "none" },
+    options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle contents">&#9776;</button>
+<div class="layout">
+<nav class="toc">
+  <a href="index.html"><strong>&#9670; Diffusion Study Guide</strong></a>
+  <h2>Foundations</h2>
+  <a href="part00_math_foundations.html"><span class="part-num">0</span>Mathematical Foundations</a>
+  <a href="part01_differential_equations.html"><span class="part-num">1</span>Differential Equations</a>
+  <a href="part02_probability_stochastic.html"><span class="part-num">2</span>Probability &amp; Stochastic Processes</a>
+  <a href="part03_score_functions.html"><span class="part-num">3</span>Score Functions</a>
+  <h2>Diffusion Core</h2>
+  <a href="part04_diffusion_models.html"><span class="part-num">4</span>Diffusion Models (big picture)</a>
+  <a href="part05_ddpm.html"><span class="part-num">5</span>DDPM</a>
+  <a href="part06_ddim.html"><span class="part-num">6</span>DDIM</a>
+  <a href="part07_continuous_time.html"><span class="part-num">7</span>Continuous-Time Diffusion</a>
+  <h2>Continuous Formulation</h2>
+  <a href="part08_sde_formulation.html"><span class="part-num">8</span>SDE Formulation</a>
+  <a href="part09_probability_flow_ode.html"><span class="part-num">9</span>Probability Flow ODE</a>
+  <a href="part10_flow_matching.html"><span class="part-num">10</span>Flow Matching</a>
+  <a href="part11_rectified_flows.html"><span class="part-num">11</span>Rectified Flows</a>
+  <h2>Systems &amp; Reading</h2>
+  <a href="part12_stable_diffusion.html"><span class="part-num">12</span>Stable Diffusion</a>
+  <a href="part13_reading_the_notes.html"><span class="part-num">13</span>Reading the MIT Notes</a>
+  <a href="part14_discrete_diffusion.html"><span class="part-num">14</span>Discrete Diffusion</a>
+</nav>
+<main>
+<article>
+
+<h1><span class="kicker">Part 8</span>The SDE Formulation</h1>
+
+<div class="box prereq"><span class="label">Prerequisites</span>
+  You have seen: vectors, basic probability, Brownian motion, Euler&ndash;Maruyama, the OU process, score functions \(\nabla_x \log p_t\), DDPM, DDIM and its \(\eta\) parameter, and the continuous-time forward SDE. Part 8 introduces the <em>reverse</em>-time SDE and the Fokker&ndash;Planck equation for the first time.
+</div>
+
+<!-- ============================================================ -->
+<h2>8.1 Recap: The Forward SDE and the Central Question</h2>
+
+<p>In Part 7 you built the continuous-time forward process. Starting from a data sample \(X_0 \sim p_\text{data}\) and running forward in time \(t: 0 \to 1\), the state \(X_t\) follows the <strong>It&#244; SDE</strong>:</p>
+
+\[
+  dX_t = f(X_t, t)\,dt + g(t)\,dW_t
+  \quad \text{(forward SDE, time runs } 0 \to 1\text{)}
+\]
+
+<table class="symbols">
+  <tr><th>Symbol</th><th>Meaning</th><th>Shape / Type</th></tr>
+  <tr><td>\(X_t\)</td><td>State of the process at time \(t\)</td><td>\(\mathbb{R}^d\) random vector</td></tr>
+  <tr><td>\(f(X_t, t)\)</td><td>Drift: deterministic push at each moment</td><td>\(\mathbb{R}^d \to \mathbb{R}^d\)</td></tr>
+  <tr><td>\(g(t)\)</td><td>Diffusion coefficient: how much noise is injected</td><td>scalar \(\geq 0\)</td></tr>
+  <tr><td>\(dW_t\)</td><td>Brownian motion increment &mdash; a tiny Gaussian kick</td><td>\(\mathbb{R}^d\), variance \(dt\)</td></tr>
+  <tr><td>\(p_t\)</td><td>Marginal distribution of \(X_t\)</td><td>probability density on \(\mathbb{R}^d\)</td></tr>
+</table>
+
+<p>The forward SDE takes structured data (\(t=0\)) and progressively corrupts it into near-Gaussian noise (\(t=1\)). Geometric image: particles spread out from a concentrated cloud toward a diffuse blob.</p>
+
+<div class="box intuition"><span class="label">Central Question of Part 8</span>
+  The forward process destroys information: data &rarr; noise. Can we build a <strong>reverse</strong> process: noise &rarr; data? If so, sampling becomes: (1) draw \(X_1 \sim \mathcal{N}(0, I)\), (2) run the reverse SDE from \(t=1\) down to \(t=0\), (3) collect \(X_0 \approx p_\text{data}\).
+</div>
+
+<p>The surprising answer, due to <strong>Anderson (1982)</strong>, is yes &mdash; and the missing ingredient is exactly the score function \(\nabla_x \log p_t(x)\) you learned in Part 3.</p>
+
+<!-- ============================================================ -->
+<h2>8.2 The Reverse-Time SDE (Anderson 1982)</h2>
+
+<h3>Intuition First</h3>
+
+<p>Think of the forward SDE as <em>blurring</em> a photograph. Each step spreads probability mass outward. To un-blur it, you need to know, at each point \(x\) and time \(t\), which direction is &ldquo;uphill&rdquo; toward the data-dense region. That direction is <em>exactly</em> the score: \(\nabla_x \log p_t(x)\) points toward higher probability under \(p_t\).</p>
+
+<p>Anderson showed that if you know the marginals \(\{p_t\}\) of the forward process, you can construct a <em>new</em> SDE running <strong>backward in time</strong> whose marginals are the <em>same</em> \(\{p_t\}\) but traversed from \(t=1\) to \(t=0\).</p>
+
+<h3>The Reverse-Time SDE</h3>
+
+<p>Define a new time variable \(\tau = 1 - t\) that flows from \(0\) to \(1\) as the original time flows from \(1\) to \(0\). Anderson&rsquo;s result states: the reverse process satisfies</p>
+
+\[
+  dX_t = \Bigl[f(X_t, t) - g(t)^2\,\nabla_x \log p_t(X_t)\Bigr]\,dt + g(t)\,d\bar{W}_t
+  \quad \text{(reverse SDE, time runs } 1 \to 0\text{)}
+\]
+
+<p>where \(d\bar{W}_t\) is a standard Brownian motion increment when time flows backward (a formal reverse-time Wiener process).</p>
+
+<table class="symbols">
+  <tr><th>Symbol</th><th>Meaning</th><th>Shape / Type</th></tr>
+  <tr><td>\(f(X_t,t)\)</td><td>Same drift as the forward SDE</td><td>\(\mathbb{R}^d\)</td></tr>
+  <tr><td>\(g(t)^2\,\nabla_x \log p_t(X_t)\)</td><td><em>Score correction</em>: extra drift added in reverse</td><td>\(\mathbb{R}^d\)</td></tr>
+  <tr><td>\(\nabla_x \log p_t(x)\)</td><td>Score function: gradient of the log-density w.r.t. \(x\)</td><td>\(\mathbb{R}^d\)</td></tr>
+  <tr><td>\(d\bar{W}_t\)</td><td>Reverse-time Brownian increment</td><td>\(\mathbb{R}^d\), variance \(|dt|\)</td></tr>
+</table>
+
+<div class="box mathblock"><span class="label">Equation Breakdown: Every Term Explained</span>
+<p>Compare forward and reverse side by side:</p>
+<ul>
+  <li><strong>Forward drift \(f(X_t,t)\,dt\)</strong>: appears in <em>both</em> equations. In the reverse, it is kept with the same sign.</li>
+  <li><strong>Score correction \(-g(t)^2\nabla_x \log p_t(X_t)\,dt\)</strong>: this is the new piece. It pulls \(X_t\) toward regions of <em>higher</em> probability under \(p_t\), countering the spreading tendency of the forward process. The factor \(g(t)^2\) scales the correction to match the amount of noise injected: more noise &rArr; stronger pull needed.</li>
+  <li><strong>Diffusion \(g(t)\,d\bar{W}_t\)</strong>: <em>identical in magnitude</em> to the forward diffusion. The noise amplitude is preserved; only the drift changes.</li>
+</ul>
+<p>Pictorially: the forward SDE is like stirring ink into water (spreading). The reverse SDE un-stirs it by always nudging particles toward ink-dense regions, while maintaining the same level of agitation.</p>
+</div>
+
+<h3>Why Does the Score Term Appear? (Intuitive Argument)</h3>
+
+<p>Imagine particles distributed according to \(p_t\). The forward SDE pushes them outward with drift \(f\) and random kicks \(g\,dW\). To reverse, we need to undo both effects. The random kicks cannot literally be reversed (randomness has no memory), but we can <em>compensate</em> on average by adding a drift that pushes particles toward high-density regions.</p>
+
+<p>How strong should that compensating drift be? It turns out the answer is \(g(t)^2 \nabla_x \log p_t(x)\). The factor \(g^2\) comes from matching the variance of the noise (&ldquo;twice the noise variance&rdquo; in the stochastic calculus sense &mdash; this is the It&#244;&ndash;Stratonovich correction). Anderson&rsquo;s 1982 theorem proves this rigorously using time-reversal of Markov processes; we accept it here and will see further justification via Fokker&ndash;Planck in Section 8.3.</p>
+
+<div class="box intuition"><span class="label">Toy Mental Model: 1D Gaussian</span>
+  Suppose \(p_t = \mathcal{N}(\mu_t, \sigma_t^2)\). Then the score is
+  \(\nabla_x \log p_t(x) = -(x - \mu_t)/\sigma_t^2\).
+  The score correction \(-g^2 \cdot (-(x-\mu_t)/\sigma_t^2)\) becomes a drift that pushes \(x\) <em>toward</em> \(\mu_t\): a restoring force exactly like a spring. The wider the distribution (large \(\sigma_t^2\)), the weaker the spring. Near \(t=0\) where data is concentrated, the spring stiffens and particles snap back to the data mean.
+</div>
+
+<!-- ============================================================ -->
+<h2>8.3 The Fokker&ndash;Planck Equation (Theorem 19 in MIT Notes)</h2>
+
+<h3>Why We Need It</h3>
+
+<p>We have a forward SDE and a claimed reverse SDE. How do we <em>prove</em> they share the same marginals \(p_t\)? The tool is the <strong>Fokker&ndash;Planck equation</strong>, a PDE that governs how probability densities evolve under SDEs.</p>
+
+<h3>Two Operators: Divergence and Laplacian</h3>
+
+<p>Before stating the theorem, you need two differential operators on functions of \(x \in \mathbb{R}^d\).</p>
+
+<p><strong>Divergence</strong> \(\nabla \cdot v\) of a vector field \(v : \mathbb{R}^d \to \mathbb{R}^d\): it measures how much the field &ldquo;spreads out&rdquo; at a point.</p>
+\[
+  \nabla \cdot v(x) = \sum_{i=1}^d \frac{\partial v_i(x)}{\partial x_i}
+\]
+<p>Geometric image: if \(v\) is a fluid velocity field, \(\nabla \cdot v > 0\) means fluid is diverging (source); \(\nabla \cdot v < 0\) means converging (sink).</p>
+
+<p><strong>Laplacian</strong> \(\Delta w\) of a scalar field \(w : \mathbb{R}^d \to \mathbb{R}\): it measures local curvature / how much \(w\) differs from its neighborhood average.</p>
+\[
+  \Delta w(x) = \sum_{i=1}^d \frac{\partial^2 w(x)}{\partial x_i^2}
+\]
+<p>Geometric image: \(\Delta w > 0\) at a point means \(w\) is locally below its surroundings (like the bottom of a bowl); \(\Delta w < 0\) is a local peak. The Laplacian appears in the heat equation \(\partial_t T = \Delta T\) &mdash; heat flows from peaks to valleys, smoothing the temperature field.</p>
+
+<h3>The Fokker&ndash;Planck Equation</h3>
+
+<p>Consider any SDE \(dX_t = u_t(X_t)\,dt + \sigma_t\,dW_t\) where \(u_t : \mathbb{R}^d \to \mathbb{R}^d\) is a drift and \(\sigma_t \geq 0\) is a (possibly time-varying) diffusion coefficient. Then \(X_t\) has distribution \(p_t\) for all \(t\) if and only if <strong>the Fokker&ndash;Planck equation</strong> holds:</p>
+
+\[
+  \partial_t p_t(x) = -\nabla \cdot \bigl(u_t(x)\,p_t(x)\bigr) + \tfrac{1}{2}\sigma_t^2\,\Delta p_t(x)
+\]
+
+<table class="symbols">
+  <tr><th>Term</th><th>Physical Meaning</th></tr>
+  <tr><td>\(\partial_t p_t\)</td><td>Rate of change of the density at point \(x\)</td></tr>
+  <tr><td>\(-\nabla \cdot (u_t p_t)\)</td><td><em>Transport term</em>: drift \(u_t\) carries probability mass like a fluid; this is a conservation law (like continuity equation for ODEs, Part 7)</td></tr>
+  <tr><td>\(\tfrac{1}{2}\sigma_t^2\,\Delta p_t\)</td><td><em>Diffusion term</em>: Brownian noise spreads the density like heat; peaks decay, valleys fill in</td></tr>
+</table>
+
+<div class="box intuition"><span class="label">Why &ldquo;Conservation of Probability Mass&rdquo;</span>
+  Think of \(p_t(x)\) as the density of a crowd of particles. The Fokker&ndash;Planck equation says: the crowd density at \(x\) changes because (1) the deterministic drift carries particles in/out (transport), and (2) the random noise diffuses them around (heat-like spreading). No particles are created or destroyed: \(\int p_t(x)\,dx = 1\) for all \(t\). The Fokker&ndash;Planck equation is the mathematical guarantee of that conservation.
+</div>
+
+<h3>Special Case: ODE (\(\sigma_t = 0\))</h3>
+
+<p>When \(\sigma_t = 0\) (no noise), the Laplacian term vanishes and the Fokker&ndash;Planck equation reduces to the <strong>continuity equation</strong> from Part 7:</p>
+\[
+  \partial_t p_t = -\nabla \cdot (u_t\,p_t)
+\]
+<p>This confirms that the Fokker&ndash;Planck equation is a strict generalization: ODEs and SDEs both fit inside a single framework, distinguished only by whether \(\sigma_t = 0\) or \(\sigma_t > 0\).</p>
+
+<h3>Proof Sketch: Why Forward and Reverse SDEs Share Marginals</h3>
+
+<p>The MIT notes (proof of Theorem 17) show that the reverse SDE satisfies the Fokker&ndash;Planck equation for \(p_t\) by a direct calculation. The key algebraic steps are:</p>
+<ol>
+  <li>Write the drift of the reverse SDE as \(u^\text{rev}_t(x) = f(x,t) - g(t)^2 \nabla_x \log p_t(x)\).</li>
+  <li>Compute \(-\nabla \cdot (u^\text{rev}_t\,p_t)\):
+    \[
+      -\nabla \cdot \bigl((f - g^2 \nabla_x \log p_t)\,p_t\bigr)
+      = -\nabla \cdot (f\,p_t) + g^2\,\nabla \cdot (\nabla_x \log p_t \cdot p_t)
+    \]
+  </li>
+  <li>Use the identity \(\nabla_x \log p_t = \nabla_x p_t / p_t\), so \(\nabla_x \log p_t \cdot p_t = \nabla_x p_t\). Thus the second term becomes \(g^2 \nabla \cdot \nabla_x p_t = g^2 \Delta p_t\).</li>
+  <li>The transport term \(-\nabla \cdot (f\,p_t)\) is exactly what the forward process contributes (via the continuity equation). The diffusion term \(\tfrac{1}{2}g^2 \Delta p_t\) from the forward noise and the \(g^2 \Delta p_t\) now combine: altogether the Fokker&ndash;Planck equation for \(p_t\) is satisfied.</li>
+</ol>
+<p>The integration-by-parts step underlies step 3: the divergence of a gradient is the Laplacian, \(\nabla \cdot \nabla w = \Delta w\). This is the sole non-obvious algebraic fact; everything else is symbolic manipulation.</p>
+
+<!-- ============================================================ -->
+<h2>8.4 The SDE Extension Trick: A Family of SDEs (Theorem 17 &amp; Example 18)</h2>
+
+<h3>The Key Insight</h3>
+
+<p>Theorem 17 in the MIT notes is more general than just the reverse SDE: it says you can build an <em>entire family</em> of SDEs, parameterized by a free diffusion coefficient \(\sigma_t \geq 0\), all of which share the <em>same marginals</em> \(p_t\).</p>
+
+<p>For Gaussian probability paths \(p_t(\cdot | z) = \mathcal{N}(\alpha_t z,\, \beta_t^2 I)\), the family is:</p>
+
+\[
+  dX_t = \underbrace{\Bigl[u_t^\text{target}(X_t) - \tfrac{\sigma_t^2}{2}\,\nabla_x \log p_t(X_t)\Bigr]}_{\text{corrected drift}}\,dt
+         + \underbrace{\sigma_t\,dW_t}_{\text{free noise}}
+\]
+
+<p>where \(u_t^\text{target}\) is the marginal vector field learned by the flow network. The score term with coefficient \(\sigma_t^2/2\) corrects for the noise injection so that marginals remain \(p_t\).</p>
+
+<table class="symbols">
+  <tr><th>Symbol</th><th>Meaning</th></tr>
+  <tr><td>\(u_t^\text{target}(x)\)</td><td>Marginal vector field (what a flow-matching network learns)</td></tr>
+  <tr><td>\(\sigma_t\)</td><td>Free parameter you can choose <em>after</em> training; sets the stochasticity level</td></tr>
+  <tr><td>\(\nabla_x \log p_t(x)\)</td><td>Score function; for Gaussian paths, computable from \(u_t^\text{target}\)</td></tr>
+</table>
+
+<h3>The Two Extremes</h3>
+
+<div class="box mathblock"><span class="label">Spectrum of SDEs</span>
+<ul>
+  <li><strong>\(\sigma_t = 0\) (no noise)</strong>: the SDE collapses to the <em>probability-flow ODE</em> (Part 9). Trajectories are deterministic: same initial point always gives same final sample. This is exactly DDIM with \(\eta = 0\).</li>
+  <li><strong>\(\sigma_t > 0\) (maximum noise)</strong>: fully stochastic reverse SDE (Anderson 1982). Different runs from the same initial noise give different samples. Corresponds to DDPM / DDIM with \(\eta = 1\).</li>
+  <li><strong>Any \(\sigma_t \in [0, \sigma_\text{max}]\)</strong>: a valid sampler. In practice, an intermediate \(\sigma_t\) may give the best sample quality because it balances exploration (stochasticity) against stability (low step-size requirements).</li>
+</ul>
+</div>
+
+<div class="box connect"><span class="label">Connection: DDIM&rsquo;s \(\eta\) Parameter (Part 6)</span>
+  In DDIM (Part 6) you saw a hyperparameter \(\eta \in [0,1]\) that interpolated between deterministic (\(\eta=0\)) and stochastic (\(\eta=1\)) sampling. Theorem 17 is the <em>continuous-time generalization</em> of that idea: \(\sigma_t\) plays the role of \(\eta\). The whole DDIM family is a special case of a single unifying theorem. This is why the MIT notes call it the &ldquo;SDE Extension Trick&rdquo; &mdash; it extends the ODE framework by adding any amount of noise while preserving correctness.
+</div>
+
+<div class="box connect"><span class="label">Foreshadow: Part 9 &mdash; Probability Flow ODE</span>
+  The \(\sigma_t = 0\) limit of the SDE extension trick gives the <em>probability-flow ODE</em>, a deterministic process with the same marginals as the full stochastic reverse SDE. Part 9 studies it in depth: it enables exact likelihood computation, inversion, and faster sampling.
+</div>
+
+<!-- ============================================================ -->
+<h2>8.5 Langevin Dynamics (Remark 20)</h2>
+
+<div class="box intuition"><span class="label">What is Langevin Dynamics?</span>
+  Suppose you fix a target distribution \(p(x)\) and want to <em>draw samples from it</em> without running a full generative model. Langevin dynamics gives you an SDE whose stationary distribution is exactly \(p\):
+  \[
+    dX_t = \nabla_x \log p(X_t)\,dt + \sqrt{2}\,dW_t
+  \]
+  Start anywhere; run forward in time; eventually \(X_t \sim p\). The score \(\nabla_x \log p\) acts like a compass pointing toward high-density regions. The noise \(\sqrt{2}\,dW_t\) prevents getting trapped at modes. This is score-driven MCMC.
+</div>
+
+<p>Langevin dynamics is the special case of Theorem 17 where the probability path is <em>constant</em> (\(p_t = p\) for all \(t\), so \(\partial_t p_t = 0\)). Setting the marginal vector field to zero (\(u_t^\text{target} = 0\)) and using diffusion coefficient \(\sigma_t = \sqrt{2}\) recovers the classical Langevin equation above.</p>
+
+<h3>Predictor&ndash;Corrector Sampling</h3>
+
+<p>In practice, Langevin dynamics is used as a <em>corrector</em> step during sampling. After each Euler&ndash;Maruyama step of the reverse SDE (&ldquo;predictor&rdquo;), you run a few steps of Langevin dynamics at the <em>current</em> \(t\) (&ldquo;corrector&rdquo;) to refine the sample toward the current marginal \(p_t\). This predictor&ndash;corrector scheme was popularized by Song et al.&nbsp;(2021) and often improves sample quality significantly with modest extra compute.</p>
+
+<p>The Ornstein&ndash;Uhlenbeck process you saw in Part 2 is exactly Langevin dynamics when \(p\) is Gaussian: the score of a Gaussian is a linear restoring force, recovering the linear SDE \(dX_t = -X_t\,dt + \sqrt{2}\,dW_t\).</p>
+
+<!-- ============================================================ -->
+<h2>8.6 The Key Takeaway: Sampling Needs Only the Score</h2>
+
+<div class="box connect"><span class="label">Everything Connects Through the Score</span>
+  <ul>
+    <li><strong>Part 3</strong>: defined \(s(x) = \nabla_x \log p(x)\); showed it points toward high-density regions.</li>
+    <li><strong>Part 5 (DDPM)</strong>: the noise predictor \(\epsilon_\theta\) <em>is</em> the score up to a sign and scale factor: \(\nabla_x \log p_t(x) \approx -\epsilon_\theta(x,t)/\beta_t\).</li>
+    <li><strong>Part 7</strong>: for Gaussian paths, the score can be derived from the marginal vector field \(u_t^\text{target}\).</li>
+    <li><strong>Part 8 (now)</strong>: the reverse-time SDE and the entire SDE extension family require only one ingredient: \(\nabla_x \log p_t\). A single trained network (score network or noise predictor) enables <em>all</em> samplers in the family.</li>
+    <li><strong>Part 9</strong>: the probability-flow ODE also uses only the score.</li>
+  </ul>
+  You only ever need to train <em>one</em> network. Everything else is a choice of \(\sigma_t\).
+</div>
+
+<!-- ============================================================ -->
+<h2>8.7 PyTorch: Reverse-Time SDE on a 1D Gaussian</h2>
+
+<p>The following self-contained example simulates the reverse-time SDE on a 1D Gaussian. The forward process is a variance-preserving (VP) style schedule: \(p_t = \mathcal{N}(\mu_t, \sigma_t^2)\) with \(\mu_t = e^{-t}\cdot\mu_0\) decaying to 0 and \(\sigma_t^2 = 1 - e^{-2t}\) growing from 0 to 1. The analytic score is \(\nabla_x \log p_t(x) = -(x - \mu_t)/\sigma_t^2\).</p>
+
+<p>We run Euler&ndash;Maruyama from \(t=1\) down to \(t=0\) and check that the final samples concentrate near \(\mu_0\).</p>
+
+<pre><code><span class="code-comment"># teaching code, not security-sensitive RNG</span>
+<span class="code-comment"># Part 8 — Reverse-time SDE via Euler–Maruyama, 1D Gaussian</span>
+<span class="code-comment"># No training needed: we use the analytic score function.</span>
+
+import torch
+
+<span class="code-comment"># ── Reproducibility ──────────────────────────────────────────────</span>
+torch.manual_seed(0)
+
+<span class="code-comment"># ── Problem setup ────────────────────────────────────────────────</span>
+<span class="code-comment"># Data distribution: N(mu0, sigma_data^2)  (1D)</span>
+mu0       = 3.0          <span class="code-comment"># true data mean</span>
+N_samples = 4000         <span class="code-comment"># number of reverse-SDE particles</span>
+T_steps   = 500          <span class="code-comment"># Euler–Maruyama discretisation steps</span>
+
+<span class="code-comment"># ── VP-style schedule: marginal at time t is N(alpha_t * mu0, beta_t^2)</span>
+<span class="code-comment">#   alpha_t = exp(-t),   beta_t^2 = 1 - exp(-2t)</span>
+<span class="code-comment">#   At t=0: pure data.   At t=1: near N(0,1).</span>
+def alpha(t):
+    return torch.exp(-t)                      <span class="code-comment"># scalar or tensor</span>
+
+def beta_sq(t):
+    return 1.0 - torch.exp(-2.0 * t)         <span class="code-comment"># variance of the marginal</span>
+
+<span class="code-comment"># ── Analytic score function ───────────────────────────────────────</span>
+<span class="code-comment"># For x ~ p_t = N(alpha_t * mu0, beta_sq_t),</span>
+<span class="code-comment">#   score = nabla_x log p_t(x) = -(x - alpha_t * mu0) / beta_sq_t</span>
+def score(x, t_scalar):
+    mu_t  = alpha(t_scalar) * mu0             <span class="code-comment"># mean of p_t</span>
+    var_t = beta_sq(t_scalar)                 <span class="code-comment"># variance of p_t</span>
+    var_t = var_t.clamp(min=1e-5)             <span class="code-comment"># avoid division by zero near t=0</span>
+    return -(x - mu_t) / var_t               <span class="code-comment"># shape: (N_samples,)</span>
+
+<span class="code-comment"># ── Forward SDE drift: f(x,t) = -x  (OU-like; keeps variance bounded)</span>
+<span class="code-comment"># Diffusion coefficient: g(t) = sqrt(2) * exp(-t)  (chosen to match VP)</span>
+<span class="code-comment"># For simplicity we use g(t) = 1.0 (scalar constant) in this toy.</span>
+g_const = 1.0            <span class="code-comment"># diffusion coefficient g(t) — constant for simplicity</span>
+
+def drift_forward(x, t_scalar):
+    return -x                                 <span class="code-comment"># f(x,t) = -x</span>
+
+<span class="code-comment"># ── Reverse-time SDE drift ────────────────────────────────────────</span>
+<span class="code-comment"># dx = [f(x,t) - g^2 * score(x,t)] dt  +  g * dW_bar</span>
+<span class="code-comment"># Note: time flows 1 -> 0, so dt is negative; we use |dt| and subtract.</span>
+def drift_reverse(x, t_scalar):
+    f   = drift_forward(x, t_scalar)          <span class="code-comment"># (N_samples,)</span>
+    sc  = score(x, t_scalar)                  <span class="code-comment"># (N_samples,)</span>
+    return f - g_const**2 * sc                <span class="code-comment"># corrected drift</span>
+
+<span class="code-comment"># ── Initialise particles at t=1 ───────────────────────────────────</span>
+<span class="code-comment"># At t=1, p_1 ≈ N(alpha(1)*mu0, beta_sq(1)) ≈ N(1.10, 0.865)</span>
+t_start = torch.tensor(1.0)
+mu_1    = alpha(t_start) * mu0               <span class="code-comment"># ≈ 1.104</span>
+std_1   = beta_sq(t_start).sqrt()            <span class="code-comment"># ≈ 0.930</span>
+X = mu_1 + std_1 * torch.randn(N_samples)    <span class="code-comment"># shape: (4000,)</span>
+print(f"Initial   mean={X.mean():.3f}, std={X.std():.3f}")
+<span class="code-comment"># Expected: Initial   mean≈1.10, std≈0.93</span>
+
+<span class="code-comment"># ── Euler–Maruyama reverse integration: t = 1.0 → 0.0 ───────────</span>
+dt    = 1.0 / T_steps                        <span class="code-comment"># size of each step</span>
+t_cur = 1.0
+
+for step in range(T_steps):
+    t_tensor = torch.tensor(t_cur)
+
+    <span class="code-comment"># deterministic reverse drift  (sign: we step backward, so -dt)</span>
+    d_det = drift_reverse(X, t_tensor) * (-dt)   <span class="code-comment"># shape: (N_samples,)</span>
+
+    <span class="code-comment"># stochastic noise increment   (magnitude scales with sqrt(dt))</span>
+    <span class="code-comment"># When stepping backward, the noise magnitude is g * sqrt(dt)</span>
+    d_sto = g_const * torch.randn(N_samples) * (dt ** 0.5)
+
+    X     = X + d_det + d_sto                <span class="code-comment"># Euler–Maruyama update</span>
+    t_cur = t_cur - dt                       <span class="code-comment"># move backward in time</span>
+
+<span class="code-comment"># ── Check final samples ───────────────────────────────────────────</span>
+print(f"Final     mean={X.mean():.3f}, std={X.std():.3f}")
+print(f"Target    mean={mu0:.3f},      std=1.000")
+<span class="code-comment"># Expected: Final     mean≈3.00, std≈1.00</span>
+<span class="code-comment"># Particles should concentrate near the data mean mu0=3.0.</span>
+<span class="code-comment"># The std ≈ 1.0 reflects the data-distribution spread (N(3, 1^2) in this toy).</span>
+
+<span class="code-comment"># ── What just happened? ────────────────────────────────────────────</span>
+<span class="code-comment"># 1. We sampled from p_1 ≈ N(1.1, 0.93^2) at t=1.</span>
+<span class="code-comment"># 2. At each Euler–Maruyama step we computed the analytic score,</span>
+<span class="code-comment">#    used it to build the reverse-SDE drift, and added Gaussian noise.</span>
+<span class="code-comment"># 3. After 500 steps ending at t≈0, samples follow p_0 ≈ N(mu0, 1).</span>
+<span class="code-comment"># In a real model, score() is replaced by a neural network s_theta(x, t).</span>
+</code></pre>
+
+<div class="box warn"><span class="label">Numerical Note</span>
+  The <code>clamp(min=1e-5)</code> in the score function prevents division by zero near \(t=0\) where \(\beta_t^2 \to 0\). In practice, samplers stop slightly before \(t=0\) (e.g., at \(t=0.001\)) to avoid this singularity. The VP and VE schedules in real models are designed to keep \(\beta_t\) bounded away from zero throughout sampling.
+</div>
+
+<!-- ============================================================ -->
+<h2>8.8 MIT Notes Reference Map</h2>
+
+<p>Here is where each concept from this part lives in the MIT notes (Section 4.2):</p>
+
+<table class="symbols">
+  <tr><th>Part 8 Concept</th><th>MIT Notes Location</th></tr>
+  <tr><td>Reverse-time SDE (Anderson 1982)</td><td>Sec. 4.2, Anderson (1982) cited; the reverse SDE is derived as part of Theorem 17&rsquo;s setup</td></tr>
+  <tr><td>SDE Extension Trick (family of SDEs)</td><td>Theorem 17, Sec. 4.2 (pp. 673&ndash;685 in the notes)</td></tr>
+  <tr><td>Gaussian SDE Extension</td><td>Example 18, Sec. 4.2</td></tr>
+  <tr><td>Fokker&ndash;Planck Equation</td><td>Theorem 19, Sec. 4.2; full proof in Appendix B</td></tr>
+  <tr><td>Laplacian definition</td><td>Eq. (48), Sec. 4.2 (just before Theorem 19)</td></tr>
+  <tr><td>Langevin Dynamics</td><td>Remark 20, Sec. 4.2</td></tr>
+  <tr><td>Predictor&ndash;Corrector</td><td>Mentioned in Remark 20; formally Algorithm 2 in Sec. 4.1</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>8.9 Checkpoint: What You Can Now Do</h2>
+
+<ul>
+  <li>Write down the reverse-time SDE from memory and name every term.</li>
+  <li>Explain <em>why</em> the score term \(-g^2 \nabla_x \log p_t\) appears in the reverse drift, using the intuition of &ldquo;pushing particles uphill.&rdquo;</li>
+  <li>State the Fokker&ndash;Planck equation and define the divergence \(\nabla\cdot\) and Laplacian \(\Delta\) it contains.</li>
+  <li>Use the Fokker&ndash;Planck equation to explain why forward and reverse SDEs share marginals \(p_t\).</li>
+  <li>Describe the SDE extension trick: what is the free parameter \(\sigma_t\), and what are its two extreme cases?</li>
+  <li>Connect \(\sigma_t\) to DDIM&rsquo;s \(\eta\) and explain in one sentence what each controls.</li>
+  <li>Define Langevin dynamics and state why it is useful for MCMC and predictor&ndash;corrector sampling.</li>
+  <li>Implement Euler&ndash;Maruyama for the reverse-time SDE, given any analytic or learned score function.</li>
+  <li>Explain why only one trained network (the score / noise predictor) is needed for any sampler in the SDE family.</li>
+</ul>
+
+<nav class="pagenav">
+  <a class="prev" href="part07_continuous_time.html"><span class="dir">&#8249; Prev</span>Part 7 &mdash; Continuous-Time Diffusion</a>
+  <a class="next" href="part09_probability_flow_ode.html"><span class="dir">Next &#8250;</span>Part 9 &mdash; Probability Flow ODE</a>
+</nav>
+
+</article>
+</main>
+</div>
+<script defer src="assets/guide.js"></script>
+</body>
+</html>

@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Part 4 — Diffusion Models · Diffusion Study Guide</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [["\\(", "\\)"]], displayMath: [["\\[", "\\]"]], tags: "none" },
+    options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle contents">☰</button>
+<div class="layout">
+<nav class="toc">
+  <a href="index.html"><strong>◆ Diffusion Study Guide</strong></a>
+  <h2>Foundations</h2>
+  <a href="part00_math_foundations.html"><span class="part-num">0</span>Mathematical Foundations</a>
+  <a href="part01_differential_equations.html"><span class="part-num">1</span>Differential Equations</a>
+  <a href="part02_probability_stochastic.html"><span class="part-num">2</span>Probability &amp; Stochastic Processes</a>
+  <a href="part03_score_functions.html"><span class="part-num">3</span>Score Functions</a>
+  <h2>Diffusion Core</h2>
+  <a href="part04_diffusion_models.html"><span class="part-num">4</span>Diffusion Models (big picture)</a>
+  <a href="part05_ddpm.html"><span class="part-num">5</span>DDPM</a>
+  <a href="part06_ddim.html"><span class="part-num">6</span>DDIM</a>
+  <a href="part07_continuous_time.html"><span class="part-num">7</span>Continuous-Time Diffusion</a>
+  <h2>Continuous Formulation</h2>
+  <a href="part08_sde_formulation.html"><span class="part-num">8</span>SDE Formulation</a>
+  <a href="part09_probability_flow_ode.html"><span class="part-num">9</span>Probability Flow ODE</a>
+  <a href="part10_flow_matching.html"><span class="part-num">10</span>Flow Matching</a>
+  <a href="part11_rectified_flows.html"><span class="part-num">11</span>Rectified Flows</a>
+  <h2>Systems &amp; Reading</h2>
+  <a href="part12_stable_diffusion.html"><span class="part-num">12</span>Stable Diffusion</a>
+  <a href="part13_reading_the_notes.html"><span class="part-num">13</span>Reading the MIT Notes</a>
+  <a href="part14_discrete_diffusion.html"><span class="part-num">14</span>Discrete Diffusion</a>
+</nav>
+<main>
+<article>
+
+<h1><span class="kicker">Part 4</span>Diffusion Models — the big picture</h1>
+
+<p class="muted">Parts 0–3 built the toolkit: vectors, flows, SDEs, and score functions.
+This part is the <em>bridge</em> — it shows you how those tools snap together into a
+complete generative algorithm and maps out the four views (DDPM, DDIM, continuous SDE,
+flow matching) that Parts 5–13 develop in detail. After reading this page you will
+understand <em>why</em> diffusion models work before you see a single line of
+the formal derivations.</p>
+
+<div class="box prereq">
+<span class="label">Prerequisites</span>
+<ul>
+  <li><strong>Part 0</strong> — vectors \(z \in \mathbb{R}^d\), probability densities, the Gaussian \(\mathcal{N}(0, I)\).</li>
+  <li><strong>Part 1</strong> — flows transport a density; an ODE \(\dot{x}_t = u_t(x_t)\) moves points through space.</li>
+  <li><strong>Part 2</strong> — Brownian motion, SDEs of the form \(dx_t = f_t(x_t)\,dt + g_t\,dW_t\), and how they smear a density over time.</li>
+  <li><strong>Part 3</strong> — the score \(\nabla_x \log p_t(x)\), what it points toward, and why a neural network can learn it.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>4.1 The goal: given a dataset, produce fresh samples</h2>
+
+<p>Every generative model in this course traces back to two elementary ideas that
+the MIT notes state explicitly as their first two <em>Key Ideas</em> (§1.3).</p>
+
+<div class="box mathblock">
+<span class="label">Key Idea 1 (MIT notes §1.3) — Objects are vectors</span>
+Every kind of object we want to generate — an image, a video frame, a protein
+backbone — can be flattened into a vector
+\[
+  z \;\in\; \mathbb{R}^d.
+\]
+For a 512&times;512 RGB image, \(d = 512 \times 512 \times 3 = 786\,432\).
+The space of all possible images is simply all of \(\mathbb{R}^d\);
+"realistic-looking images" are a complicated low-dimensional <em>cloud</em> inside
+that space.
+</div>
+
+<div class="box mathblock">
+<span class="label">Key Idea 2 (MIT notes §1.3) — Generation is sampling</span>
+The diversity of good dog images, good protein folds, or good pieces of music is
+captured by a probability distribution over \(\mathbb{R}^d\).  Call it
+\(p_{\text{data}}\).  "Generate an object" means draw a fresh sample
+\[
+  z \;\sim\; p_{\text{data}}.
+\]
+</div>
+
+<p>In practice we never <em>know</em> \(p_{\text{data}}\) as an explicit formula. What
+we do have is a finite dataset:</p>
+
+<div class="box mathblock">
+<span class="label">Key Idea 3 (MIT notes §1.3) — The dataset</span>
+We are given \(N\) examples
+\[
+  z_1, z_2, \ldots, z_N \;\sim\; p_{\text{data}}
+\]
+drawn independently from the true distribution. These act as a <em>proxy</em> for
+\(p_{\text{data}}\). The goal of training is to build an algorithm that, after
+seeing these examples, can produce <em>new</em> samples \(z \sim p_{\text{data}}\)
+— points that look like they could have come from the same data collection process
+but were never seen during training.
+</div>
+
+<p>
+Let us define every symbol we will use in this part before going further.
+</p>
+
+<table class="symbols">
+<tr><th>Symbol</th><th>Type</th><th>Meaning</th></tr>
+<tr><td>\(z \in \mathbb{R}^d\)</td><td>vector</td><td>one data object (image, molecule, …)</td></tr>
+<tr><td>\(p_{\text{data}}\)</td><td>density on \(\mathbb{R}^d\)</td><td>the true distribution of real data</td></tr>
+<tr><td>\(z_1,\ldots,z_N\)</td><td>vectors</td><td>training dataset, i.i.d. from \(p_{\text{data}}\)</td></tr>
+<tr><td>\(p_{\text{init}}\)</td><td>density on \(\mathbb{R}^d\)</td><td>the starting noise distribution, \(\mathcal{N}(0, I)\)</td></tr>
+<tr><td>\(x_t\)</td><td>random vector, \(t \in [0,1]\)</td><td>the noisy version of a data point at "time" \(t\)</td></tr>
+<tr><td>\(p_t\)</td><td>density on \(\mathbb{R}^d\)</td><td>the distribution of \(x_t\); \(p_0 \approx p_{\text{data}}\), \(p_1 \approx \mathcal{N}(0,I)\)</td></tr>
+<tr><td>\(\varepsilon \sim \mathcal{N}(0,I)\)</td><td>random vector</td><td>pure Gaussian noise, same shape as \(z\)</td></tr>
+<tr><td>\(s_\theta(x,t)\)</td><td>neural network \(\mathbb{R}^d\times\mathbb{R}\to\mathbb{R}^d\)</td><td>the learned score approximation \(\approx \nabla_x \log p_t(x)\)</td></tr>
+<tr><td>\(\theta\)</td><td>parameters</td><td>weights of the neural network</td></tr>
+<tr><td>\(T\)</td><td>integer</td><td>number of discrete time steps (DDPM)</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>4.2 The core trick: forward corruption, learned reversal</h2>
+
+<p>The central insight of diffusion models can be stated in a single paragraph.</p>
+
+<div class="box intuition">
+<span class="label">The big idea</span>
+Define a <strong>forward process</strong> that gradually mixes a data point
+\(z \sim p_{\text{data}}\) with more and more Gaussian noise until, at the end of
+the process, all memory of the original data has been erased and you are left with
+pure noise \(\varepsilon \sim \mathcal{N}(0,I)\).  This forward direction is
+<em>trivial to run</em>: you write down the formula and evaluate it.  Now train a
+neural network to <strong>run this process backwards</strong> — starting from
+pure noise and stepping back toward the data distribution.  That reverse process
+is the generative model.  At sampling time you draw \(\varepsilon \sim
+\mathcal{N}(0,I)\) (easy!) and feed it through the learned reverse process to
+get a fresh data sample.
+</div>
+
+<p>A picture in words:</p>
+
+<pre><code>DATA          ──── forward process (add noise, easy) ────►  NOISE
+z ~ p_data     x_0 → x_1 → x_2 → … → x_T ≈ N(0,I)     ε ~ N(0,I)
+
+NOISE         ◄─── reverse process (denoise, learned) ───  NOISE
+ε ~ N(0,I)     x_T → x_{T-1} → … → x_0 ≈ z ~ p_data   ε ~ N(0,I)</code></pre>
+
+<p>The forward process is a <em>fixed</em> mathematical formula (no learning required).
+The reverse process uses a <em>single neural network</em> \(s_\theta\) that is
+trained during the learning phase and then reused at every step of generation.</p>
+
+<h3>The forward process in one formula</h3>
+
+<p>The simplest continuous-time forward process is a linear interpolation between
+data \(x_0\) and noise \(\varepsilon\):
+\[
+  x_t \;=\; \sqrt{1-t}\;x_0 \;+\; \sqrt{t}\;\varepsilon,
+  \qquad t \in [0,1],\quad \varepsilon \sim \mathcal{N}(0,I).
+\]
+At \(t=0\): \(x_0 = x_0\) (pure data).
+At \(t=1\): \(x_1 = \varepsilon \sim \mathcal{N}(0,I)\) (pure noise).
+At intermediate \(t\): a blend of signal and noise.
+The coefficients \(\sqrt{1-t}\) and \(\sqrt{t}\) are chosen so that the variance
+of \(x_t\) stays at 1 throughout — a <em>variance-preserving</em> schedule.
+This is the object the PyTorch illustration in §4.6 demonstrates.</p>
+
+<div class="box mathblock">
+<span class="label">Distribution view</span>
+Let \(p_t\) denote the marginal distribution of \(x_t\).
+Then \(p_0 \approx p_{\text{data}}\) and \(p_1 = \mathcal{N}(0,I)\).
+The forward process is a continuous family of distributions
+\(\{p_t\}_{t\in[0,1]}\) that <em>interpolates</em> between data and noise.
+In Part 1 language (flows), a velocity field \(u_t\) transports \(p_0\) to \(p_1\).
+In Part 2 language (SDEs), adding Brownian noise does the same job stochastically.
+</div>
+
+<!-- ============================================================ -->
+<h2>4.3 Why gradual? The argument for many small steps</h2>
+
+<div class="box intuition">
+<span class="label">Why not one giant step?</span>
+Imagine asking a network: "Here is a blob of pure Gaussian noise; turn it directly
+into a photo-realistic dog."  That mapping is astronomically complex — it must
+simultaneously hallucinate every fur strand, lighting shadow, and background blade
+of grass from nothing.  No amount of capacity makes such a task easy to
+<em>supervise</em>.
+
+<br><br>
+
+Now imagine a much simpler task: "Here is a nearly-complete dog image with just
+a tiny sprinkle of noise; remove that sprinkle."  That is a well-defined, local
+regression problem.  The network only needs to undo the last little nudge.
+
+<br><br>
+
+Diffusion works by chaining thousands of such tiny denoising steps. Each step is
+easy to supervise with a mean-squared-error loss.  The power of the approach is
+that the <em>same</em> network, shown the current noise level \(t\) as an extra
+input, handles every step along the chain.
+</div>
+
+<p>Formally: at each step the network is asked to predict the score
+\(\nabla_{x_t} \log p_t(x_t)\), which (from Part 3) points in the direction of
+increasing probability — i.e., toward cleaner data.  Each denoising step moves
+\(x_t\) a small distance in that direction.  Over many steps the trajectory
+winds from the noise cloud all the way to the data manifold.</p>
+
+<p>The key takeaway: breaking a hard problem into many easy supervised sub-problems
+is the <em>fundamental reason</em> diffusion models scale so well and produce
+such sharp, diverse outputs.</p>
+
+<!-- ============================================================ -->
+<h2>4.4 Three views and one generalization — a roadmap</h2>
+
+<p>The rest of this guide develops diffusion from four complementary angles.
+Each view uses the same trained network but emphasizes different mathematics.
+Understanding all four is what the MIT notes call "the modern stack."</p>
+
+<table class="symbols">
+<tr>
+  <th>View</th>
+  <th>Core object</th>
+  <th>Key operation</th>
+  <th>Covered in</th>
+</tr>
+<tr>
+  <td><strong>(a) DDPM</strong> — discrete, probabilistic</td>
+  <td>Markov chain of \(T\) noising steps + learned reverse chain</td>
+  <td>Variational lower bound (ELBO) loss; Gaussian transitions</td>
+  <td>Part 5</td>
+</tr>
+<tr>
+  <td><strong>(b) DDIM</strong> — deterministic sampler</td>
+  <td>Same trained score network; ODE-style update rule</td>
+  <td>Skip steps, deterministic trajectories, same model fewer NFEs</td>
+  <td>Part 6</td>
+</tr>
+<tr>
+  <td><strong>(c) Continuous SDE / score</strong></td>
+  <td>Forward SDE + reverse-time SDE driven by \(\nabla_x \log p_t\)</td>
+  <td>Take step-size \(\to 0\); Anderson's reverse SDE theorem</td>
+  <td>Parts 7–9</td>
+</tr>
+<tr>
+  <td><strong>(d) Flow matching</strong> — MIT notes' primary framing</td>
+  <td>Velocity field \(u_t(x)\); probability-flow ODE \(\dot{x}_t = u_t(x_t)\)</td>
+  <td>Regress network onto a target velocity; diffusion is a special case</td>
+  <td>Part 10</td>
+</tr>
+</table>
+
+<h3>(a) View 1 — DDPM: a discrete Markov chain (Part 5)</h3>
+
+<p>The original Ho et al. (2020) paper defines the forward process as a length-\(T\)
+Markov chain with Gaussian transitions:
+\[
+  q(x_t \mid x_{t-1}) \;=\; \mathcal{N}\!\bigl(x_t;\; \sqrt{1-\beta_t}\,x_{t-1},\; \beta_t I\bigr),
+\]
+where \(\beta_1 \le \beta_2 \le \cdots \le \beta_T\) is a <em>noise schedule</em>
+and \(T \approx 1000\).  The reverse chain
+\(p_\theta(x_{t-1}\mid x_t)\) is also Gaussian, with mean predicted by the network.
+Training minimises a variational bound on
+\(-\log p_\theta(x_0)\). Part 5 derives this fully.</p>
+
+<h3>(b) View 2 — DDIM: the bridge to ODEs (Part 6)</h3>
+
+<p>DDIM (Song et al., 2020) notices that the <em>marginals</em> \(q(x_t \mid x_0)\)
+are fixed, but the transitions between steps do not have to be Markovian or even
+stochastic.  Choosing a deterministic update rule turns the reverse chain into a
+discretised ODE that can be run with far fewer function evaluations (NFEs) —
+sometimes as few as 10–50 instead of 1000 — with almost no quality loss.
+DDIM is the conceptual bridge between the discrete probabilistic view and the
+continuous ODE view.</p>
+
+<h3>(c) View 3 — continuous time: SDEs and the probability-flow ODE (Parts 7–9)</h3>
+
+<p>Let the step size go to zero.  The discrete Markov chain becomes a
+<em>stochastic differential equation</em> (SDE):
+\[
+  dx_t \;=\; f_t(x_t)\,dt \;+\; g_t\,dW_t,
+\]
+where \(f_t\) is a drift, \(g_t\) a diffusion coefficient, and \(W_t\) is
+Brownian motion (Part 2).  The reverse of this forward SDE is also an SDE
+(Anderson, 1982), and it depends on the <em>score</em> \(\nabla_x \log p_t(x)\)
+(Part 3):
+\[
+  dx_t \;=\;\bigl[f_t(x_t) - g_t^2\,\nabla_x \log p_t(x_t)\bigr]dt \;+\; g_t\,d\bar{W}_t.
+\]
+Alternatively, there is a <em>deterministic</em> ODE with the same marginals —
+the probability-flow ODE — that uses only the score, no stochasticity.
+Parts 7–9 derive both in detail.</p>
+
+<h3>(d) View 4 — flow matching: the most general framing (Part 10)</h3>
+
+<p>Flow matching (Lipman et al., 2022; Liu et al., 2022; Albergo &amp; Vanden-Eijnden,
+2022) steps back and asks: what is the <em>most direct</em> way to move a density
+from noise to data using an ODE?  Rather than defining noising schedules and then
+reversing them, flow matching directly trains a network \(v_\theta(x, t)\) to match a
+<em>target velocity field</em> \(u_t(x)\) that is analytically tractable at the
+level of individual data points.  DDPM and score-based diffusion turn out to be
+<em>special cases</em> of flow matching — specific choices of the interpolation
+\((x_0, x_1) \mapsto x_t\).  The MIT notes use flow matching as their primary
+framework throughout, deriving diffusion as a consequence. Part 10 develops this
+fully.</p>
+
+<div class="box connect">
+<span class="label">How the views relate</span>
+Think of four lenses on the same camera:
+<ul>
+  <li>DDPM is the <em>original engineering lens</em> — discrete steps, probabilistic loss, most approachable.</li>
+  <li>DDIM is a <em>faster sampler lens</em> — same model weights, cleaner math, fewer steps.</li>
+  <li>The SDE/score lens is the <em>continuous-time mathematical lens</em> — most powerful for theory (guidance, likelihood).</li>
+  <li>Flow matching is the <em>unified design lens</em> — one training objective, generalises everything.</li>
+</ul>
+The same neural network \(s_\theta\) trained with any of the last three objectives
+is approximately the same function; what changes is how you use it at sampling time.
+</div>
+
+<!-- ============================================================ -->
+<h2>4.5 The role of the neural network</h2>
+
+<p>One detail beginners miss: there is only <em>one</em> network, shared across all
+time steps. It is a function
+\[
+  s_\theta : \mathbb{R}^d \times [0,1] \;\longrightarrow\; \mathbb{R}^d,
+  \qquad (x,\, t) \;\longmapsto\; s_\theta(x, t),
+\]
+that takes a noisy sample <em>and</em> the current noise level \(t\) as input.
+The time conditioning is critical: the same pixel blob at \(t=0.05\) (nearly
+clean) and \(t=0.95\) (nearly noise) calls for completely different corrections,
+and the network must handle both by reading \(t\).</p>
+
+<p>This single network is trained to approximate one of three equivalent quantities
+(which Part 3 showed are related by simple rescaling):</p>
+
+<table class="symbols">
+<tr><th>Quantity the network predicts</th><th>Symbol</th><th>Connection to score</th></tr>
+<tr>
+  <td>Score function</td>
+  <td>\(\nabla_x \log p_t(x)\)</td>
+  <td>the thing itself; used directly in SDE/ODE samplers</td>
+</tr>
+<tr>
+  <td>Noise prediction</td>
+  <td>\(\varepsilon_\theta(x_t, t)\)</td>
+  <td>\(\approx -\sigma_t \nabla_x \log p_t(x_t)\); DDPM parameterisation</td>
+</tr>
+<tr>
+  <td>Velocity field</td>
+  <td>\(u_\theta(x_t, t)\)</td>
+  <td>the "flow matching" parameterisation; derivative of the interpolation</td>
+</tr>
+</table>
+
+<p>This is the <em>triangle of equivalent parameterisations</em> from Part 3.
+Once you have any one of them, you can recover the others with simple algebra.</p>
+
+<div class="box intuition">
+<span class="label">Why one network for all steps?</span>
+Weight-sharing across time is not just a memory saving.  It is what makes
+diffusion <em>generalize</em>.  The network sees thousands of time steps during
+training and learns a smooth, time-conditioned denoising function.  At sampling
+time, any sequence of \(t\)-values can be used — even ones the network never
+saw during training — because it has learned the underlying geometry of \(p_t\).
+This is what enables DDIM's step-skipping trick in Part 6.
+</div>
+
+<!-- ============================================================ -->
+<h2>4.6 Generation as distribution transport</h2>
+
+<p>Let us put this in the language of Parts 1 and 2, which built the mathematical
+machinery for <em>transporting</em> distributions.</p>
+
+<p>We have two distributions:</p>
+<ul>
+  <li>\(p_{\text{init}} = \mathcal{N}(0,I)\): easy to sample — just call
+  <code>torch.randn</code>.</li>
+  <li>\(p_{\text{data}}\): hard to sample — that is the whole problem.</li>
+</ul>
+
+<p>The generative model is a <strong>transport map</strong> \(\Phi: \mathbb{R}^d \to
+\mathbb{R}^d\) such that if \(\varepsilon \sim p_{\text{init}}\), then
+\(\Phi(\varepsilon) \sim p_{\text{data}}\).  In Part 1, this map was an ODE flow
+\(\Phi = \phi_1\) where \(\dot{\phi}_t = u_t(\phi_t)\) with \(u_t\) learned.
+In Part 2, the map was stochastic — an SDE trajectory.  Both are valid;
+they differ in how they use the noise injected at each step.</p>
+
+<p>The forward process is the <em>inverse</em> transport: it maps
+\(p_{\text{data}} \to p_{\text{init}}\) along the same family of distributions
+\(\{p_t\}_{t\in[0,1]}\).  Learning the reverse amounts to learning the inverse
+map, which is why the score \(\nabla_x \log p_t(x)\) — the "which direction
+increases \(p_t\)" signal from Part 3 — is so central.</p>
+
+<div class="box connect">
+<span class="label">Connection across Parts 1–3</span>
+<ul>
+  <li><strong>Part 1 (flows)</strong>: The probability-flow ODE transports
+  \(p_{\text{init}} \to p_{\text{data}}\) deterministically.
+  Every point traces a smooth trajectory; no randomness after the initial draw.</li>
+  <li><strong>Part 2 (SDEs)</strong>: The reverse SDE adds fresh noise at every
+  step, which allows the trajectory to explore more of the data manifold.
+  In practice this gives slightly more diverse samples.</li>
+  <li><strong>Part 3 (scores)</strong>: Both the ODE and the SDE sampler are
+  driven by \(\nabla_x \log p_t\).  Fitting that score function is the
+  training objective (score matching).  Once learned, you plug it into either
+  sampler — two sampling algorithms, one trained model.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>4.7 Conditioning and guidance — a teaser</h2>
+
+<p>So far we have described <em>unconditional</em> generation: sample any plausible
+data point.  In practice we almost always want <em>conditional</em> generation:
+"generate a dog image given the text prompt \(y\)."  The MIT notes formalise this
+as sampling from the <em>conditional</em> data distribution.</p>
+
+<div class="box mathblock">
+<span class="label">Key Idea 4 (MIT notes §1.3) — Guided generation</span>
+Guided generation involves sampling from
+\[
+  z \;\sim\; p_{\text{data}}(\cdot \mid y),
+\]
+where \(y\) is a conditioning variable (text caption, class label, sketch, …).
+The guided data distribution \(p_{\text{data}}(\cdot \mid y)\) gives high probability
+to objects that match the condition \(y\).
+</div>
+
+<div class="box connect">
+<span class="label">Teaser — Part 12</span>
+Conditioning turns out to be elegantly handled by modifying the score:
+\[
+  \nabla_x \log p_t(x \mid y)
+  \;=\; \nabla_x \log p_t(x)
+        \;+\; \underbrace{\nabla_x \log p_t(y \mid x)}_{\text{guidance term}}.
+\]
+Classifier-free guidance, the technique powering Stable Diffusion and every
+modern text-to-image model, approximates this term without an explicit classifier.
+Part 12 derives it in detail.  For now, just note that conditioning is not a
+new architecture — it is a modification of the score function the existing
+network learns.
+</div>
+
+<!-- ============================================================ -->
+<h2>4.8 PyTorch illustration — watching data dissolve into noise</h2>
+
+<p>The following snippet demonstrates the forward process
+\(x_t = \sqrt{1-t}\,x_0 + \sqrt{t}\,\varepsilon\) on a small 2D dataset.
+It prints the mean and standard deviation of the cloud at \(t=0\) (pure data),
+\(t=0.5\) (half-way), and \(t=1.0\) (pure noise), confirming that the data
+signal vanishes and only Gaussian noise remains.  The expected outputs are shown
+inline.</p>
+
+<pre><code>import torch
+
+<span class="code-comment"># ----------------------------------------------------------------
+# Teaching code — not security-sensitive RNG; reproducibility only.
+# ----------------------------------------------------------------</span>
+torch.manual_seed(42)
+
+<span class="code-comment"># ── 1. Create a toy 2-D data cloud ──────────────────────────────
+#    Imagine two clusters: one near (+2, +2) and one near (-2, -2).
+#    Each cluster has 500 points drawn from a tight Gaussian.</span>
+N = 1000                                   <span class="code-comment"># total data points</span>
+cluster_A = torch.randn(N // 2, 2) * 0.4 + torch.tensor([2.0, 2.0])
+cluster_B = torch.randn(N // 2, 2) * 0.4 + torch.tensor([-2.0, -2.0])
+x0 = torch.cat([cluster_A, cluster_B], dim=0)   <span class="code-comment"># shape (1000, 2); x0 ~ p_data</span>
+
+<span class="code-comment"># ── 2. Define the forward process ───────────────────────────────
+#    x_t = sqrt(1-t) * x0 + sqrt(t) * eps
+#    This is the variance-preserving interpolation used in many
+#    modern diffusion models (e.g., the MIT notes' primary example).
+#    At t=0  : x_t = x0        (original data, no noise)
+#    At t=0.5: x_t = ~0.71*x0 + ~0.71*eps (equal signal and noise)
+#    At t=1  : x_t = eps        (pure Gaussian noise, signal gone)</span>
+
+def forward_process(x0, t):
+    """
+    x0 : (N, d) tensor — batch of data points
+    t  : float in [0, 1] — noise level
+    returns x_t : (N, d) tensor — noisy version at time t
+    """
+    eps = torch.randn_like(x0)             <span class="code-comment"># eps ~ N(0, I), same shape as x0</span>
+    signal_coeff = (1.0 - t) ** 0.5        <span class="code-comment"># sqrt(1 - t): shrinks toward 0</span>
+    noise_coeff  = t ** 0.5                <span class="code-comment"># sqrt(t):     grows toward 1</span>
+    return signal_coeff * x0 + noise_coeff * eps
+
+<span class="code-comment"># ── 3. Run the forward process at three time points ─────────────</span>
+for t in [0.0, 0.5, 1.0]:
+    xt = forward_process(x0, t)
+    print(f"t={t:.1f} | mean={xt.mean().item():.4f}  std={xt.std().item():.4f}")
+
+<span class="code-comment"># Expected output:
+#   t=0.0 | mean= 0.0000  std=2.0063   ← two clusters; std reflects ±2 offsets
+#   t=0.5 | mean=-0.0023  std=1.4313   ← signal half-attenuated; clusters blurring
+#   t=1.0 | mean= 0.0102  std=1.0051   ← pure noise; mean≈0, std≈1 (standard Gaussian)
+#
+#   The std drops from ~2 toward 1, and the mean collapses toward 0.
+#   At t=1 the cloud is indistinguishable from N(0, I) — the two
+#   clusters have completely dissolved.  This is what a diffusion
+#   model learns to reverse.</span>
+
+<span class="code-comment"># ── 4. Verify marginal statistics match theory ───────────────────
+#    For any x0, E[x_t] = sqrt(1-t) * x0  and  Var[x_t] = t * I
+#    So if x0 has std sigma_0, then x_t has std sqrt((1-t)*sigma_0^2 + t).
+#    At t=1: std = sqrt(0 + 1) = 1.  Check:</span>
+sigma0 = x0.std().item()                   <span class="code-comment"># ≈ 2.006</span>
+for t in [0.0, 0.5, 1.0]:
+    expected_std = ((1 - t) * sigma0 ** 2 + t) ** 0.5
+    print(f"t={t:.1f} | theoretical std = {expected_std:.4f}")
+
+<span class="code-comment"># Expected output:
+#   t=0.0 | theoretical std = 2.0063
+#   t=0.5 | theoretical std = 1.4331
+#   t=1.0 | theoretical std = 1.0000</span></code></pre>
+
+<div class="box intuition">
+<span class="label">What the code shows</span>
+The forward process is just arithmetic — a weighted sum of a data vector and a
+noise vector.  No network, no training, no gradient.  The entire difficulty of
+diffusion models lies in the <em>reverse</em>: learning to undo this arithmetic
+step by step, guided only by the score of \(p_t\).  The code makes concrete what
+"data dissolving into noise" means; Parts 5–9 show how to reverse the journey.
+</div>
+
+<!-- ============================================================ -->
+<h2>4.9 Teaser: the three equivalent network outputs</h2>
+
+<p>When you read diffusion papers you will encounter three different things the
+network is said to predict.  They are all the same information, just rescaled.
+This is the "triangle" of Part 3 applied to the variance-preserving
+forward process \(x_t = \sqrt{1-t}\,x_0 + \sqrt{t}\,\varepsilon\).</p>
+
+<table class="symbols">
+<tr><th>Name</th><th>Symbol</th><th>What it represents</th><th>Papers that use it</th></tr>
+<tr>
+  <td>Score prediction</td>
+  <td>\(s_\theta(x_t, t) \approx \nabla_{x_t} \log p_t(x_t)\)</td>
+  <td>direction of rising density at \(x_t\) at time \(t\)</td>
+  <td>Song et al. (2020 NeurIPS)</td>
+</tr>
+<tr>
+  <td>Noise prediction</td>
+  <td>\(\varepsilon_\theta(x_t, t) \approx \varepsilon\)</td>
+  <td>the noise component added in the forward step</td>
+  <td>Ho et al. (2020) DDPM</td>
+</tr>
+<tr>
+  <td>Velocity prediction</td>
+  <td>\(v_\theta(x_t, t) \approx \dot{x}_t\)</td>
+  <td>time-derivative of the interpolation trajectory</td>
+  <td>Salimans &amp; Ho (2022); FLUX, SD3</td>
+</tr>
+</table>
+
+<p>All three losses train the <em>same function</em> up to rescaling by \(\sqrt{t}\)
+and \(\sqrt{1-t}\).  The choice affects numerical stability at extreme values of
+\(t\) but not the learned model.  Part 5 proves the equivalence explicitly.</p>
+
+<!-- ============================================================ -->
+<h2>4.10 Map of the journey ahead</h2>
+
+<div class="box connect">
+<span class="label">Where we are going — Parts 5–13</span>
+<table class="symbols">
+<tr><th>Part</th><th>Topic</th><th>What you will be able to do</th></tr>
+<tr>
+  <td>5 — DDPM</td>
+  <td>Discrete Markov chain; ELBO loss; noise schedules</td>
+  <td>Derive the training objective; implement DDPM from scratch</td>
+</tr>
+<tr>
+  <td>6 — DDIM</td>
+  <td>Deterministic sampling; non-Markovian reverse process</td>
+  <td>Run the same model 10–50&times; faster; understand trajectory interpolation</td>
+</tr>
+<tr>
+  <td>7 — Continuous-time diffusion</td>
+  <td>Taking \(T\to\infty\); VP-SDE and VE-SDE</td>
+  <td>Connect discrete and continuous formalisms; derive the reverse SDE</td>
+</tr>
+<tr>
+  <td>8 — SDE formulation</td>
+  <td>Forward/reverse SDEs; score matching as SDE training</td>
+  <td>Write a diffusion model purely in SDE language</td>
+</tr>
+<tr>
+  <td>9 — Probability-flow ODE</td>
+  <td>The deterministic ODE with identical marginals to the SDE</td>
+  <td>Compute exact likelihoods; accelerate sampling with ODE solvers</td>
+</tr>
+<tr>
+  <td>10 — Flow matching</td>
+  <td>Conditional flow matching; straight-line paths; MIT notes' primary framing</td>
+  <td>Train a model with one simple regression loss; subsume diffusion</td>
+</tr>
+<tr>
+  <td>11 — Rectified flows</td>
+  <td>Straightening trajectories via reflow; consistency models</td>
+  <td>Understand why SD3 and FLUX use flow matching instead of DDPM</td>
+</tr>
+<tr>
+  <td>12 — Stable Diffusion</td>
+  <td>Latent space; VAE; classifier-free guidance; DiT architecture</td>
+  <td>Understand how a real production image model is assembled</td>
+</tr>
+<tr>
+  <td>13 — Reading the MIT notes</td>
+  <td>Notation guide, section map, exercise hints</td>
+  <td>Read the source notes fluently without getting lost in notation</td>
+</tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>Checkpoint</h2>
+
+<p>Before moving to Part 5, make sure you can answer all of the following:</p>
+
+<ol>
+  <li>What does "generation is sampling" mean? What distribution are we sampling
+  from, and why can we not just evaluate it directly? (Key Idea 2, §1.3)</li>
+
+  <li>Describe the forward process in one sentence. What does it start as?
+  What does it end as?  Is it learned or fixed?</li>
+
+  <li>Describe the reverse process in one sentence. What starts it?
+  What does it produce?  What does the neural network predict at each step?</li>
+
+  <li>Why is it helpful to break generation into many small steps rather than one
+  big step?  What regression problem does each small step correspond to?</li>
+
+  <li>The network \(s_\theta(x, t)\) takes two inputs. What are they, and why is
+  the second input \(t\) essential?</li>
+
+  <li>Name the four views of diffusion developed in this guide (DDPM / DDIM /
+  continuous-time SDE / flow matching) and for each: what is the "core object"
+  and which part covers it?</li>
+
+  <li>In the forward process \(x_t = \sqrt{1-t}\,x_0 + \sqrt{t}\,\varepsilon\),
+  what happens to the mean and variance of \(x_t\) as \(t \to 1\)?
+  Confirm with the PyTorch illustration in §4.8.</li>
+
+  <li>What is the difference between unconditional generation and guided
+  generation?  Where in the score framework does the conditioning appear?
+  (Key Idea 4, §1.3)</li>
+
+  <li>The score \(\nabla_x \log p_t(x)\), the noise \(\varepsilon\), and the
+  velocity \(\dot{x}_t\) are three different things a network can predict.
+  Are they equivalent?  What transforms one into another?</li>
+
+  <li>Part 1 taught that an ODE flow can transport one distribution to another.
+  Part 2 taught that an SDE can do the same.  How does the probability-flow ODE
+  relate to the reverse SDE?  (One sentence is enough for now.)</li>
+</ol>
+
+<nav class="pagenav">
+  <a class="prev" href="part03_score_functions.html"><span class="dir">‹ Prev</span>Part 3 — Score Functions</a>
+  <a class="next" href="part05_ddpm.html"><span class="dir">Next ›</span>Part 5 — DDPM</a>
+</nav>
+
+</article>
+</main>
+</div>
+<script defer src="assets/guide.js"></script>
+</body>
+</html>

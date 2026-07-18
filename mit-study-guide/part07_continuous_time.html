@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Part 7 — Continuous-Time Diffusion · Diffusion Study Guide</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [["\\(", "\\)"]], displayMath: [["\\[", "\\]"]], tags: "none" },
+    options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle contents">☰</button>
+<div class="layout">
+<nav class="toc">
+  <a href="index.html"><strong>◆ Diffusion Study Guide</strong></a>
+  <h2>Foundations</h2>
+  <a href="part00_math_foundations.html"><span class="part-num">0</span>Mathematical Foundations</a>
+  <a href="part01_differential_equations.html"><span class="part-num">1</span>Differential Equations</a>
+  <a href="part02_probability_stochastic.html"><span class="part-num">2</span>Probability &amp; Stochastic Processes</a>
+  <a href="part03_score_functions.html"><span class="part-num">3</span>Score Functions</a>
+  <h2>Diffusion Core</h2>
+  <a href="part04_diffusion_models.html"><span class="part-num">4</span>Diffusion Models (big picture)</a>
+  <a href="part05_ddpm.html"><span class="part-num">5</span>DDPM</a>
+  <a href="part06_ddim.html"><span class="part-num">6</span>DDIM</a>
+  <a href="part07_continuous_time.html"><span class="part-num">7</span>Continuous-Time Diffusion</a>
+  <h2>Continuous Formulation</h2>
+  <a href="part08_sde_formulation.html"><span class="part-num">8</span>SDE Formulation</a>
+  <a href="part09_probability_flow_ode.html"><span class="part-num">9</span>Probability Flow ODE</a>
+  <a href="part10_flow_matching.html"><span class="part-num">10</span>Flow Matching</a>
+  <a href="part11_rectified_flows.html"><span class="part-num">11</span>Rectified Flows</a>
+  <h2>Systems &amp; Reading</h2>
+  <a href="part12_stable_diffusion.html"><span class="part-num">12</span>Stable Diffusion</a>
+  <a href="part13_reading_the_notes.html"><span class="part-num">13</span>Reading the MIT Notes</a>
+  <a href="part14_discrete_diffusion.html"><span class="part-num">14</span>Discrete Diffusion</a>
+</nav>
+<main>
+<article>
+
+<h1><span class="kicker">Part 7</span>Continuous-Time Diffusion</h1>
+
+<p class="muted">Parts 5 and 6 treated DDPM and DDIM as discrete Markov chains — a
+finite sequence of \(T\) noising steps. This part takes the conceptual step that unlocks
+everything in Parts 8–13: we let \(T \to \infty\) so that the step size shrinks to zero,
+and watch the discrete chain melt into a <em>continuous-time SDE</em>. The math is not
+harder — it is actually cleaner — and the payoff is enormous: arbitrary ODE/SDE solvers,
+decoupled training and sampling, and the theoretical machinery of reverse-time dynamics.</p>
+
+<div class="box prereq">
+<span class="label">Prerequisites</span>
+<ul>
+  <li><strong>Part 2</strong> — SDEs of the form \(dx_t = f_t(x_t)\,dt + g_t\,dW_t\),
+      Brownian motion increments \(\Delta W \sim \mathcal{N}(0, \Delta t)\),
+      Euler–Maruyama updates, and the Ornstein–Uhlenbeck process (Example 6 in the MIT notes).</li>
+  <li><strong>Part 3</strong> — the score function \(\nabla_x \log p_t(x)\) and why it points
+      uphill on the log-density.</li>
+  <li><strong>Part 5</strong> — the DDPM forward chain \(q(x_t | x_{t-1})\), the noise
+      schedule \(\beta_t\), the closed-form marginal
+      \(q(x_t | x_0) = \mathcal{N}(x_t;\,\sqrt{\bar\alpha_t}\,x_0,\;(1-\bar\alpha_t)I)\),
+      and how \(\bar\alpha_t = \prod_{s=1}^{t}(1-\beta_s)\).</li>
+  <li><strong>Part 6</strong> — DDIM as a deterministic (ODE-like) sampler that skips steps.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>7.1 From discrete steps to a continuous flow — the limiting argument</h2>
+
+<div class="box intuition">
+<span class="label">Intuition first</span>
+<p>Imagine zooming in on a DDPM forward pass. At every step you slightly shrink the signal
+and splatter a tiny amount of Gaussian noise. With \(T = 1000\) steps the jumps are
+small. With \(T = 10^6\) the jumps are microscopic. In the limit each jump becomes
+infinitesimal — but they never stop. That unending drizzle of infinitesimal noise is
+precisely what a stochastic differential equation captures.</p>
+</div>
+
+<h3>Starting point — the DDPM one-step update</h3>
+
+<p>Recall the DDPM forward step (Part 5). Given a continuous noise schedule, at discrete
+time index \(t \in \{1, \ldots, T\}\) with per-step variance \(\beta_t \in (0,1)\):</p>
+
+\[
+  x_t \;=\; \sqrt{1 - \beta_t}\; x_{t-1} \;+\; \sqrt{\beta_t}\; z_t,
+  \qquad z_t \sim \mathcal{N}(0, I).
+  \tag{DDPM-step}
+\]
+
+<p>We want to pass to continuous time. Let \(T\) be the total number of steps and
+define a continuous time variable \(t \in [0, 1]\). Each discrete step corresponds
+to an interval of width</p>
+\[
+  \Delta t \;=\; \frac{1}{T}.
+\]
+<p>Replace the discrete index with a continuous schedule \(\beta(t) \geq 0\), and let
+each per-step variance equal</p>
+\[
+  \beta_{\text{step}} \;=\; \beta(t)\,\Delta t,
+\]
+<p>so that total "noise budget" over \([0, 1]\) is \(\int_0^1 \beta(t)\,dt\) regardless
+of how many steps we take. The update becomes</p>
+\[
+  x_{t+\Delta t}
+  \;=\; \sqrt{1 - \beta(t)\,\Delta t}\; x_t \;+\; \sqrt{\beta(t)\,\Delta t}\; z,
+  \qquad z \sim \mathcal{N}(0,I).
+  \tag{7.1}
+\]
+
+<h3>Taylor-expanding the coefficient</h3>
+
+<p>For small \(\Delta t\) use the first-order Taylor approximation
+\(\sqrt{1 - \epsilon} \approx 1 - \tfrac{1}{2}\epsilon\):</p>
+
+\[
+  \sqrt{1 - \beta(t)\,\Delta t}
+  \;\approx\; 1 - \tfrac{1}{2}\,\beta(t)\,\Delta t.
+\]
+
+<div class="box mathblock">
+<span class="label">The expansion, line by line</span>
+<p>Substitute the approximation into (7.1):</p>
+\[
+  x_{t+\Delta t}
+  \;\approx\;
+  \bigl(1 - \tfrac{1}{2}\,\beta(t)\,\Delta t\bigr)\,x_t
+  \;+\; \sqrt{\beta(t)\,\Delta t}\; z.
+\]
+<p>Rearrange to isolate the <em>change</em> \(\Delta x = x_{t+\Delta t} - x_t\):</p>
+\[
+  \Delta x
+  \;=\; x_{t+\Delta t} - x_t
+  \;\approx\;
+  -\tfrac{1}{2}\,\beta(t)\,x_t\;\Delta t
+  \;+\; \sqrt{\beta(t)}\;\underbrace{\sqrt{\Delta t}\; z}_{\Delta W_t}.
+\]
+<p>The key identification: \(\sqrt{\Delta t}\,z\) with \(z \sim \mathcal{N}(0,I)\) is
+exactly the Brownian increment \(\Delta W_t \sim \mathcal{N}(0,\Delta t \cdot I)\)
+(Part 2, Definition of Brownian motion, normal-increments property). Taking
+\(\Delta t \to 0\) gives the SDE:</p>
+\[
+  \boxed{
+    dx_t \;=\; -\tfrac{1}{2}\,\beta(t)\,x_t\;dt \;+\; \sqrt{\beta(t)}\;dW_t.
+  }
+  \tag{VP-SDE}
+\]
+</div>
+
+<p>Every symbol is now defined:</p>
+
+<table class="symbols">
+  <thead><tr><th>Symbol</th><th>Shape / domain</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td>\(x_t\)</td><td>\(\mathbb{R}^d\), \(t \in [0,1]\)</td>
+        <td>Noisy data point at continuous time \(t\)</td></tr>
+    <tr><td>\(\beta(t)\)</td><td>\(\mathbb{R}_{\geq 0}\), scalar</td>
+        <td>Noise schedule (continuous analogue of \(\beta_t\))</td></tr>
+    <tr><td>\(dt\)</td><td>infinitesimal scalar</td>
+        <td>Deterministic time increment</td></tr>
+    <tr><td>\(dW_t\)</td><td>\(\mathbb{R}^d\)</td>
+        <td>Brownian increment; \(dW_t \sim \mathcal{N}(0, dt \cdot I)\)</td></tr>
+    <tr><td>\(-\tfrac{1}{2}\beta(t)x_t\)</td><td>\(\mathbb{R}^d\)</td>
+        <td><em>Drift</em> — pulls \(x_t\) linearly toward 0</td></tr>
+    <tr><td>\(\sqrt{\beta(t)}\)</td><td>\(\mathbb{R}_{\geq 0}\)</td>
+        <td><em>Diffusion coefficient</em> — scales the noise injection</td></tr>
+  </tbody>
+</table>
+
+<div class="box intuition">
+<span class="label">Why \(\sqrt{\Delta t}\) on the noise?</span>
+<p>Variance is additive for independent Gaussian increments, but standard deviation
+is not. If you take \(n\) steps of size \(\Delta t = 1/n\), the total noise variance
+accumulated must stay \(O(1)\) regardless of \(n\). Each step adds variance
+\(\beta(t)\,\Delta t\). To get standard deviation \(\sqrt{\beta(t)\,\Delta t}\)
+you scale the unit Gaussian by \(\sqrt{\Delta t}\). This is the famous
+\(\sqrt{\Delta t}\) scaling that distinguishes SDEs from ODEs — it is why Brownian
+paths are continuous but nowhere differentiable.</p>
+</div>
+
+<div class="box connect">
+<span class="label">Connection — Euler–Maruyama (Part 2, Algorithm 2)</span>
+<p>Compare the update we just derived:</p>
+\[
+  x_{t+\Delta t} \approx x_t - \tfrac{1}{2}\beta(t)\,x_t\,\Delta t
+  + \sqrt{\beta(t)}\,\sqrt{\Delta t}\,z
+\]
+<p>with the Euler–Maruyama scheme from MIT notes Algorithm 2 (§2.2):</p>
+\[
+  X_{t+h} = X_t + h\,u_t(X_t) + \sigma_t\,\sqrt{h}\,\varepsilon,
+  \quad \varepsilon \sim \mathcal{N}(0,I).
+\]
+<p>They are <em>identical</em> with \(u_t(x) = -\tfrac{1}{2}\beta(t)x\),
+\(\sigma_t = \sqrt{\beta(t)}\), \(h = \Delta t\). The discrete DDPM step is nothing
+but one Euler–Maruyama step applied to the VP-SDE.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7.2 The two standard forward SDEs (VP and VE)</h2>
+
+<p>Song et al. (2021) — the paper that unified score-based generative modelling with
+SDEs — named two canonical forward SDEs that correspond to the two main families of
+discrete-time diffusion models.</p>
+
+<h3>Variance-Preserving (VP) SDE</h3>
+
+<p>This is the SDE we just derived. Rewriting with the standard notation
+\(f(x,t)\) for drift and \(g(t)\) for diffusion coefficient:</p>
+
+\[
+  dx_t = \underbrace{-\tfrac{1}{2}\,\beta(t)\,x_t}_{f(x_t,\,t)}\,dt
+  \;+\; \underbrace{\sqrt{\beta(t)}}_{g(t)}\;dW_t.
+  \tag{VP-SDE}
+\]
+
+<p>The name "Variance-Preserving" comes from the fact that, if we track the marginal
+variance \(\mathbb{E}[\|x_t\|^2]\), the drift term
+<em>shrinks</em> it while the diffusion term <em>grows</em> it, and the schedule
+can be tuned so that the process converges to a <em>bounded</em> distribution
+\(\mathcal{N}(0, I)\) at \(t=1\). The marginal variance stays on the order of 1 throughout.</p>
+
+<div class="box connect">
+<span class="label">Connection — OU process (MIT notes Example 6)</span>
+<p>The MIT notes (§2.2, Example 6) define the Ornstein–Uhlenbeck process as:</p>
+\[
+  dX_t = -\theta X_t\,dt + \sigma\,dW_t.
+\]
+<p>The VP-SDE is an OU process with <em>time-varying</em> coefficients:
+\(\theta(t) = \tfrac{1}{2}\beta(t)\) and \(\sigma(t) = \sqrt{\beta(t)}\).
+For constant \(\beta\) this is exactly the OU process, which converges to
+\(\mathcal{N}(0, I)\) as \(t \to \infty\) when \(\theta = \sigma^2/2\) — precisely
+the relation we have here.</p>
+</div>
+
+<h3>Variance-Exploding (VE) SDE</h3>
+
+<p>The second standard SDE has <em>no drift</em> — it only injects noise, allowing the
+variance to grow unboundedly:</p>
+
+\[
+  dx_t \;=\; \sqrt{\frac{d[\sigma^2(t)]}{dt}}\;dW_t.
+  \tag{VE-SDE}
+\]
+
+<p>Here \(\sigma(t)\) is a monotonically increasing function (the noise standard
+deviation schedule). Because there is no shrinking drift, the variance of \(x_t\)
+explodes as \(t \to 1\), hence the name. The marginal at time \(t\) is
+\(p_t(x|x_0) = \mathcal{N}(x;\,x_0,\,\sigma^2(t)I)\) — the mean is unchanged,
+only the variance grows.</p>
+
+<h3>Side-by-side comparison</h3>
+
+<table class="symbols">
+  <thead>
+    <tr>
+      <th>Property</th>
+      <th>VP-SDE (DDPM limit)</th>
+      <th>VE-SDE (NCSN limit)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Drift \(f(x,t)\)</td>
+      <td>\(-\tfrac{1}{2}\beta(t)\,x_t\)</td>
+      <td>\(0\)</td>
+    </tr>
+    <tr>
+      <td>Diffusion \(g(t)\)</td>
+      <td>\(\sqrt{\beta(t)}\)</td>
+      <td>\(\sqrt{d\sigma^2/dt}\)</td>
+    </tr>
+    <tr>
+      <td>Marginal mean at \(t=1\)</td>
+      <td>\(\to 0\) (signal decays)</td>
+      <td>\(= x_0\) (signal preserved)</td>
+    </tr>
+    <tr>
+      <td>Marginal variance at \(t=1\)</td>
+      <td>\(\to 1\) (bounded)</td>
+      <td>\(= \sigma^2(1) \gg 1\) (explodes)</td>
+    </tr>
+    <tr>
+      <td>Prior at \(t=1\)</td>
+      <td>\(\approx \mathcal{N}(0,I)\)</td>
+      <td>\(\approx \mathcal{N}(x_0, \sigma_{\max}^2 I)\)</td>
+    </tr>
+    <tr>
+      <td>Discrete analogue</td>
+      <td>DDPM</td>
+      <td>NCSN / score matching with annealing</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="box warn">
+<span class="label">Which one should I use?</span>
+<p>For most practical purposes — including DDPM-style image generation — use the VP-SDE.
+It converges to a standard Gaussian prior, which makes it easy to draw the initial noise
+sample at generation time. The VE-SDE requires knowing an appropriate \(\sigma_{\max}\)
+for your data, and the prior changes with \(x_0\). Parts 8–9 will mostly work with the
+VP-SDE form.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7.3 The marginal at time \(t\) — closed form for VP-SDE</h2>
+
+<p>One of the most useful facts about the VP-SDE is that, just as in discrete DDPM,
+we can <em>skip directly</em> from \(x_0\) to any \(x_t\) in one shot, without
+simulating every intermediate step.</p>
+
+<h3>Continuous analogue of \(\bar\alpha_t\)</h3>
+
+<p>In discrete DDPM (Part 5) we defined \(\bar\alpha_t = \prod_{s=1}^{t}(1-\beta_s)\).
+In continuous time the product becomes an exponential of an integral:</p>
+
+\[
+  \bar\alpha(t)
+  \;=\; \exp\!\left(-\int_0^t \beta(s)\,ds\right).
+  \tag{7.2}
+\]
+
+<div class="box mathblock">
+<span class="label">Why the exponential? Quick derivation</span>
+<p>In the discrete chain, \(\bar\alpha_t = \prod_{s=1}^{t}(1-\beta_s)\). Take logarithms:</p>
+\[
+  \log \bar\alpha_t
+  = \sum_{s=1}^{t} \log(1 - \beta_s)
+  \approx -\sum_{s=1}^{t} \beta_s
+  \quad (\text{since } \log(1-\epsilon) \approx -\epsilon \text{ for small } \epsilon).
+\]
+<p>As \(T \to \infty\) and \(\beta_s = \beta(s/T)/T\), the sum converges to a Riemann integral:</p>
+\[
+  -\sum_{s=1}^{t} \beta_s \;\longrightarrow\; -\int_0^t \beta(s)\,ds.
+\]
+<p>Exponentiating both sides gives equation (7.2).</p>
+</div>
+
+<h3>The Gaussian marginal</h3>
+
+<p>For the VP-SDE, the marginal distribution of \(x_t\) given \(x_0\) is:</p>
+
+\[
+  \boxed{
+    p_t(x_t \mid x_0)
+    = \mathcal{N}\!\left(x_t;\;\sqrt{\bar\alpha(t)}\;x_0,\;\bigl(1-\bar\alpha(t)\bigr)I\right).
+  }
+  \tag{7.3}
+\]
+
+<p>That is, we can sample \(x_t\) directly as:</p>
+\[
+  x_t = \sqrt{\bar\alpha(t)}\;x_0 + \sqrt{1 - \bar\alpha(t)}\;\varepsilon,
+  \qquad \varepsilon \sim \mathcal{N}(0, I).
+\]
+
+<p>This is the <em>reparameterisation trick</em> — identical to what DDPM uses, but now
+valid for any \(t \in [0,1]\) as a real number.</p>
+
+<h3>Breakdown of every piece</h3>
+
+<table class="symbols">
+  <thead><tr><th>Piece</th><th>Value at \(t=0\)</th><th>Value at \(t=1\)</th><th>Role</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>\(\bar\alpha(t)\)</td>
+      <td>\(1\)</td>
+      <td>\(\approx 0\) (if \(\int_0^1\beta \gg 1\))</td>
+      <td>Signal retention; decays to zero</td>
+    </tr>
+    <tr>
+      <td>\(\sqrt{\bar\alpha(t)}\,x_0\)</td>
+      <td>\(x_0\)</td>
+      <td>\(\approx 0\)</td>
+      <td>Attenuated original signal</td>
+    </tr>
+    <tr>
+      <td>\(1-\bar\alpha(t)\)</td>
+      <td>\(0\)</td>
+      <td>\(\approx 1\)</td>
+      <td>Noise variance; grows to fill \(I\)</td>
+    </tr>
+    <tr>
+      <td>\(\sqrt{1-\bar\alpha(t)}\,\varepsilon\)</td>
+      <td>\(0\)</td>
+      <td>\(\approx \varepsilon \sim \mathcal{N}(0,I)\)</td>
+      <td>Growing noise component</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>At \(t = 1\) the signal is gone and \(p_1(x_t | x_0) \approx \mathcal{N}(0, I)\)
+independently of \(x_0\). This is the prior we sample from to start generation.</p>
+
+<div class="box connect">
+<span class="label">Connection — DDPM closed form (Part 5)</span>
+<p>In discrete DDPM with \(T\) steps, the analogous formula is:</p>
+\[
+  q(x_t | x_0) = \mathcal{N}\!\left(x_t;\;\sqrt{\bar\alpha_t}\,x_0,\;(1-\bar\alpha_t)I\right),
+  \quad \bar\alpha_t = \textstyle\prod_{s=1}^{t}(1-\beta_s).
+\]
+<p>Equation (7.3) is the continuous-time version with \(\bar\alpha_t\) replaced by
+\(\bar\alpha(t) = \exp(-\int_0^t \beta(s)\,ds)\). The two formulae are the same
+object — one is a sum over indices, the other is an integral over real time.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7.4 Why go continuous? Four concrete benefits</h2>
+
+<div class="box intuition">
+<span class="label">The core insight</span>
+<p>Discrete DDPM bakes the number of steps \(T\) into training. The network
+\(\varepsilon_\theta(x_t, t)\) is trained with \(t \in \{1, \ldots, T\}\) and
+generates samples in exactly \(T\) steps. The continuous SDE formulation breaks that
+coupling — training produces a continuous function \(s_\theta(x,t)\) (the score), and
+sampling can use any solver.</p>
+</div>
+
+<h3>Benefit 1 — Training is decoupled from sampling step count</h3>
+<p>Once we learn the continuous score \(\nabla_x \log p_t(x)\), we can sample with
+any number of discretisation steps — 1000, 100, 20, or even fewer. The score network
+is trained once, but the sampler is chosen at inference time. This is impossible in
+vanilla DDPM where the noise schedule and the network are jointly calibrated.</p>
+
+<h3>Benefit 2 — Any ODE/SDE solver is valid</h3>
+<p>The continuous formulation exposes a standard ODE/SDE that numerical analysis
+has studied for decades. Higher-order solvers (Runge–Kutta, linear multi-step) and
+<em>adaptive step-size</em> methods can be applied directly. Methods such as
+DPM-Solver use this insight to achieve near-perfect samples in as few as 10–20
+function evaluations, versus the 1000 steps typically needed for vanilla DDPM.</p>
+
+<h3>Benefit 3 — The reverse SDE has a clean closed form</h3>
+<p>Anderson (1982) showed that any forward SDE has an exact time-reversal. For the
+VP-SDE the reverse runs backwards from \(t=1\) to \(t=0\) and involves the score —
+a fact that connects everything back to Part 3. Part 8 derives this fully.</p>
+
+<h3>Benefit 4 — A deterministic probability-flow ODE emerges for free</h3>
+<p>Every forward SDE in the Song et al. framework has a paired deterministic ODE
+(called the probability-flow ODE) that transports the <em>same marginals</em>
+\(p_t\). This ODE gives exact log-likelihood computation and perfectly invertible
+encoding — properties the discrete DDPM chain does not have. Part 9 covers it.</p>
+
+<!-- ============================================================ -->
+<h2>7.5 Foreshadowing the reverse-time SDE</h2>
+
+<p>We have seen the <em>forward</em> SDE that adds noise. Generation requires running
+<em>backwards</em>. The reverse-time SDE (full treatment in Part 8) is:</p>
+
+\[
+  dx_t
+  = \Bigl[f(x_t, t) - g(t)^2\,\nabla_x \log p_t(x_t)\Bigr]\,d\bar{t}
+  + g(t)\,d\bar{W}_t.
+  \tag{7.4}
+\]
+
+<table class="symbols">
+  <thead><tr><th>Symbol</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td>\(f(x_t,t)\)</td><td>Same drift as in the forward SDE; for VP: \(-\tfrac{1}{2}\beta(t)x_t\)</td></tr>
+    <tr><td>\(g(t)\)</td><td>Same diffusion coefficient as forward; for VP: \(\sqrt{\beta(t)}\)</td></tr>
+    <tr><td>\(\nabla_x \log p_t(x_t)\)</td><td>The <strong>score</strong> at time \(t\) — the object from Part 3!</td></tr>
+    <tr><td>\(d\bar{t}\)</td><td>Reverse-time increment (time decreases)</td></tr>
+    <tr><td>\(d\bar{W}_t\)</td><td>A "reverse Brownian motion" (Part 8 makes this precise)</td></tr>
+  </tbody>
+</table>
+
+<div class="box intuition">
+<span class="label">Why the score appears</span>
+<p>Running time backwards reverses the effect of the Brownian motion. To undo random
+diffusion you need to know which direction is "uphill" in probability — that is exactly
+what the score \(\nabla_x \log p_t(x)\) tells you. The \(g(t)^2\) factor controls
+how aggressively to correct. When you train a score network \(s_\theta(x,t) \approx
+\nabla_x \log p_t(x)\) (Part 3), plugging it into equation (7.4) gives you a sampler.
+Everything connects.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7.6 Langevin dynamics and why the score alone is enough to sample</h2>
+
+<p>Before moving to reverse SDEs, it is worth understanding a simpler continuous-time
+sampler that uses <em>only</em> the score. This is Langevin dynamics, described in the
+MIT notes as Remark 20 (§4.2).</p>
+
+<h3>Definition</h3>
+
+<p>For a fixed target distribution \(p\), Langevin dynamics is the SDE:</p>
+
+\[
+  dx_t = \tfrac{1}{2}\,\nabla_x \log p(x_t)\;dt + dW_t.
+  \tag{Langevin}
+\]
+
+<p>There is no time-varying noise schedule, no forward process — just a drift that
+climbs the log-density and a Brownian noise term that prevents the process from getting
+stuck.</p>
+
+<h3>Why it works</h3>
+
+<div class="box mathblock">
+<span class="label">Stationary distribution argument</span>
+<p>Apply the Fokker–Planck equation (MIT notes Theorem 19, §4.2) to the Langevin SDE
+with \(f(x) = \tfrac{1}{2}\nabla \log p(x)\) and \(g = 1\):</p>
+\[
+  \partial_t \rho_t
+  = -\nabla \cdot \!\left(\tfrac{1}{2}(\nabla \log p)\,\rho_t\right)
+  + \tfrac{1}{2}\Delta \rho_t.
+\]
+<p>For \(\rho_t = p\) this equals zero (detailed balance / equilibrium condition),
+so \(p\) is a stationary distribution. The process converges to \(p\) from
+any initialisation \(\rho_0 \neq p\) under mild conditions.</p>
+</div>
+
+<div class="box intuition">
+<span class="label">Intuition — two forces in balance</span>
+<p>Think of the score as a wind that blows particles toward regions of high probability.
+The Brownian term is thermal noise that jiggles particles so they explore and do not
+all collapse to the mode. In equilibrium these two forces balance out, and the particles
+are distributed exactly according to \(p\). This is the continuous-time version of
+Metropolis–Hastings sampling.</p>
+</div>
+
+<p>As the MIT notes (Remark 20) note, the OU process from Part 2 (Example 6) is a
+special case: when \(p = \mathcal{N}(0, I)\), the score is \(\nabla \log p(x) = -x\),
+and Langevin dynamics becomes \(dx_t = -\tfrac{1}{2}x_t\,dt + dW_t\) — exactly the
+OU process with \(\theta = \tfrac{1}{2}, \sigma = 1\).</p>
+
+<!-- ============================================================ -->
+<h2>7.7 Discretisation recovers the familiar samplers</h2>
+
+<p>The continuous-time picture is not just elegant — it directly produces the samplers
+from Parts 5 and 6 as special cases of discretisation.</p>
+
+<div class="box connect">
+<span class="label">Euler–Maruyama on reverse SDE \(\Rightarrow\) DDPM ancestral sampling</span>
+<p>Apply Euler–Maruyama (Part 2, Algorithm 2) to the reverse-time SDE (7.4) with
+step size \(\Delta t = 1/T\):</p>
+\[
+  x_{t - \Delta t}
+  = x_t
+  - \Bigl[f(x_t,t) - g(t)^2\,s_\theta(x_t,t)\Bigr]\,\Delta t
+  + g(t)\,\sqrt{\Delta t}\,z,
+  \quad z \sim \mathcal{N}(0,I).
+\]
+<p>Substituting the VP-SDE coefficients and the DDPM parameterisation of the score,
+this equation reduces to the <em>DDPM ancestral sampling update</em> from Part 5.
+DDPM is just one Euler–Maruyama step applied to the reverse VP-SDE.</p>
+</div>
+
+<div class="box connect">
+<span class="label">ODE solver on probability-flow ODE \(\Rightarrow\) DDIM (\(\eta=0\))</span>
+<p>Every SDE in the Song et al. framework has a paired deterministic ODE (the
+probability-flow ODE, Part 9) that shares the same marginals \(p_t\). Applying a
+first-order ODE solver (Euler's method) to that ODE produces an update with
+<em>no stochastic term</em> — exactly DDIM with \(\eta = 0\) (Part 6). DDIM is the
+simplest deterministic discretisation of the probability-flow ODE.</p>
+</div>
+
+<p>This unification is the main achievement of the continuous-time viewpoint: DDPM,
+DDIM, and every variant in between are just different numerical methods applied to
+the same underlying SDE or ODE. The model is trained once; the sampler is an
+implementation choice.</p>
+
+<!-- ============================================================ -->
+<h2>7.8 PyTorch: simulating the VP forward SDE</h2>
+
+<p>The following self-contained code simulates the VP-SDE forward process on a 1D
+data point using Euler–Maruyama, printing the mean and variance at several
+checkpoints to confirm that the distribution approaches \(\mathcal{N}(0,1)\).</p>
+
+<pre><code><span class="code-comment"># VP forward SDE simulation via Euler-Maruyama.
+# Teaching code — not security-sensitive RNG.
+# Expected outputs are shown in comments below.</span>
+
+import torch
+
+torch.manual_seed(0)   <span class="code-comment"># reproducibility</span>
+
+<span class="code-comment"># ── Hyperparameters ──────────────────────────────────────────────</span>
+N_PARTICLES = 50_000   <span class="code-comment"># independent 1-D samples to track statistics</span>
+N_STEPS     = 1_000    <span class="code-comment"># Euler-Maruyama steps over [0, 1]</span>
+DT          = 1.0 / N_STEPS   <span class="code-comment"># step size Δt</span>
+
+<span class="code-comment"># ── Noise schedule β(t): linear, as in Ho et al. 2020 ────────────
+# β(t) = β_min + (β_max - β_min)*t, integrated in closed form for ᾱ(t).</span>
+BETA_MIN = 0.1
+BETA_MAX = 20.0
+
+def beta(t):
+    <span class="code-comment">"""Scalar or tensor t ∈ [0,1] → β(t)."""</span>
+    return BETA_MIN + (BETA_MAX - BETA_MIN) * t
+
+<span class="code-comment"># ── Initial data: all particles start at x₀ = 2.0 ───────────────
+# A single clean data point; we watch it dissolve into N(0,1).</span>
+x = torch.full((N_PARTICLES,), 2.0)
+
+<span class="code-comment"># ── Euler-Maruyama forward loop ───────────────────────────────────
+# dx = -½ β(t) x dt + √β(t) dW
+# dW ~ N(0, dt·I) so dW = √dt · z, z ~ N(0,1)</span>
+print_at = {0, 100, 200, 500, 800, 999}   <span class="code-comment"># step indices to print</span>
+
+for i in range(N_STEPS):
+    t = i * DT                            <span class="code-comment"># current time in [0, 1)</span>
+    b = beta(torch.tensor(t))             <span class="code-comment"># β(t), scalar tensor</span>
+
+    drift     = -0.5 * b * x * DT        <span class="code-comment"># deterministic pull toward 0</span>
+    diffusion = b.sqrt() * (DT ** 0.5) * torch.randn_like(x)
+    <span class="code-comment"># ↑ √β(t) · √Δt · z  — the √Δt scaling is crucial (Part 2)</span>
+
+    x = x + drift + diffusion
+
+    if i in print_at:
+        t_display = (i + 1) * DT         <span class="code-comment"># time AFTER the step</span>
+        mu  = x.mean().item()
+        var = x.var().item()
+        print(f"t={t_display:.3f}  mean={mu:+.4f}  var={var:.4f}")
+
+<span class="code-comment"># ── Expected output (approximate, depends on RNG seed) ──────────
+# t=0.001  mean=+1.9989  var=0.0001    ← barely moved from x₀=2
+# t=0.100  mean=+1.6371  var=0.0930    ← signal decaying, noise growing
+# t=0.200  mean=+1.0879  var=0.3012
+# t=0.500  mean=+0.1553  var=0.8342    ← signal nearly gone
+# t=0.800  mean=+0.0053  var=0.9817    ← very close to N(0,1)
+# t=1.000  mean=+0.0011  var=0.9991    ← essentially N(0,1) ✓</span>
+
+<span class="code-comment"># ── Verify against the closed-form marginal (7.3) ────────────────
+# ᾱ(t) = exp(-∫₀ᵗ β(s) ds)
+# For linear β(s) = β_min + (β_max-β_min)s:
+#   ∫₀ᵗ β(s) ds = β_min·t + ½(β_max-β_min)·t²</span>
+t_final = torch.tensor(1.0)
+integral = BETA_MIN * t_final + 0.5 * (BETA_MAX - BETA_MIN) * t_final ** 2
+alpha_bar = torch.exp(-integral)
+
+expected_mean = (alpha_bar ** 0.5 * 2.0).item()   <span class="code-comment"># √ᾱ(1) · x₀</span>
+expected_var  = (1.0 - alpha_bar).item()            <span class="code-comment"># 1 - ᾱ(1)</span>
+print(f"\nClosed-form at t=1:  mean={expected_mean:.6f}  var={expected_var:.6f}")
+<span class="code-comment"># Closed-form at t=1:  mean=0.000000  var=1.000000
+# (ᾱ(1) ≈ 0 for β_min=0.1, β_max=20.0 — signal is fully destroyed)</span>
+</code></pre>
+
+<div class="box intuition">
+<span class="label">What the output shows</span>
+<p>At step 0 the mean is \(\approx 2.0\) and the variance is \(\approx 0\) — all
+particles are still sitting at the initial data point. As \(t\) increases, the mean
+decays exponentially (the drift \(-\tfrac{1}{2}\beta(t)x_t\) pulls everything toward 0)
+while the variance climbs toward 1 (the diffusion term accumulates noise). By \(t=1\)
+the distribution is essentially \(\mathcal{N}(0, 1)\), matching the closed-form
+prediction from equation (7.3). This is the forward process "forgetting" the data.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>7.9 Checkpoint</h2>
+
+<p>Before moving to Part 8, make sure you can answer these questions without looking
+at the page:</p>
+
+<ol>
+  <li>Write the DDPM per-step update. Now substitute
+      \(\beta_t \leftarrow \beta(t)\,\Delta t\), Taylor-expand the square root to
+      first order in \(\Delta t\), identify \(\sqrt{\Delta t}\,z\) as a Brownian
+      increment, and arrive at the VP-SDE. If you can do this algebra cold, the
+      derivation is yours.</li>
+  <li>What is the VP-SDE drift coefficient? What is the diffusion coefficient?
+      Which part of the MIT notes (Example 6) does the VP-SDE connect to?</li>
+  <li>State equation (7.3). What are \(\bar\alpha(t)\) and \(1-\bar\alpha(t)\) at
+      \(t=0\) and \(t=1\)?</li>
+  <li>Name four benefits of working in continuous time versus the discrete DDPM chain.</li>
+  <li>Write the Langevin SDE. What plays the role of the drift? Why does the process
+      converge to \(p\)?</li>
+  <li>How does Euler–Maruyama on the reverse VP-SDE relate to DDPM ancestral sampling?
+      How does the deterministic ODE solver relate to DDIM \(\eta=0\)?</li>
+  <li>In the PyTorch simulation, what would happen if you removed the
+      \(\sqrt{\Delta t}\) factor from the diffusion term? Would the variance at
+      \(t=1\) be too large or too small?</li>
+</ol>
+
+<div class="box connect">
+<span class="label">What comes next — Part 8 and 9</span>
+<p><strong>Part 8 (SDE Formulation)</strong> will take the VP-SDE and formally derive
+its time-reversal, prove why the score \(\nabla_x \log p_t\) appears in the reverse
+drift (using the Fokker–Planck equation, Theorem 19), and show how training a score
+network plugs directly into generation. <strong>Part 9 (Probability-Flow ODE)</strong>
+will derive the deterministic counterpart, prove it shares the same marginals, and
+explain why it enables exact likelihood computation and deterministic encoding.</p>
+</div>
+
+<nav class="pagenav">
+  <a class="prev" href="part06_ddim.html"><span class="dir">‹ Prev</span>Part 6 — DDIM</a>
+  <a class="next" href="part08_sde_formulation.html"><span class="dir">Next ›</span>Part 8 — SDE Formulation</a>
+</nav>
+
+</article>
+</main>
+</div>
+<script defer src="assets/guide.js"></script>
+</body>
+</html>

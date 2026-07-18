@@ -1,0 +1,1093 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Part 1 — Differential Equations · Diffusion Study Guide</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [["\\(", "\\)"]], displayMath: [["\\[", "\\]"]], tags: "none" },
+    options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle contents">☰</button>
+<div class="layout">
+<nav class="toc">
+  <a href="index.html"><strong>◆ Diffusion Study Guide</strong></a>
+  <h2>Foundations</h2>
+  <a href="part00_math_foundations.html"><span class="part-num">0</span>Mathematical Foundations</a>
+  <a href="part01_differential_equations.html"><span class="part-num">1</span>Differential Equations</a>
+  <a href="part02_probability_stochastic.html"><span class="part-num">2</span>Probability &amp; Stochastic Processes</a>
+  <a href="part03_score_functions.html"><span class="part-num">3</span>Score Functions</a>
+  <h2>Diffusion Core</h2>
+  <a href="part04_diffusion_models.html"><span class="part-num">4</span>Diffusion Models (big picture)</a>
+  <a href="part05_ddpm.html"><span class="part-num">5</span>DDPM</a>
+  <a href="part06_ddim.html"><span class="part-num">6</span>DDIM</a>
+  <a href="part07_continuous_time.html"><span class="part-num">7</span>Continuous-Time Diffusion</a>
+  <h2>Continuous Formulation</h2>
+  <a href="part08_sde_formulation.html"><span class="part-num">8</span>SDE Formulation</a>
+  <a href="part09_probability_flow_ode.html"><span class="part-num">9</span>Probability Flow ODE</a>
+  <a href="part10_flow_matching.html"><span class="part-num">10</span>Flow Matching</a>
+  <a href="part11_rectified_flows.html"><span class="part-num">11</span>Rectified Flows</a>
+  <h2>Systems &amp; Reading</h2>
+  <a href="part12_stable_diffusion.html"><span class="part-num">12</span>Stable Diffusion</a>
+  <a href="part13_reading_the_notes.html"><span class="part-num">13</span>Reading the MIT Notes</a>
+  <a href="part14_discrete_diffusion.html"><span class="part-num">14</span>Discrete Diffusion</a>
+</nav>
+<main>
+<article>
+
+<h1><span class="kicker">Part 1</span>Differential Equations</h1>
+
+<p>
+  In Part 0 we built up our mathematical vocabulary: vectors, probability distributions, and the idea
+  of a <em>trajectory</em> — a path a point traces through space over time. Now we ask: <em>what
+  governs that path?</em> The answer is an <strong>Ordinary Differential Equation</strong> (ODE),
+  and it is the central object of this entire course. Flow matching and diffusion models are,
+  at their heart, methods for constructing and solving ODEs.
+</p>
+<p>
+  This page builds the ODE story from scratch, requiring nothing beyond high-school calculus
+  and the Part 0 vocabulary. By the end you will understand exactly what the MIT notes mean
+  when they write Equations (1) and (2), Theorem 3, Example 4, and Algorithm 1 — and you
+  will have implemented Euler integration in PyTorch.
+</p>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<h2 id="s1-0">1.0 Quick Prerequisite Recap from Part 0</h2>
+
+<div class="box prereq">
+  <span class="label">Prerequisite: Trajectory and Vector Field</span>
+  <p>
+    Two objects were defined in Part 0. We restate them here so this page is self-contained.
+  </p>
+  <p>
+    <strong>Trajectory</strong> \(X_t : [0,1] \to \mathbb{R}^d\).
+    A trajectory is a function that takes a time \(t \in [0,1]\) and returns a point
+    \(X_t \in \mathbb{R}^d\). Think of a dot moving through \(d\)-dimensional space
+    as time flows from 0 to 1. The subscript \(t\) is the time argument; the output
+    is the position of the dot at that moment.
+  </p>
+  <p>
+    <strong>Vector field</strong> \(u_t(x) : \mathbb{R}^d \times [0,1] \to \mathbb{R}^d\).
+    A vector field takes a position \(x \in \mathbb{R}^d\) <em>and</em> a time
+    \(t \in [0,1]\), and returns a velocity vector in \(\mathbb{R}^d\).
+    Imagine placing an arrow at every point in space at every moment in time; each
+    arrow says "if you are here right now, move in this direction at this speed."
+  </p>
+  <p>
+    These two objects are about to be tied together by the ODE.
+  </p>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<h2 id="s1-1">1.1 What Is an Ordinary Differential Equation?</h2>
+
+<h3>1.1.1 The Core Idea in Plain Words</h3>
+
+<div class="box intuition">
+  <span class="label">Intuition First</span>
+  <p>
+    Imagine you are a tiny boat on a river. The river has currents — at every point on the
+    surface the water is moving in some direction at some speed. You have no engine; you
+    simply go wherever the current takes you. Your position at every moment is entirely
+    determined by (a) where you started, and (b) the current at your present location.
+  </p>
+  <p>
+    An Ordinary Differential Equation is the mathematical statement:
+    <em>"your velocity right now equals the current at your current position."</em>
+    Nothing more. No mysterious symbols yet — just that one sentence.
+  </p>
+</div>
+
+<h3>1.1.2 The Formal Object</h3>
+
+<p>
+  Let us now translate that sentence into mathematics. The key word is
+  <strong>derivative</strong>. The derivative of position with respect to time is velocity.
+  In symbols, if \(X_t\) is your position at time \(t\), then
+  \(\tfrac{d}{dt} X_t\) is your velocity at time \(t\).
+</p>
+<p>
+  Before writing the equation, let's recall what \(\tfrac{d}{dt}\) means without jargon.
+  If \(X_t\) is a smooth function of time, then:
+</p>
+\[
+  \frac{d}{dt} X_t
+    \;=\;
+    \lim_{h \to 0} \frac{X_{t+h} - X_t}{h}
+\]
+<p>
+  In words: take your position a tiny time \(h\) later, subtract your position now, divide
+  by \(h\). As you shrink \(h\) to zero this ratio stabilises — that limit is your
+  instantaneous velocity. This is exactly the high-school definition of a derivative;
+  we are just applying it to a position vector instead of a scalar.
+</p>
+<p>
+  Now, the ODE says: that velocity must equal the vector field evaluated at your current
+  position and current time:
+</p>
+
+<div class="box mathblock">
+  <span class="label">Formal Definition — ODE with Initial Condition (MIT Notes, Eq. 1)</span>
+  \[
+    \frac{d}{dt} X_t \;=\; u_t(X_t)
+    \tag{1a}
+  \]
+  \[
+    X_0 \;=\; x_0
+    \tag{1b}
+  \]
+
+  <table class="symbols">
+    <tr><th>Symbol</th><th>Meaning</th><th>Shape / Type</th></tr>
+    <tr>
+      <td>\(X_t\)</td>
+      <td>Position (state) of the particle at time \(t\)</td>
+      <td>Vector in \(\mathbb{R}^d\)</td>
+    </tr>
+    <tr>
+      <td>\(\tfrac{d}{dt} X_t\)</td>
+      <td>Instantaneous velocity of the particle at time \(t\)</td>
+      <td>Vector in \(\mathbb{R}^d\) (same shape as \(X_t\))</td>
+    </tr>
+    <tr>
+      <td>\(u_t\)</td>
+      <td>The vector field at time \(t\); it is a function \(\mathbb{R}^d \to \mathbb{R}^d\)</td>
+      <td>Maps a position to a velocity</td>
+    </tr>
+    <tr>
+      <td>\(u_t(X_t)\)</td>
+      <td>The vector field evaluated at the <em>current position</em> \(X_t\)</td>
+      <td>Vector in \(\mathbb{R}^d\)</td>
+    </tr>
+    <tr>
+      <td>\(x_0\)</td>
+      <td>The <em>starting point</em> — where the particle begins at \(t=0\)</td>
+      <td>A fixed vector in \(\mathbb{R}^d\)</td>
+    </tr>
+    <tr>
+      <td>\(X_0 = x_0\)</td>
+      <td>The <em>initial condition</em>; pins down which solution we want</td>
+      <td>Equality of two vectors in \(\mathbb{R}^d\)</td>
+    </tr>
+  </table>
+
+  <p style="margin-top:0.8em">
+    Equation (1a) says: <em>"at every instant, the velocity of \(X_t\) must equal the
+    vector-field arrow at position \(X_t\) and time \(t\)."</em><br>
+    Equation (1b) says: <em>"we start at the specific point \(x_0\)."</em>
+  </p>
+</div>
+
+<h3>1.1.3 Why Did Researchers Need This?</h3>
+
+<p>
+  A generative model must produce a data point \(z \sim p_\text{data}\) from noise
+  \(X_0 \sim \mathcal{N}(0, I_d)\). A direct mapping (e.g., a single neural network
+  \(f_\theta(z) = x\)) is possible but hard to train and hard to invert. Instead, we can
+  build a <em>continuous transport</em>: let a particle travel from noise to data along a
+  smooth path, guided by a velocity field that we learn. ODEs give us the machinery to
+  describe that path precisely and simulate it efficiently.
+</p>
+
+<div class="box warn">
+  <span class="label">Common Confusion: Which Side Has the Unknown?</span>
+  <p>
+    In high-school algebra, an equation like \(3x + 2 = 8\) is solved for a number \(x\).
+    In an ODE, the unknown is an entire <em>function</em> \(X_t\). We are looking for a
+    function of time whose derivative at each moment equals the prescribed velocity. This
+    is a fundamentally different kind of equation.
+  </p>
+</div>
+
+<h3>1.1.4 Tiny Toy Example — 1-D, Constant Field</h3>
+
+<p>
+  Let \(d = 1\) (just a number line) and let the vector field be the constant \(u_t(x) = 3\)
+  for all \(t\) and all \(x\). The ODE is:
+</p>
+\[
+  \frac{d}{dt} X_t \;=\; 3, \qquad X_0 = 2.
+\]
+<p>
+  This says "always move at speed 3 to the right." You can solve it with basic integration:
+</p>
+\[
+  X_t \;=\; 2 + 3t.
+\]
+<p>
+  Check: \(\tfrac{d}{dt}(2 + 3t) = 3\) ✓ and \(X_0 = 2 + 0 = 2\) ✓.
+  At \(t = 1\) the particle has reached \(X_1 = 5\).
+</p>
+
+<div class="box intuition">
+  <span class="label">Mental Model — The River Current</span>
+  <p>
+    Draw arrows everywhere on a 2-D plane. At every point, an arrow points in some direction
+    with some magnitude (the vector field). Drop a leaf (the initial condition \(x_0\)) on
+    the surface. The leaf drifts — always following the arrow at its current location. The
+    curve the leaf traces is the solution trajectory \(X_t\). The ODE is the rule "follow
+    the arrow at your current spot."
+  </p>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<h2 id="s1-2">1.2 Three Equivalent Descriptions: Field, Trajectory, Flow</h2>
+
+<p>
+  The MIT notes (§2.1) state that "vector fields, ODEs, and flows are, intuitively, three
+  descriptions of the same object." Let us build each one carefully and then relate them.
+</p>
+
+<h3>1.2.1 The Vector Field \(u_t(x)\) — the Rule</h3>
+
+<p>
+  The vector field is the <em>input</em> you specify. It tells every point in space, at
+  every moment in time, what velocity it should carry. It is a fixed function — you choose
+  it (or learn it with a neural network). By itself, the vector field says nothing about any
+  particular particle's path; it is the universal velocity law.
+</p>
+
+<h3>1.2.2 The Trajectory \(X_t\) — one Path</h3>
+
+<p>
+  A trajectory is a <em>solution</em>: you pick a starting point \(x_0\), release a particle
+  there, and it follows the velocity law defined by the vector field. The trajectory records
+  that particle's position at every time \(t \in [0,1]\). Change \(x_0\) and you get a
+  different trajectory — a different path through the same vector field. So a vector field
+  generates a whole <em>family</em> of trajectories, one per starting point.
+</p>
+
+<h3>1.2.3 The Flow Map \(\psi_t(x_0)\) — the Family All at Once</h3>
+
+<p>
+  Instead of tracking one starting point at a time, the <strong>flow</strong> packages all
+  starting points simultaneously. Formally:
+</p>
+
+<div class="box mathblock">
+  <span class="label">Formal Definition — Flow Map (MIT Notes, Eq. 2)</span>
+  \[
+    \frac{d}{dt} \psi_t(x_0) \;=\; u_t\!\left(\psi_t(x_0)\right)
+    \tag{2a}
+  \]
+  \[
+    \psi_0(x_0) \;=\; x_0
+    \tag{2b}
+  \]
+
+  <table class="symbols">
+    <tr><th>Symbol</th><th>Meaning</th><th>Shape / Type</th></tr>
+    <tr>
+      <td>\(\psi_t\)</td>
+      <td>The flow map at time \(t\); it is a function \(\mathbb{R}^d \to \mathbb{R}^d\)</td>
+      <td>A map from starting positions to current positions</td>
+    </tr>
+    <tr>
+      <td>\(\psi_t(x_0)\)</td>
+      <td>Where a particle started at \(x_0\) has <em>arrived</em> by time \(t\)</td>
+      <td>Vector in \(\mathbb{R}^d\)</td>
+    </tr>
+    <tr>
+      <td>\(\psi_0(x_0) = x_0\)</td>
+      <td>At time zero, every particle is at its starting point (identity map)</td>
+      <td>Equality of maps</td>
+    </tr>
+  </table>
+
+  <p style="margin-top:0.8em">
+    For a fixed \(x_0\), recovering the trajectory is easy:
+    \(X_t = \psi_t(X_0)\).
+    The flow is just the solution operator that tells you "given where you started, here is
+    where you are at time \(t\)."
+  </p>
+</div>
+
+<h3>1.2.4 How They Relate — A Summary Table</h3>
+
+<table class="symbols">
+  <tr>
+    <th>Object</th>
+    <th>Input(s)</th>
+    <th>Output</th>
+    <th>Analogy</th>
+  </tr>
+  <tr>
+    <td>Vector field \(u_t(x)\)</td>
+    <td>Time \(t\), position \(x\)</td>
+    <td>Velocity vector</td>
+    <td>The river current map</td>
+  </tr>
+  <tr>
+    <td>Trajectory \(X_t\)</td>
+    <td>Time \(t\) (for one fixed start \(x_0\))</td>
+    <td>Current position</td>
+    <td>The path of one leaf</td>
+  </tr>
+  <tr>
+    <td>Flow \(\psi_t(x_0)\)</td>
+    <td>Start position \(x_0\), time \(t\)</td>
+    <td>Current position</td>
+    <td>A map from "where you launched" to "where you are"</td>
+  </tr>
+</table>
+
+<div class="box warn">
+  <span class="label">Common Confusion: Flow vs. Trajectory</span>
+  <p>
+    The flow \(\psi_t\) is a <em>function of functions</em>: for each time \(t\) it is a
+    map \(\mathbb{R}^d \to \mathbb{R}^d\) that simultaneously transports <em>all</em>
+    starting points. A trajectory \(X_t\) is just one path. The flow evaluated at one
+    starting point <em>gives</em> that trajectory: \(X_t = \psi_t(x_0)\). The neural
+    network in a flow model learns \(u_t^\theta\), not \(\psi_t\) — the flow is only
+    accessed by running the ODE forward numerically.
+  </p>
+</div>
+
+<div class="box connect">
+  <span class="label">Where This Returns</span>
+  <p>
+    In Part 10 (Flow Matching) the training objective will directly regress a neural network
+    onto target velocity vectors \(u_t(x)\). The ability to then simulate \(\psi_t\) via
+    Euler integration is exactly what Algorithm 1 (below) provides.
+  </p>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<h2 id="s1-3">1.3 Existence and Uniqueness (MIT Notes, Theorem 3)</h2>
+
+<h3>1.3.1 The Question</h3>
+
+<p>
+  Before trusting any mathematical object, we should ask: does a solution even exist, and if
+  so, is it the only one? For ODEs these questions are not trivial. Consider what it would
+  mean if solutions were <em>not</em> unique: starting at the same \(x_0\) under the same
+  vector field, two different trajectories would both "obey" the ODE. That would be physically
+  absurd (and computationally useless — which solution do we simulate?).
+</p>
+
+<h3>1.3.2 Why Paths Cannot Cross — Intuition</h3>
+
+<div class="box intuition">
+  <span class="label">Intuition: Crossing Paths Would Break the Rule</span>
+  <p>
+    Suppose two trajectories \(X_t\) and \(Y_t\) both satisfy the ODE but pass through the
+    same point at the same time: \(X_s = Y_s\) for some time \(s\). At that moment, both
+    particles are at the same location and must therefore follow the same velocity
+    \(u_s(X_s) = u_s(Y_s)\). After that instant, they are indistinguishable: same position,
+    same velocity, same future. So they cannot diverge — they must continue as one path. In
+    other words, two paths that ever touch must be the same path.
+  </p>
+  <p>
+    For this "touching implies merging" argument to work, the velocity must be well-behaved:
+    nearby points must have nearby velocities (a property called <strong>Lipschitz
+    continuity</strong>). If the velocity could jump wildly between nearby points, you could
+    have paths that nearly touch but then violently separate.
+  </p>
+</div>
+
+<h3>1.3.3 The Formal Theorem</h3>
+
+<div class="box mathblock">
+  <span class="label">Theorem 3 — Flow Existence and Uniqueness (MIT Notes)</span>
+  <p>
+    If \(u : \mathbb{R}^d \times [0,1] \to \mathbb{R}^d\) is <strong>continuously
+    differentiable with a bounded derivative</strong>, then the ODE in Eq. (2) has a
+    <strong>unique</strong> solution given by a flow \(\psi_t\). Moreover, \(\psi_t\) is a
+    <strong>diffeomorphism</strong> for all \(t\): it is continuously differentiable, and its
+    inverse \(\psi_t^{-1}\) also exists and is continuously differentiable.
+  </p>
+  <p>
+    <em>Continuously differentiable with bounded derivative</em> means: (1) the vector field
+    is smooth (no jumps), and (2) the rate at which it changes from point to point is bounded
+    (the Lipschitz condition). Neural networks always satisfy this in practice because their
+    weight matrices are finite and their activation functions (ReLU, GELU, SiLU) have bounded
+    derivatives on compact sets.
+  </p>
+</div>
+
+<h3>1.3.4 What "Diffeomorphism" Means Geometrically</h3>
+
+<p>
+  A diffeomorphism is a smooth, invertible map. The flow \(\psi_t : \mathbb{R}^d \to \mathbb{R}^d\)
+  "warps" space smoothly. Think of printing a grid on a rubber sheet and then deforming it:
+  the grid lines bend but never break or cross. That is what the flow does to \(\mathbb{R}^d\).
+  The invertibility means you can "un-warp" the space: \(\psi_t^{-1}\) takes you back. This is
+  visualised in Figure 1 of the MIT notes, where a red square grid is smoothly deformed by the
+  flow at three successive times.
+</p>
+
+<div class="box warn">
+  <span class="label">Why Should You Care About This in Practice?</span>
+  <p>
+    As the notes point out, Theorem 3 is "good news": since neural networks always produce
+    continuously-differentiable vector fields with bounded weights, flows exist and are unique.
+    You do not need to worry about ill-posed ODEs in flow-matching training. The theorem
+    justifies the entire simulation-based sampling strategy.
+  </p>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<h2 id="s1-4">1.4 Solved Example: Linear Vector Fields (MIT Notes, Example 4)</h2>
+
+<h3>1.4.1 Scalar Case — Full Algebra</h3>
+
+<p>
+  Before tackling the matrix version in the notes, let us solve the simplest possible case:
+  \(d = 1\) (a single real number), and the vector field is \(u_t(x) = a x\) for some
+  constant \(a \in \mathbb{R}\). The ODE is:
+</p>
+\[
+  \frac{d}{dt} X_t \;=\; a \, X_t, \qquad X_0 = x_0.
+\]
+
+<p>
+  We want to find a function \(X_t\) such that "its derivative is \(a\) times itself." Let
+  us <em>guess</em> the form \(X_t = C e^{at}\) for some constant \(C\) and verify:
+</p>
+
+<p><strong>Step 1 — Differentiate the guess.</strong></p>
+\[
+  \frac{d}{dt} C e^{at}
+  \;=\; C \cdot \frac{d}{dt} e^{at}
+  \;=\; C \cdot a e^{at}
+  \;=\; a \cdot C e^{at}.
+\]
+<p>
+  So \(\tfrac{d}{dt}(C e^{at}) = a \cdot (C e^{at})\). This matches the ODE, since \(X_t = Ce^{at}\). ✓
+</p>
+
+<p><strong>Step 2 — Apply the initial condition to pin down \(C\).</strong></p>
+\[
+  X_0 \;=\; C e^{a \cdot 0} \;=\; C \cdot 1 \;=\; C \;=\; x_0.
+\]
+<p>So \(C = x_0\) and the unique solution is:</p>
+\[
+  \boxed{X_t \;=\; x_0 \, e^{at}.}
+\]
+
+<p><strong>Step 3 — Identify the flow.</strong></p>
+<p>
+  The flow is \(\psi_t(x_0) = x_0 \, e^{at}\). Check \(\psi_0(x_0) = x_0 e^0 = x_0\) ✓.
+</p>
+
+<p><strong>What it means geometrically.</strong></p>
+<ul>
+  <li>If \(a &gt; 0\): the particle moves away from 0 exponentially (explosive growth).</li>
+  <li>If \(a &lt; 0\): the particle converges toward 0 exponentially (decay — this is the case in the notes).</li>
+  <li>If \(a = 0\): the particle does not move at all.</li>
+</ul>
+
+<h3>1.4.2 The Notes' Version — \(u_t(x) = -\theta x\)</h3>
+
+<p>
+  Example 4 in the MIT notes uses \(u_t(x) = -\theta x\) with \(\theta &gt; 0\) (a negative
+  scalar multiple of position). This is exactly the scalar case above with \(a = -\theta\).
+  The flow is:
+</p>
+\[
+  \psi_t(x_0) \;=\; x_0 \, e^{-\theta t}.
+\]
+<p>
+  The notes verify this by computing \(\tfrac{d}{dt}\psi_t(x_0) = -\theta \, x_0 e^{-\theta t} = -\theta \, \psi_t(x_0) = u_t(\psi_t(x_0))\) ✓.
+  As \(t \to \infty\), \(\psi_t(x_0) \to 0\) for any starting point — every particle is
+  pulled exponentially to 0. This is the exponential convergence visualised in Figure 3 of
+  the notes.
+</p>
+
+<h3>1.4.3 Matrix Version (Brief)</h3>
+
+<p>
+  The notes also allude to the higher-dimensional version: \(u_t(x) = Ax\) where
+  \(A \in \mathbb{R}^{d \times d}\). The solution is \(X_t = e^{At} x_0\), where
+  \(e^{At}\) is the <strong>matrix exponential</strong>:
+</p>
+\[
+  e^{At} \;=\; I + At + \frac{(At)^2}{2!} + \frac{(At)^3}{3!} + \cdots
+\]
+<p>
+  You do not need to compute matrix exponentials by hand in this course. The key insight is
+  that linear vector fields have closed-form flows. For general neural-network vector fields,
+  no such closed form exists — which is exactly why we need numerical simulation.
+</p>
+
+<div class="box connect">
+  <span class="label">Where This Returns</span>
+  <p>
+    Linear vector fields appear again in Part 7 (Continuous-Time Diffusion) when we study the
+    Ornstein–Uhlenbeck process, whose drift \(-\theta x\) is exactly this linear field.
+    The exponential decay ensures that starting distributions converge to a Gaussian prior.
+  </p>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<h2 id="s1-5">1.5 Why We Almost Never Solve ODEs Exactly</h2>
+
+<p>
+  The linear example above was solvable because \(u_t(x) = Ax\) has a special structure.
+  In general, if \(u_t\) is a deep neural network — a composition of matrix multiplications
+  and nonlinear activations — there is no algebraic trick that gives you a closed-form
+  \(\psi_t\). The function \(u_t(x)\) can be complicated enough that "integrate the
+  derivative" cannot be done symbolically.
+</p>
+<p>
+  This is not a failure; it is the norm in science and engineering. Most differential
+  equations describing real physical systems (fluid dynamics, orbital mechanics, protein
+  folding) also lack closed-form solutions. The classical response is <em>numerical
+  simulation</em>: approximate the solution by taking small discrete steps forward in time.
+</p>
+
+<div class="box intuition">
+  <span class="label">Intuition: Stepping Forward in Time</span>
+  <p>
+    Imagine your ODE as the river analogy again. You want to know where a leaf ends up
+    after 1 second. You cannot compute the exact path — the currents are too complicated.
+    But you can approximate: look at the current at the leaf's position right now, move
+    the leaf a tiny bit in that direction for a fraction of a second, then re-read the
+    current at the new position, move again, and so on. The smaller your time steps, the
+    more accurate your approximation.
+  </p>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<h2 id="s1-6">1.6 Euler's Method — Deriving it from First Principles</h2>
+
+<h3>1.6.1 From the Fundamental Theorem of Calculus</h3>
+
+<p>
+  We want to move from \(X_t\) to \(X_{t+h}\). The Fundamental Theorem of Calculus (FTC)
+  tells us that position at \(t+h\) equals position at \(t\) plus the integral of velocity:
+</p>
+\[
+  X_{t+h}
+  \;=\; X_t + \int_t^{t+h} \frac{d}{ds} X_s \, ds
+  \;=\; X_t + \int_t^{t+h} u_s(X_s) \, ds.
+\]
+<p>
+  This is exact but useless to compute directly — the integral on the right involves
+  \(X_s\) for all \(s \in [t, t+h]\), which is exactly what we are trying to find.
+</p>
+<p>
+  The key approximation: if \(h\) is small, the velocity \(u_s(X_s)\) does not change much
+  over the short interval \([t, t+h]\). So we can approximate the integrand as constant,
+  equal to its value at the left endpoint \(s = t\):
+</p>
+\[
+  \int_t^{t+h} u_s(X_s) \, ds
+  \;\approx\; u_t(X_t) \cdot h.
+\]
+<p>
+  Plugging back in:
+</p>
+
+<div class="box mathblock">
+  <span class="label">Euler's Method Update Rule (MIT Notes, Algorithm 1)</span>
+  \[
+    X_{t+h} \;=\; X_t + h \cdot u_t(X_t)
+  \]
+
+  <table class="symbols">
+    <tr><th>Symbol</th><th>Meaning</th><th>Shape</th></tr>
+    <tr>
+      <td>\(X_t\)</td>
+      <td>Current position (state at time \(t\))</td>
+      <td>Vector in \(\mathbb{R}^d\)</td>
+    </tr>
+    <tr>
+      <td>\(h\)</td>
+      <td>Step size \(= 1/n\); how far we advance in time each update</td>
+      <td>Positive scalar</td>
+    </tr>
+    <tr>
+      <td>\(u_t(X_t)\)</td>
+      <td>Vector field evaluated at current position and time</td>
+      <td>Vector in \(\mathbb{R}^d\)</td>
+    </tr>
+    <tr>
+      <td>\(h \cdot u_t(X_t)\)</td>
+      <td>Displacement: step size times velocity</td>
+      <td>Vector in \(\mathbb{R}^d\)</td>
+    </tr>
+    <tr>
+      <td>\(X_{t+h}\)</td>
+      <td>Approximate position one step later</td>
+      <td>Vector in \(\mathbb{R}^d\)</td>
+    </tr>
+    <tr>
+      <td>\(n\)</td>
+      <td>Total number of Euler steps</td>
+      <td>Positive integer</td>
+    </tr>
+  </table>
+</div>
+
+<h3>1.6.2 Running the Algorithm</h3>
+
+<p>
+  Starting from \(X_0 = x_0\), we take \(n\) steps of size \(h = 1/n\), visiting times
+  \(t_0 = 0, \, t_1 = h, \, t_2 = 2h, \ldots, t_n = 1\):
+</p>
+\[
+  X_{t_1} \;=\; X_{t_0} + h \cdot u_{t_0}(X_{t_0}),
+\]
+\[
+  X_{t_2} \;=\; X_{t_1} + h \cdot u_{t_1}(X_{t_1}),
+\]
+\[
+  \vdots
+\]
+\[
+  X_{t_n} \;=\; X_{t_{n-1}} + h \cdot u_{t_{n-1}}(X_{t_{n-1}}).
+\]
+<p>
+  The final value \(X_{t_n} = X_1\) is the approximate endpoint of the trajectory.
+</p>
+
+<h3>1.6.3 Step Size, Error, and the Trade-off</h3>
+
+<p>
+  Every single Euler step makes an approximation error (called the <em>local truncation error</em>).
+  For a single step of size \(h\), the local error is proportional to \(h^2\) (it shrinks
+  quadratically as \(h \to 0\)). Across \(n = 1/h\) steps, these errors accumulate into a
+  <em>global error</em> proportional to \(h\) (i.e., linear in step size). This means:
+</p>
+<ul>
+  <li>Halving \(h\) (doubling \(n\)) roughly halves the total error.</li>
+  <li>More steps = better accuracy, but more neural-network forward passes = more compute.</li>
+</ul>
+<p>
+  In flow matching and diffusion models, \(n\) is a critical hyperparameter at inference
+  time. Typical values range from 10 to 1000 depending on the task.
+</p>
+
+<div class="box warn">
+  <span class="label">Common Confusion: Bigger h is Faster but Less Accurate</span>
+  <p>
+    With \(n = 10\) steps, each neural-net call covers a large fraction of time, so the
+    constant-velocity approximation inside each interval is rough. With \(n = 1000\), each
+    interval is tiny, the velocity barely changes, and the approximation is excellent — but
+    you pay 100× as many neural-net forward passes. This trade-off drives much of the
+    engineering in modern diffusion samplers (DDIM, DPM-Solver++, etc.).
+  </p>
+</div>
+
+<h3>1.6.4 A Brief Box on Higher-Order Methods</h3>
+
+<div class="box intuition">
+  <span class="label">Going Further: Heun's Method and Runge–Kutta</span>
+  <p>
+    Euler's method uses only the velocity at the <em>left endpoint</em> of each interval.
+    You can do better by also peeking at the velocity near the right endpoint, then averaging.
+    This is Heun's method (mentioned in the MIT notes right after Algorithm 1):
+  </p>
+  <p>
+    <strong>Step 1 — Tentative step (same as Euler):</strong>
+    \(X'_{t+h} = X_t + h \, u_t(X_t)\)
+  </p>
+  <p>
+    <strong>Step 2 — Corrected step using the average velocity:</strong>
+    \(X_{t+h} = X_t + \dfrac{h}{2}\bigl(u_t(X_t) + u_{t+h}(X'_{t+h})\bigr)\)
+  </p>
+  <p>
+    Heun's method has a global error proportional to \(h^2\) instead of \(h\) — much
+    better accuracy for the same number of steps, at the cost of two neural-net evaluations
+    per step instead of one. The famous <strong>Runge–Kutta 4 (RK4)</strong> method goes
+    further, using four evaluations per step, achieving global error \(\propto h^4\).
+    Modern diffusion samplers like DPM-Solver++ are higher-order methods in this family.
+    You will encounter them in Part 6 and Part 9.
+  </p>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<h2 id="s1-7">1.7 Connection to Flow and Diffusion Models</h2>
+
+<div class="box connect">
+  <span class="label">The Big Picture: Sampling = ODE Simulation</span>
+  <p>
+    Here is the complete sampling loop in plain English, mapping directly to Algorithm 1
+    of the MIT notes:
+  </p>
+  <ol>
+    <li>
+      <strong>Train</strong> a neural network \(u_t^\theta : \mathbb{R}^d \times [0,1] \to \mathbb{R}^d\)
+      to serve as the vector field. Its job is to predict the velocity at any position and
+      time. Training is covered in Parts 10–11.
+    </li>
+    <li>
+      <strong>At inference:</strong> draw noise \(X_0 \sim \mathcal{N}(0, I_d)\). This is
+      the initial condition \(x_0\) chosen randomly.
+    </li>
+    <li>
+      <strong>Euler-integrate:</strong> for \(i = 1, \ldots, n\), compute
+      \(X_{t+h} = X_t + h \cdot u_t^\theta(X_t)\), advancing \(t\) by \(h = 1/n\)
+      each step.
+    </li>
+    <li>
+      <strong>Return</strong> \(X_1\). If the model was trained correctly, \(X_1\) is
+      distributed like the data \(p_\text{data}\) — it is a generated image/sample.
+    </li>
+  </ol>
+  <p>
+    The neural network IS the learned vector field. Sampling IS Euler integration.
+    This is the entire generative loop. Every complexity in later parts (conditional
+    generation, classifier-free guidance, latent diffusion) is a variation on this core.
+  </p>
+</div>
+
+<p>
+  Note a subtle but important point from the MIT notes: "although it is called a flow model,
+  the neural network parameterises the <em>vector field</em>, not the flow." The flow
+  \(\psi_t^\theta\) is only ever <em>approximated</em> via numerical simulation — we never
+  have it in closed form during inference.
+</p>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<h2 id="s1-8">1.8 Worked PyTorch Example: Euler Integration of a 2-D Vector Field</h2>
+
+<p>
+  We will implement Euler integration for two vector fields to build concrete intuition:
+</p>
+<ol>
+  <li>A <strong>rotation field</strong> \(u(x) = (-x_2, x_1)\) — causes circular motion.</li>
+  <li>A <strong>pull-to-target field</strong> \(u(x) = -\theta \, x\) — the linear decay from Example 4.</li>
+</ol>
+<p>
+  Neither depends on time (they are <em>autonomous</em>), which keeps the code simple. All
+  concepts generalise directly to time-dependent neural-network vector fields.
+</p>
+
+<pre><code><span class="code-comment"># ======================================================
+# Part 1 — Euler Integration Demo (illustrative code)
+# No training; purely shows the simulation loop.
+# Teaching code, not security-sensitive RNG usage.
+# ======================================================</span>
+
+import torch
+
+torch.manual_seed(42)  <span class="code-comment"># reproducibility; teaching code, not security-sensitive RNG</span>
+
+<span class="code-comment"># ── 1. Define vector fields ──────────────────────────────────────────────────
+
+# Vector field 1: Rotation field u(x) = [-x2, x1]
+# If x = [a, b], then u(x) = [-b, a].
+# This is perpendicular to x, so the particle orbits the origin.
+# Mathematically: d/dt X_t = [-X_{t,2}, X_{t,1}]
+# Exact solution: X_t = (cos(t)*x0[0] - sin(t)*x0[1],
+#                        sin(t)*x0[0] + cos(t)*x0[1])
+# i.e. rotation by angle t.</span>
+
+def rotation_field(x: torch.Tensor) -&gt; torch.Tensor:
+    <span class="code-comment"># x: shape (d,) with d=2  →  u(x): shape (2,)
+    # x[0] is the x-coordinate, x[1] is the y-coordinate</span>
+    return torch.stack([-x[1], x[0]])   <span class="code-comment"># [-y, x]</span>
+
+
+<span class="code-comment"># Vector field 2: Linear pull-to-zero u(x) = -theta * x  (Example 4 in notes)
+# Every particle decays to 0 exponentially fast.
+# Exact flow: psi_t(x0) = x0 * exp(-theta * t)</span>
+
+THETA = 2.0   <span class="code-comment"># decay rate; larger = faster convergence to 0</span>
+
+def pull_to_zero_field(x: torch.Tensor) -&gt; torch.Tensor:
+    <span class="code-comment"># x: shape (d,)  →  u(x): shape (d,)</span>
+    return -THETA * x
+
+
+<span class="code-comment"># ── 2. Euler integration function ────────────────────────────────────────────
+
+# Implements Algorithm 1 from the MIT notes.
+# Inputs:
+#   x0     : starting position, shape (d,)
+#   field  : callable (x: Tensor) -&gt; Tensor, the vector field u_t(x)
+#            (here time-independent, so we ignore t for simplicity)
+#   n_steps: number of Euler steps (higher = more accurate)
+#   T      : total time to integrate over (we go from 0 to T)
+#
+# Returns: trajectory as a list of (d,) tensors at each time step.</span>
+
+def euler_integrate(x0, field, n_steps=8, T=1.0):
+    h = T / n_steps           <span class="code-comment"># step size h = T/n  (from notes: h = 1/n when T=1)</span>
+    x = x0.clone()            <span class="code-comment"># current state X_t; start at x0</span>
+    traj = [x.clone()]        <span class="code-comment"># record the full trajectory</span>
+
+    for i in range(n_steps):
+        t = i * h             <span class="code-comment"># current time (not used by autonomous fields, shown for clarity)</span>
+        v = field(x)          <span class="code-comment"># v = u_t(X_t): the velocity at current position and time</span>
+        x = x + h * v         <span class="code-comment"># Euler update: X_{t+h} = X_t + h * u_t(X_t)</span>
+        traj.append(x.clone())
+
+    return traj
+
+
+<span class="code-comment"># ── 3. Run on the rotation field ─────────────────────────────────────────────</span>
+
+x0_rot = torch.tensor([1.0, 0.0])   <span class="code-comment"># start at (1, 0) on the unit circle</span>
+traj_rot = euler_integrate(x0_rot, rotation_field, n_steps=8, T=1.0)
+
+print("=== Rotation field (n=8 steps, T=1.0) ===")
+print(f"  Start : {traj_rot[0].numpy()}")
+<span class="code-comment"># Expected start:  [1. 0.]</span>
+
+print(f"  t=0.25: {traj_rot[2].numpy()}")
+<span class="code-comment"># Expected approx: [0.5625  0.8906] (exact: [cos(0.25), sin(0.25)] ≈ [0.9689, 0.2474])
+# Coarse Euler with n=8 is not very accurate for rotation — try n=100 for a tighter circle.</span>
+
+print(f"  End   : {traj_rot[-1].numpy()}")
+<span class="code-comment"># Expected approx: near [0.54,  0.84] (exact: [cos(1), sin(1)] ≈ [0.5403, 0.8415])
+# With n=8 Euler drifts outward slightly — the particle spirals out.
+# With n=1000 it stays very close to the exact circle.</span>
+
+
+<span class="code-comment"># ── 4. Run on the pull-to-zero field (Example 4) ─────────────────────────────</span>
+
+x0_pull = torch.tensor([3.0, -2.0])   <span class="code-comment"># start somewhere off-centre</span>
+traj_pull = euler_integrate(x0_pull, pull_to_zero_field, n_steps=8, T=1.0)
+
+print("\n=== Pull-to-zero field (theta=2, n=8 steps, T=1.0) ===")
+print(f"  Start : {traj_pull[0].numpy()}")
+<span class="code-comment"># Expected: [ 3. -2.]</span>
+
+print(f"  t=0.5 : {traj_pull[4].numpy()}")
+<span class="code-comment"># Expected approx: ~ [0.406, -0.270]
+# Exact: x0 * exp(-2*0.5) = [3,-2]*exp(-1) ≈ [1.104, -0.736]
+# Euler with n=8 overshoots slightly; closer with more steps.</span>
+
+print(f"  End   : {traj_pull[-1].numpy()}")
+<span class="code-comment"># Expected approx: near [0.03, -0.02]
+# Exact: x0 * exp(-2*1.0) = [3,-2]*exp(-2) ≈ [0.406, -0.271]
+# Euler with n=8 converges faster than exact due to accumulation of over-steps.</span>
+
+
+<span class="code-comment"># ── 5. Higher n → tighter approximation ──────────────────────────────────────</span>
+
+traj_pull_fine = euler_integrate(x0_pull, pull_to_zero_field, n_steps=1000, T=1.0)
+exact_end = x0_pull * torch.exp(torch.tensor(-THETA * 1.0))
+
+print("\n=== Pull-to-zero: Euler (n=1000) vs exact ===")
+print(f"  Euler (n=1000) end: {traj_pull_fine[-1].numpy()}")
+<span class="code-comment"># Expected: approximately [0.406, -0.271]</span>
+print(f"  Exact flow end    : {exact_end.numpy()}")
+<span class="code-comment"># Expected: [0.4060, -0.2707]  — Euler with n=1000 matches to ~4 decimal places</span>
+
+error = (traj_pull_fine[-1] - exact_end).norm().item()
+print(f"  L2 error (n=1000) : {error:.6f}")
+<span class="code-comment"># Expected: ~0.0003 — very small; halving n would roughly double this error.</span>
+
+
+<span class="code-comment"># ── 6. The flow model sampling loop (schematic) ───────────────────────────────
+# In a real flow model, `field` is replaced by a trained neural network u_theta_t.
+# The only difference: the field takes BOTH x and t as inputs.
+
+# def learned_vector_field(x, t, model, params):
+#     # x: (batch, d), t: scalar
+#     return model(x, t)   # neural-net forward pass
+#
+# Then sampling is:
+#   X0 = torch.randn(batch_size, d)     # draw from N(0, I)
+#   for each Euler step:
+#       X = X + h * learned_vector_field(X, t, model, params)
+#   return X1   # approximate sample from p_data</span>
+</code></pre>
+
+<div class="box intuition">
+  <span class="label">What the Code Demonstrates</span>
+  <p>
+    The rotation field shows that Euler integration traces out an arc of a circle — coarsely
+    with few steps, accurately with many. The pull-to-zero field reproduces Example 4 from
+    the notes numerically: every starting point exponentially converges toward the origin.
+    With \(n = 1000\) the Euler result is essentially indistinguishable from the exact
+    \(x_0 e^{-\theta}\). The schematic at the bottom generalises the loop to a neural-network
+    vector field: the structure is identical — only the velocity function changes.
+  </p>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<h2 id="s1-9">1.9 A Complete Worked Walk-Through of Algorithm 1</h2>
+
+<p>
+  Let us trace Algorithm 1 from the MIT notes step by step with concrete numbers, using the
+  pull-to-zero field with \(\theta = 2\), starting at \(x_0 = 1.0\) (scalar), and \(n = 4\)
+  steps.
+</p>
+
+<p>
+  Setup: \(h = 1/4 = 0.25\), \(u_t(x) = -2x\).
+</p>
+
+<table class="symbols">
+  <tr>
+    <th>Step \(i\)</th>
+    <th>Time \(t\)</th>
+    <th>\(X_t\)</th>
+    <th>\(u_t(X_t) = -2 X_t\)</th>
+    <th>\(h \cdot u_t(X_t)\)</th>
+    <th>\(X_{t+h}\)</th>
+  </tr>
+  <tr>
+    <td>—</td>
+    <td>0.00</td>
+    <td>1.0000</td>
+    <td>—</td>
+    <td>—</td>
+    <td>1.0000 (start)</td>
+  </tr>
+  <tr>
+    <td>1</td>
+    <td>0.00</td>
+    <td>1.0000</td>
+    <td>\(-2 \times 1.0 = -2.0\)</td>
+    <td>\(0.25 \times (-2.0) = -0.5\)</td>
+    <td>\(1.0 - 0.5 = 0.5\)</td>
+  </tr>
+  <tr>
+    <td>2</td>
+    <td>0.25</td>
+    <td>0.5000</td>
+    <td>\(-2 \times 0.5 = -1.0\)</td>
+    <td>\(0.25 \times (-1.0) = -0.25\)</td>
+    <td>\(0.5 - 0.25 = 0.25\)</td>
+  </tr>
+  <tr>
+    <td>3</td>
+    <td>0.50</td>
+    <td>0.2500</td>
+    <td>\(-2 \times 0.25 = -0.5\)</td>
+    <td>\(0.25 \times (-0.5) = -0.125\)</td>
+    <td>\(0.25 - 0.125 = 0.125\)</td>
+  </tr>
+  <tr>
+    <td>4</td>
+    <td>0.75</td>
+    <td>0.1250</td>
+    <td>\(-2 \times 0.125 = -0.25\)</td>
+    <td>\(0.25 \times (-0.25) = -0.0625\)</td>
+    <td>\(0.125 - 0.0625 = 0.0625\)</td>
+  </tr>
+</table>
+
+<p>
+  Euler with \(n=4\) gives \(X_1 \approx 0.0625\). The exact answer is
+  \(x_0 e^{-2} = 1 \times e^{-2} \approx 0.1353\). The error is roughly 0.073 — quite
+  large because \(n=4\) is very coarse. Notice that each Euler step multiplies the value
+  by \((1 - 2h) = (1 - 0.5) = 0.5\), so after 4 steps we get \(0.5^4 = 0.0625\). The
+  exact factor should be \(e^{-0.5} \approx 0.6065\) per step, not 0.5. The gap between
+  \(0.5\) and \(0.607\) is the source of the error.
+</p>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<h2 id="s1-10">1.10 Putting It All Together: The Flow Model Sampling Picture</h2>
+
+<p>
+  We now have all the pieces to understand a flow model at the conceptual level:
+</p>
+
+<ol>
+  <li>
+    <strong>The vector field \(u_t^\theta(x)\)</strong> is a neural network (e.g., a U-Net
+    or Transformer). It takes a noisy state \(x\) and a time \(t\) and predicts the
+    velocity that should move the state toward data.
+  </li>
+  <li>
+    <strong>At sampling time</strong>, we draw \(X_0 \sim \mathcal{N}(0, I_d)\) — pure
+    Gaussian noise. This is our initial condition.
+  </li>
+  <li>
+    <strong>We simulate the ODE</strong> via Euler's method (or a higher-order solver):
+    run Algorithm 1, calling the neural network \(n\) times.
+  </li>
+  <li>
+    <strong>The output \(X_1\)</strong> is (approximately) a sample from \(p_\text{data}\).
+  </li>
+</ol>
+
+<p>
+  Nothing in this process requires us to ever have the flow \(\psi_t^\theta\) in closed form.
+  The flow is implicitly defined by the neural-network vector field and realised by the
+  Euler loop. This is the full generative algorithm for flow models, and it is the
+  foundation for everything that follows.
+</p>
+
+<div class="box connect">
+  <span class="label">Connections to Later Parts</span>
+  <ul>
+    <li>
+      <strong>Part 5 (DDPM):</strong> Diffusion models use a discrete-time version of
+      this same loop, with a Gaussian noise schedule playing the role of \(u_t\).
+    </li>
+    <li>
+      <strong>Part 8 (SDE Formulation):</strong> Adding randomness to the ODE gives an SDE
+      (Stochastic Differential Equation). The Euler loop gains a noise injection term.
+    </li>
+    <li>
+      <strong>Part 9 (Probability Flow ODE):</strong> Every SDE has a corresponding ODE
+      with the same marginal distributions — and that ODE is simulated with the same Euler
+      loop.
+    </li>
+    <li>
+      <strong>Part 10 (Flow Matching):</strong> The training objective directly trains
+      \(u_t^\theta\) to match a target velocity. The sampling loop is exactly Algorithm 1.
+    </li>
+  </ul>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<h2 id="s1-checkpoint">Checkpoint — You Should Now Be Able To…</h2>
+
+<ul>
+  <li>
+    State what an ODE is in plain words: "the velocity at every instant is dictated by
+    the vector field evaluated at the current position."
+  </li>
+  <li>
+    Identify and explain every symbol in
+    \(\tfrac{d}{dt} X_t = u_t(X_t), \; X_0 = x_0\).
+  </li>
+  <li>
+    Distinguish between a vector field (the rule), a trajectory (one particle's path),
+    and a flow (the map from starting position to current position for all particles).
+  </li>
+  <li>
+    Explain in words why Theorem 3 guarantees existence and uniqueness, and why this
+    matters for flow models in particular.
+  </li>
+  <li>
+    Derive the scalar solution \(X_t = x_0 e^{at}\) for the ODE \(\tfrac{d}{dt}X_t = aX_t\)
+    from scratch, including verifying the initial condition and derivative check.
+  </li>
+  <li>
+    Derive the Euler update \(X_{t+h} = X_t + h \cdot u_t(X_t)\) from the Fundamental
+    Theorem of Calculus and the constant-velocity approximation.
+  </li>
+  <li>
+    Explain the effect of step size \(h\) on accuracy and compute cost, and state the
+    direction of improvement for higher-order methods like Heun's or RK4.
+  </li>
+  <li>
+    Trace through Algorithm 1 from the MIT notes with concrete numbers, as in the walk-through table above.
+  </li>
+  <li>
+    Describe the complete flow model sampling loop: (1) draw noise, (2) Euler-integrate the
+    neural-network vector field, (3) return the endpoint as a generated sample.
+  </li>
+  <li>
+    Read and understand the PyTorch code above, identifying where each ODE concept
+    (initial condition, velocity evaluation, Euler step, trajectory) appears.
+  </li>
+</ul>
+
+<nav class="pagenav">
+  <a class="prev" href="part00_math_foundations.html"><span class="dir">‹ Prev</span>Part 0 — Mathematical Foundations</a>
+  <a class="next" href="part02_probability_stochastic.html"><span class="dir">Next ›</span>Part 2 — Probability &amp; Stochastic Processes</a>
+</nav>
+
+</article>
+</main>
+</div>
+<script defer src="assets/guide.js"></script>
+</body>
+</html>

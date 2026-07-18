@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Part 2 — Probability &amp; Stochastic Processes · Diffusion Study Guide</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [["\\(", "\\)"]], displayMath: [["\\[", "\\]"]], tags: "none" },
+    options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle contents">☰</button>
+<div class="layout">
+<nav class="toc">
+  <a href="index.html"><strong>◆ Diffusion Study Guide</strong></a>
+  <h2>Foundations</h2>
+  <a href="part00_math_foundations.html"><span class="part-num">0</span>Mathematical Foundations</a>
+  <a href="part01_differential_equations.html"><span class="part-num">1</span>Differential Equations</a>
+  <a href="part02_probability_stochastic.html"><span class="part-num">2</span>Probability &amp; Stochastic Processes</a>
+  <a href="part03_score_functions.html"><span class="part-num">3</span>Score Functions</a>
+  <h2>Diffusion Core</h2>
+  <a href="part04_diffusion_models.html"><span class="part-num">4</span>Diffusion Models (big picture)</a>
+  <a href="part05_ddpm.html"><span class="part-num">5</span>DDPM</a>
+  <a href="part06_ddim.html"><span class="part-num">6</span>DDIM</a>
+  <a href="part07_continuous_time.html"><span class="part-num">7</span>Continuous-Time Diffusion</a>
+  <h2>Continuous Formulation</h2>
+  <a href="part08_sde_formulation.html"><span class="part-num">8</span>SDE Formulation</a>
+  <a href="part09_probability_flow_ode.html"><span class="part-num">9</span>Probability Flow ODE</a>
+  <a href="part10_flow_matching.html"><span class="part-num">10</span>Flow Matching</a>
+  <a href="part11_rectified_flows.html"><span class="part-num">11</span>Rectified Flows</a>
+  <h2>Systems &amp; Reading</h2>
+  <a href="part12_stable_diffusion.html"><span class="part-num">12</span>Stable Diffusion</a>
+  <a href="part13_reading_the_notes.html"><span class="part-num">13</span>Reading the MIT Notes</a>
+  <a href="part14_discrete_diffusion.html"><span class="part-num">14</span>Discrete Diffusion</a>
+</nav>
+<main>
+<article>
+
+<h1><span class="kicker">Part 2</span>Probability &amp; Stochastic Processes</h1>
+
+<p class="muted">Part 1 gave us deterministic trajectories — one starting point, one ending point, no randomness. Now we add randomness at every step of the trajectory. The result is the stochastic differential equation (SDE), which is the true mathematical home of diffusion models. This part builds every tool from scratch: random vectors, Brownian motion, the SDE itself, the Ornstein–Uhlenbeck process, and the Euler–Maruyama simulator. Every concept follows the same recipe: intuition first, then formal definition, then code.</p>
+
+<div class="box intuition">
+<span class="label">The big picture before we start</span>
+A diffusion model's forward process takes a clean image and <em>gradually adds random noise</em> until the image is pure Gaussian static. The reverse process <em>removes</em> that noise step by step to generate new images. Both directions are described by an SDE: a differential equation where every small time-step has both a deterministic drift and a random kick. By the end of this part, you will be able to read the core equation
+\[dX_t = f(X_t, t)\,dt + \sigma(t)\,dW_t\]
+and know exactly what every symbol means, where it came from, and why it is needed.
+</div>
+
+<!-- ============================================================ -->
+<h2>2.1 Probability recap: random vectors, joint densities, conditional expectation</h2>
+
+<p>This section recaps the probability tools used throughout the MIT notes, especially Appendix A (lines 1703–1776). We cover nothing exotic — just the objects you need to read the formulas confidently.</p>
+
+<h3>2.1.1 Random vectors and probability density functions</h3>
+
+<p>Recall from Part 0 that an image is a vector \(x \in \mathbb{R}^d\). A <strong>random vector</strong> \(X \in \mathbb{R}^d\) is a vector whose value is determined by chance — like drawing a random image from a dataset. We describe how likely each value is with a <strong>probability density function (PDF)</strong>:</p>
+
+<div class="box mathblock">
+<span class="label">Definition: Probability Density Function</span>
+A PDF \(p_X : \mathbb{R}^d \to \mathbb{R}_{\geq 0}\) assigns a non-negative number to every point in space. The probability that \(X\) falls in a region \(A\) is:
+\[P(X \in A) = \int_A p_X(x)\,dx\]
+The total probability over all space is exactly 1:
+\[\int_{\mathbb{R}^d} p_X(x)\,dx = 1\]
+</div>
+
+<p>Think of the PDF as a "height map." Where the map is tall, data points are dense; where it is flat, data points are rare. The Gaussian (normal) distribution is the most important PDF in this course:</p>
+
+\[\mathcal{N}(x;\,\mu,\sigma^2 I_d) = \frac{1}{(2\pi\sigma^2)^{d/2}} \exp\!\left(-\frac{\|x - \mu\|^2}{2\sigma^2}\right)\]
+
+<table class="symbols">
+<tr><th>Symbol</th><th>Meaning</th><th>Shape</th></tr>
+<tr><td>\(x\)</td><td>the point at which we evaluate the density</td><td>\((d,)\)</td></tr>
+<tr><td>\(\mu\)</td><td>the mean — where the bump is centered</td><td>\((d,)\)</td></tr>
+<tr><td>\(\sigma^2\)</td><td>the variance — how spread out the bump is</td><td>scalar</td></tr>
+<tr><td>\(I_d\)</td><td>the \(d\times d\) identity matrix — "isotropic": equal spread in all directions</td><td>\((d,d)\)</td></tr>
+<tr><td>\(\|x - \mu\|^2\)</td><td>squared distance from \(x\) to the center \(\mu\)</td><td>scalar</td></tr>
+</table>
+
+<div class="box intuition">
+<span class="label">Intuition: the Gaussian as a bell</span>
+In 1D, the Gaussian is the classic bell curve centered at \(\mu\). In 2D it is a circular mound (or an elliptical one if the spread differs by direction). In \(d\) dimensions it is a spherical cloud. The exponent \(-\|x-\mu\|^2/(2\sigma^2)\) is just saying "the density falls off as you move away from center; the rate of fall-off is controlled by \(\sigma^2\)." Large \(\sigma\): flat wide cloud. Small \(\sigma\): tall narrow spike.
+</div>
+
+<p>The MIT notes use the shorthand \(p_t\) to mean the PDF of the random variable \(X_t\) at time \(t\). This compresses notation from \(p_{X_t}(x)\) to just \(p_t(x)\) — a convention you will see everywhere in Appendix A.</p>
+
+<h3>2.1.2 Joint and marginal densities</h3>
+
+<p>When we have <em>two</em> random variables \(X, Y \in \mathbb{R}^d\), their <strong>joint PDF</strong> \(p_{X,Y}(x, y)\) describes the probability of <em>simultaneously</em> seeing \(X = x\) and \(Y = y\). Think of it as a density over the combined space \(\mathbb{R}^{2d}\).</p>
+
+<p>The <strong>marginal PDFs</strong> recover each variable's individual density by integrating out the other:</p>
+
+\[p_X(x) = \int p_{X,Y}(x,\,y)\,dy \qquad p_Y(y) = \int p_{X,Y}(x,\,y)\,dx\]
+
+<div class="box intuition">
+<span class="label">Marginalisation in plain English</span>
+Imagine a weather dataset with pairs (temperature \(X\), humidity \(Y\)). The joint density tells you the likelihood of <em>any combination</em> of temperature and humidity. To find the marginal "distribution of temperature regardless of humidity," you sum up the joint density across all possible humidity values. In continuous math, "sum across all" is an integral.
+</div>
+
+<p>This appears constantly in diffusion theory: the marginal \(p_t(x)\) of the noisy data at time \(t\) is obtained by marginalising out the initial data point \(x_0\):</p>
+
+\[p_t(x) = \int p_{t|0}(x \mid x_0)\,p_{\text{data}}(x_0)\,dx_0\]
+
+<p>where \(p_{t|0}(x \mid x_0)\) is the <em>conditional</em> density of \(X_t\) given we started at \(X_0 = x_0\) — which we define next.</p>
+
+<h3>2.1.3 Conditional densities and Bayes' rule</h3>
+
+<p>The <strong>conditional PDF</strong> \(p_{X|Y}(x|y)\) answers: given that \(Y = y\) already happened, what is the probability distribution of \(X\)? Formally (MIT notes Appendix A.2):</p>
+
+\[p_{X|Y}(x \mid y) = \frac{p_{X,Y}(x, y)}{p_Y(y)}, \quad \text{whenever } p_Y(y) &gt; 0\]
+
+<div class="box intuition">
+<span class="label">Intuition: slicing the joint density</span>
+Visualise the joint density \(p_{X,Y}\) as a hilly terrain over the \((x,y)\)-plane. The conditional density \(p_{X|Y}(x|y)\) is the cross-section of that terrain along the line \(Y = y\), then re-scaled so the slice integrates to 1. You "zoom into" one row of the joint terrain.
+</div>
+
+<p><strong>Bayes' rule</strong> just rearranges the definition — swap which variable is conditioned on:</p>
+
+\[p_{Y|X}(y \mid x) = \frac{p_{X|Y}(x \mid y)\, p_Y(y)}{p_X(x)}\]
+
+<p>This identity will be essential in Part 3 when we derive the score function, and again in Part 8 when we derive the reverse-time SDE.</p>
+
+<h3>2.1.4 Expectation and conditional expectation</h3>
+
+<p>The <strong>expectation</strong> \(\mathbb{E}[X]\) is the weighted average of all possible values of \(X\), weighted by their probability:</p>
+
+\[\mathbb{E}[X] = \int x\, p_X(x)\,dx\]
+
+<p>More generally, for any function \(f\) of \(X\), the <em>law of the unconscious statistician</em> (MIT notes eq. 98) says:</p>
+
+\[\mathbb{E}[f(X)] = \int f(x)\, p_X(x)\,dx\]
+
+<p>The <strong>conditional expectation</strong> \(\mathbb{E}[X \mid Y]\) is subtler. The MIT notes (Appendix A.2) distinguish two related but different objects carefully:</p>
+
+<div class="box mathblock">
+<span class="label">Two flavours of conditional expectation</span>
+<strong>1. \(\mathbb{E}[X \mid Y = y]\)</strong>: a <em>function</em> from \(\mathbb{R}^d \to \mathbb{R}^d\). You plug in a specific value \(y\) and get a vector back:
+\[\mathbb{E}[X \mid Y = y] = \int x\, p_{X|Y}(x \mid y)\,dx\]
+<strong>2. \(\mathbb{E}[X \mid Y]\)</strong>: a <em>random variable</em>. It is the function above, composed with the random variable \(Y\). Its value is uncertain because \(Y\) is uncertain.
+</div>
+
+<div class="box intuition">
+<span class="label">Intuition: the best guess</span>
+\(\mathbb{E}[X \mid Y]\) is formally defined as the "best approximating function \(g^\star(Y)\) to \(X\) in the least-squares sense," meaning it minimises \(\mathbb{E}[\|X - g(Y)\|^2]\) over all functions \(g\). Think of it as: given what you know about \(Y\), what is your best guess for \(X\)?
+This is literally the definition the MIT notes use (eq. 103). In diffusion, this appears as the optimal denoiser: the best prediction of the clean image \(x_0\) given the noisy image \(x_t\).
+</div>
+
+<p>The <strong>tower property</strong> (MIT notes eq. 106) is a calculation shortcut that will save us many lines of algebra later:</p>
+
+\[\mathbb{E}[X] = \mathbb{E}\!\left[\mathbb{E}[X \mid Y]\right]\]
+
+<p>In words: to find the unconditional expectation of \(X\), you can first condition on \(Y\), compute the inner expectation (which is a function of \(Y\)), and then average over \(Y\). The MIT notes verify this from the definitions (eq. 107); we will take it as a tool we can use freely.</p>
+
+<!-- ============================================================ -->
+<h2>2.2 Stochastic processes: random trajectories</h2>
+
+<p>In Part 1, a trajectory was a deterministic curve \((X_t)_{0 \leq t \leq 1}\) — one fixed path through \(\mathbb{R}^d\) determined entirely by the starting point \(X_0 = x_0\). If you run the same ODE from the same starting point twice, you get the identical path.</p>
+
+<p>A <strong>stochastic process</strong> is different: it is a <em>family of random variables</em> indexed by time. For every fixed time \(t\), \(X_t\) is a random variable. If you simulate the process twice from the same starting point, you get <em>different</em> paths because randomness is baked into the dynamics.</p>
+
+<div class="box prereq">
+<span class="label">Key contrast: deterministic vs stochastic trajectory</span>
+<strong>ODE trajectory (Part 1):</strong> \(X_t = \Phi_t(x_0)\) where \(\Phi_t\) is the flow map. Given \(x_0\), the future is determined.
+<br><br>
+<strong>SDE trajectory (this part):</strong> \(X_t\) is a <em>random variable</em> even if you fix \(X_0 = x_0\). Two runs give two different sample paths. Only the <em>distribution</em> of \(X_t\) is determined; no single path is.
+<br><br>
+The MIT notes (Section 2.2, opening paragraph) state this precisely: "When we simulate the same stochastic process twice, we might get different outcomes because the dynamics are designed to be random."
+</div>
+
+<p>Intuitively, imagine watching a pollen grain suspended in water under a microscope. The grain jiggles unpredictably because water molecules are constantly and randomly bumping into it. The grain's position \(X_t\) at time \(t\) is a random variable — different every time you watch it. The entire sequence of positions \((X_t)_{0 \leq t \leq 1}\) is a stochastic process, and it turns out to follow (approximately) Brownian motion.</p>
+
+<!-- ============================================================ -->
+<h2>2.3 Brownian motion (the Wiener process)</h2>
+
+<h3>2.3.1 Building intuition: the random walk</h3>
+
+<p>Before defining Brownian motion rigorously, let's build it from something familiar: a <strong>random walk</strong>.</p>
+
+<p>Suppose you stand at position 0 on a number line. Every second, you flip a fair coin: heads = step right by \(+1\), tails = step left by \(-1\). After \(n\) steps your position is \(S_n = \sum_{k=1}^{n} Z_k\) where each \(Z_k \in \{+1, -1\}\) independently with equal probability.</p>
+
+<div class="box intuition">
+<span class="label">From random walk to Brownian motion</span>
+Now imagine making the steps <em>tinier and more frequent</em>: instead of big steps every second, take steps of size \(\sqrt{h}\) every \(h\) seconds (where \(h \to 0\)). The \(\sqrt{h}\) scaling (not \(h\)!) is crucial — it keeps the variance finite even as the step size shrinks to zero.
+<br><br>
+In the limit \(h \to 0\), you get a <em>continuous path</em> that is infinitely jagged. This limiting object is Brownian motion, also called the Wiener process \(W_t\). The MIT notes describe it as "a continuous random walk" (Section 2.2).
+<br><br>
+<strong>Why \(\sqrt{h}\) and not \(h\)?</strong> If you take \(n = t/h\) steps of size \(h\), the total variance after time \(t\) is \(n \cdot h^2 = t \cdot h \to 0\) (collapses to zero). But with step size \(\sqrt{h}\), total variance is \(n \cdot h = t \cdot 1 = t\) — it stays equal to \(t\) regardless of step size. Variance growing linearly in time is the correct physical behaviour of diffusion.
+</div>
+
+<h3>2.3.2 Formal definition of Brownian motion</h3>
+
+<p>The MIT notes (Section 2.2) define Brownian motion through three properties. Here is each property, its formal statement, and its plain meaning:</p>
+
+<div class="box mathblock">
+<span class="label">Definition: Brownian motion (Wiener process)</span>
+A Brownian motion \(W = (W_t)_{0 \leq t \leq 1}\) is a stochastic process satisfying:
+<br><br>
+<strong>Property 1 — Starts at zero:</strong>
+\[W_0 = 0\]
+The process is initialised at the origin. (You can always translate later.)
+<br><br>
+<strong>Property 2 — Gaussian increments:</strong>
+\[W_t - W_s \;\sim\; \mathcal{N}\!\left(0,\, (t-s)\,I_d\right) \quad \text{for all } 0 \leq s &lt; t\]
+The displacement over any interval \([s, t]\) is a zero-mean Gaussian whose variance is <em>exactly the length of the interval</em>. Longer wait = more spread.
+<br><br>
+<strong>Property 3 — Independent increments:</strong>
+For any \(0 \leq t_0 &lt; t_1 &lt; \cdots &lt; t_n\), the increments \(W_{t_1} - W_{t_0},\; W_{t_2} - W_{t_1},\; \ldots\) are <em>mutually independent</em> random variables. What happened in the last interval tells you nothing about what will happen in the next.
+<br><br>
+<strong>Property 4 — Continuous paths:</strong>
+The sample paths \(t \mapsto W_t\) are continuous functions (you can draw them without lifting your pen — though you would never stop drawing, as the paths have infinite length).
+</div>
+
+<table class="symbols">
+<tr><th>Symbol</th><th>Meaning</th><th>Shape</th></tr>
+<tr><td>\(W_t\)</td><td>position of the Brownian motion at time \(t\)</td><td>\((d,)\)</td></tr>
+<tr><td>\(W_t - W_s\)</td><td>displacement (increment) over the interval \([s,t]\)</td><td>\((d,)\)</td></tr>
+<tr><td>\(t - s\)</td><td>length of the time interval — also the variance of the increment</td><td>scalar</td></tr>
+<tr><td>\(I_d\)</td><td>\(d\times d\) identity — the noise is spherically symmetric (isotropic)</td><td>\((d,d)\)</td></tr>
+</table>
+
+<h3>2.3.3 Why variance grows linearly in time</h3>
+
+<p>Recall from Part 0 a key property of Gaussians: <em>variances of independent Gaussians add when you sum the variables.</em> The Brownian motion increment \(W_t - W_0 = (W_t - W_{t/2}) + (W_{t/2} - W_0)\). These two half-interval increments are independent (by Property 3), and each has variance \(t/2\). So the total variance is \(t/2 + t/2 = t\). More generally, if you subdivide \([0, t]\) into \(n\) equal pieces of length \(t/n\), each piece contributes variance \(t/n\), and since there are \(n\) pieces, the total variance is \(n \cdot (t/n) = t\). Variance grows linearly in time: \(\text{Var}(W_t) = t\).</p>
+
+<div class="box intuition">
+<span class="label">Mental model: uncertainty accumulates</span>
+Think of time as the number of "mystery ingredients" being stirred into a soup. Each second of time is one more random stir. The total uncertainty in the soup's flavour grows with the number of stirs — linearly. The Brownian motion is simply the formalisation of this accumulated uncertainty.
+</div>
+
+<h3>2.3.4 Simulating Brownian motion</h3>
+
+<p>The MIT notes (eq. 5 in Section 2.2) give a direct simulation recipe: set \(W_0 = 0\), then for each step of size \(h &gt; 0\):</p>
+
+\[W_{t+h} = W_t + \sqrt{h} \cdot \varepsilon_t, \qquad \varepsilon_t \sim \mathcal{N}(0, I_d)\]
+
+<p>This matches Property 2 exactly: the increment \(W_{t+h} - W_t = \sqrt{h}\,\varepsilon_t\) is Gaussian with variance \(h \cdot I_d\), which equals the interval length \(h\). The square root ensures the variance scales correctly.</p>
+
+<!-- ============================================================ -->
+<h2>2.4 The differential \(dW_t\): a tiny Gaussian kick</h2>
+
+<p>Before writing SDEs, we need to understand what \(dW_t\) means heuristically. In ordinary calculus, \(dt\) is an "infinitesimally small" time step. Similarly, \(dW_t\) is an "infinitesimally small" Brownian increment over the interval \([t, t+dt]\):</p>
+
+\[dW_t = W_{t+dt} - W_t \;\sim\; \mathcal{N}(0,\, dt \cdot I_d)\]
+
+<p>This means \(dW_t\) is a random Gaussian vector with mean zero and variance equal to the (infinitesimal) time step \(dt\).</p>
+
+<div class="box warn">
+<span class="label">WARNING — The #1 confusion in stochastic calculus</span>
+The <strong>standard deviation</strong> of \(dW_t\) is \(\sqrt{dt}\), <strong>NOT</strong> \(dt\).
+<br><br>
+\[\text{std}(dW_t) = \sqrt{dt}, \qquad \text{Var}(dW_t) = dt\]
+<br>
+This matters enormously for simulation. When you take a step of size \(h\), the noise you add must be scaled by \(\sqrt{h}\), not \(h\). Using \(h\) instead of \(\sqrt{h}\) would make the noise collapse to zero as \(h \to 0\), which would give you an ODE, not an SDE. Using \(h^2\) would also be wrong. Only \(\sqrt{h}\) preserves the correct diffusion behaviour. You will see \(\sqrt{h}\) in every SDE solver, including Algorithm 2 in the MIT notes.
+</div>
+
+<p>The heuristic \(dW_t \sim \mathcal{N}(0, dt)\) is often summarised by saying \((dW_t)^2 \approx dt\). This second-order term is what makes stochastic calculus different from ordinary calculus — and it is the origin of Ito's lemma (Section 2.7 below).</p>
+
+<!-- ============================================================ -->
+<h2>2.5 Stochastic differential equations (SDEs)</h2>
+
+<h3>2.5.1 From ODE to SDE: adding random kicks</h3>
+
+<p>Recall from Part 1 that an ODE trajectory satisfies:</p>
+
+\[X_{t+h} = X_t + h \cdot f(X_t, t) + R_t(h)\]
+
+<p>where \(R_t(h)\) vanishes as \(h \to 0\). In differential notation this is \(dX_t = f(X_t, t)\,dt\). To make this stochastic, the MIT notes (Section 2.2) amend the update to:</p>
+
+\[X_{t+h} = X_t + h \cdot f(X_t, t) + \sigma(t) \cdot \sqrt{h} \cdot \varepsilon_t + R_t(h)\]
+
+<p>where \(\varepsilon_t \sim \mathcal{N}(0, I_d)\) is a fresh random vector at each step and \(\sigma(t) \geq 0\) is a scalar called the <strong>diffusion coefficient</strong>. As \(h \to 0\), the remainder term \(R_t(h)\) vanishes. In differential notation, this becomes the SDE:</p>
+
+<div class="box mathblock">
+<span class="label">Stochastic Differential Equation (SDE)</span>
+\[dX_t = \underbrace{f(X_t, t)\,dt}_{\text{drift}} + \underbrace{\sigma(t)\,dW_t}_{\text{diffusion}}\]
+<br>
+where \((W_t)\) is a Brownian motion and the equation is shorthand for the integral form
+\[X_t = X_0 + \int_0^t f(X_s, s)\,ds + \int_0^t \sigma(s)\,dW_s.\]
+</div>
+
+<table class="symbols">
+<tr><th>Symbol</th><th>Meaning</th><th>Shape</th></tr>
+<tr><td>\(X_t\)</td><td>the random state at time \(t\)</td><td>\((d,)\)</td></tr>
+<tr><td>\(f(X_t, t)\)</td><td>the <em>drift</em>: a deterministic vector field that "pulls" the state</td><td>\((d,)\)</td></tr>
+<tr><td>\(dt\)</td><td>an infinitesimal time step</td><td>scalar</td></tr>
+<tr><td>\(\sigma(t)\)</td><td>the diffusion coefficient: controls how much noise is added</td><td>scalar</td></tr>
+<tr><td>\(dW_t\)</td><td>an infinitesimal Gaussian kick, \(\sim \mathcal{N}(0, dt\cdot I_d)\)</td><td>\((d,)\)</td></tr>
+</table>
+
+<div class="box intuition">
+<span class="label">Intuition: drift + noise</span>
+Think of the SDE as a river (the drift \(f\,dt\)) with a storm blowing (the diffusion \(\sigma\,dW_t\)). The drift tells you which direction the current flows and how fast. The diffusion adds an unpredictable gust at every instant. The particle's actual path is a combination of following the river and being blown by the storm. Different runs produce different paths because the gusts are random. However, if you average over many runs, the average path follows the drift (since the gusts average to zero).
+</div>
+
+<div class="box prereq">
+<span class="label">Contrast with the ODE from Part 1</span>
+An ODE is \(dX_t = f(X_t, t)\,dt\) — no noise term. Setting \(\sigma(t) = 0\) in the SDE recovers the ODE exactly. The MIT notes explicitly state: "every ODE is also an SDE — simply with a vanishing diffusion coefficient \(\sigma_t = 0\)." The SDE is a strict generalisation.
+</div>
+
+<h3>2.5.2 Why diffusion models need SDEs</h3>
+
+<p>In Part 1, a flow model used an ODE to transport samples from a simple distribution to the data distribution. This works, but a deterministic flow can only "deform" — it cannot "create" genuine diversity through randomness. An SDE with nonzero \(\sigma(t)\) injects fresh Gaussian noise at every time step. This noise:</p>
+
+<ul>
+<li>Gives the model a richer family of dynamics to learn from.</li>
+<li>Allows the forward process to destroy structure in data (turn images into noise) purely by diffusing.</li>
+<li>Enables the reverse process to generate new, diverse samples by denoising a fresh noise draw — not by inverting a deterministic map.</li>
+</ul>
+
+<h3>2.5.3 Theorem 5: SDE solutions exist and are unique</h3>
+
+<p>Just as we needed the ODE existence theorem in Part 1 to trust that the flow exists, we need the analogous result for SDEs. The MIT notes state it as <strong>Theorem 5</strong> (Section 2.2):</p>
+
+<div class="box mathblock">
+<span class="label">Theorem 5 — SDE Solution Existence and Uniqueness (MIT notes, Section 2.2)</span>
+If the drift \(f: \mathbb{R}^d \times [0,1] \to \mathbb{R}^d\) is continuously differentiable with bounded derivative, and the diffusion coefficient \(\sigma(t)\) is continuous, then the SDE
+\[dX_t = f(X_t, t)\,dt + \sigma(t)\,dW_t\]
+has a solution given by a unique stochastic process \((X_t)_{0 \leq t \leq 1}\).
+</div>
+
+<p>The conditions are mild — essentially "no blowup." The MIT notes note that a rigorous proof would require several lectures of stochastic calculus (constructing Brownian motion from first principles, building the Ito integral). For our purposes, we take this theorem as the guarantee that the processes we write down are well-defined, and focus on using them.</p>
+
+<!-- ============================================================ -->
+<h2>2.6 The Euler–Maruyama method (Algorithm 2)</h2>
+
+<p>Theorem 5 guarantees a solution exists. But to actually use an SDE in a computer program, we need to simulate it numerically. The simplest such scheme is the <strong>Euler–Maruyama method</strong>, which is to SDEs exactly what Euler's method (Part 1) is to ODEs.</p>
+
+<h3>2.6.1 Derivation</h3>
+
+<p>Recall Euler's method for an ODE: approximate the integral \(\int_t^{t+h} f(X_s, s)\,ds \approx h \cdot f(X_t, t)\). For the SDE, we do the same for the drift, and we approximate the stochastic integral \(\int_t^{t+h} \sigma(s)\,dW_s \approx \sigma(t)\,(W_{t+h} - W_t)\). Since \(W_{t+h} - W_t \sim \mathcal{N}(0, h\,I_d)\), we can write it as \(\sqrt{h}\,\varepsilon\) with \(\varepsilon \sim \mathcal{N}(0, I_d)\). Putting it together:</p>
+
+<div class="box mathblock">
+<span class="label">Euler–Maruyama update (MIT notes Algorithm 2, eq. 6)</span>
+\[X_{t+h} = X_t + h \cdot f(X_t, t) + \sigma(t) \cdot \sqrt{h} \cdot \varepsilon, \qquad \varepsilon \sim \mathcal{N}(0, I_d)\]
+<br>
+where \(h = 1/n\) is the step size and we repeat for \(n\) steps from \(t = 0\) to \(t = 1\).
+</div>
+
+<p>The MIT notes present this as Algorithm 2 (Sampling from a Diffusion Model). The full algorithm:</p>
+
+<ol>
+<li>Set step size \(h = 1/n\), initialise \(t = 0\).</li>
+<li>Draw \(X_0 \sim p_{\text{init}}\) (e.g. a standard Gaussian).</li>
+<li>For \(i = 1, \ldots, n\):
+  <ol type="a">
+  <li>Draw \(\varepsilon \sim \mathcal{N}(0, I_d)\).</li>
+  <li>Set \(X_{t+h} = X_t + h \cdot f^\theta_t(X_t) + \sigma(t)\sqrt{h}\,\varepsilon\).</li>
+  <li>Advance \(t \leftarrow t + h\).</li>
+  </ol>
+</li>
+<li>Return \(X_1\) as the generated sample.</li>
+</ol>
+
+<div class="box warn">
+<span class="label">The sqrt(h) is not optional</span>
+In the Euler–Maruyama update, the noise term is \(\sigma(t)\,\sqrt{h}\,\varepsilon\). This is because the Brownian increment \(W_{t+h} - W_t\) has standard deviation \(\sqrt{h}\), not \(h\). The drift term scales like \(h\) (first order in the step size). The diffusion term scales like \(\sqrt{h}\) (half order). This asymmetry — drift is \(O(h)\), noise is \(O(\sqrt{h})\) — is a fundamental feature of stochastic calculus. The noise always dominates the drift at small scales.
+</div>
+
+<!-- ============================================================ -->
+<h2>2.7 The Ornstein–Uhlenbeck process (Example 6)</h2>
+
+<h3>2.7.1 Definition and physical intuition</h3>
+
+<p>The most important SDE in diffusion modelling is the <strong>Ornstein–Uhlenbeck (OU) process</strong>, which the MIT notes introduce as <strong>Example 6</strong> (Section 2.2). It uses a constant diffusion coefficient \(\sigma(t) = \sigma \geq 0\) and a linear drift \(f(X_t, t) = -\theta X_t\) for some constant \(\theta &gt; 0\):</p>
+
+<div class="box mathblock">
+<span class="label">Ornstein–Uhlenbeck SDE (MIT notes Example 6, eq. 8)</span>
+\[dX_t = -\theta\, X_t\,dt + \sigma\,dW_t\]
+<br>
+The drift is \(f(X_t, t) = -\theta X_t\) (linear in \(X_t\), no explicit time dependence). The diffusion is \(\sigma\) (constant).
+</div>
+
+<table class="symbols">
+<tr><th>Symbol</th><th>Meaning</th><th>Typical value</th></tr>
+<tr><td>\(\theta &gt; 0\)</td><td>the <em>spring constant</em> — how strongly the drift pulls toward zero</td><td>0.25 in MIT Figure 3</td></tr>
+<tr><td>\(\sigma \geq 0\)</td><td>the noise amplitude — how vigorously the Brownian kicks perturb the particle</td><td>varied in Figure 3</td></tr>
+<tr><td>\(-\theta X_t\)</td><td>a vector pointing from \(X_t\) back toward \(0\) — restoring force</td><td>\((d,)\)</td></tr>
+</table>
+
+<div class="box intuition">
+<span class="label">Intuition: a spring in a thermal bath</span>
+Imagine a bead attached to a spring. The spring always pulls the bead back toward its resting position (origin). That is the drift \(-\theta X_t\): the further you are from zero, the harder the spring pulls. At the same time, the surrounding fluid bombards the bead with random thermal kicks — that is the Brownian term \(\sigma\,dW_t\).
+<br><br>
+Two forces compete: the spring pulling toward order (zero), and the random kicks pushing toward disorder (spread). They reach equilibrium when the spread from the kicks equals the compression from the spring. That equilibrium is a Gaussian.
+<br><br>
+The MIT notes state: "This process converges towards a Gaussian distribution \(\mathcal{N}(0,\, \sigma^2/(2\theta))\) if we simulate it for \(t \to \infty\)."
+</div>
+
+<h3>2.7.2 Computing the mean: \(\mathbb{E}[X_t | X_0]\)</h3>
+
+<p>Let us find the conditional mean of the OU process. We want \(m(t) = \mathbb{E}[X_t \mid X_0 = x_0]\). Taking expectations of the SDE and using \(\mathbb{E}[dW_t] = 0\):</p>
+
+\[\frac{d}{dt}\mathbb{E}[X_t \mid X_0] = \mathbb{E}\!\left[\frac{dX_t}{dt}\bigg| X_0\right] = -\theta\,\mathbb{E}[X_t \mid X_0] = -\theta\, m(t)\]
+
+<p>This is an ordinary differential equation (an ODE from Part 1!) for \(m(t)\): \(\dot{m} = -\theta\,m\). With initial condition \(m(0) = x_0\), the solution is:</p>
+
+\[\mathbb{E}[X_t \mid X_0 = x_0] = x_0\, e^{-\theta t}\]
+
+<div class="box intuition">
+<span class="label">Intuition: exponential mean reversion</span>
+The mean decays exponentially toward zero. After time \(t = 1/\theta\) (one "time constant"), the mean has dropped to \(x_0/e \approx 0.37\, x_0\). After \(t = 5/\theta\), it is essentially zero: \(e^{-5} \approx 0.007\). The parameter \(\theta\) controls how quickly the process "forgets" its starting point. Large \(\theta\) = fast forgetting; small \(\theta\) = slow forgetting.
+</div>
+
+<h3>2.7.3 The stationary distribution</h3>
+
+<p>As \(t \to \infty\), the mean \(x_0 e^{-\theta t} \to 0\). The variance converges to a constant value that balances the spring with the noise. The stationary distribution (reached in the long run) is:</p>
+
+\[X_\infty \sim \mathcal{N}\!\left(0,\; \frac{\sigma^2}{2\theta}\right)\]
+
+<p>This is the equilibrium between noise injection (proportional to \(\sigma^2\)) and mean reversion (proportional to \(\theta\)). Large \(\sigma\) makes the stationary distribution broader; large \(\theta\) makes it narrower.</p>
+
+<h3>2.7.4 Why the OU process is central to diffusion models</h3>
+
+<div class="box connect">
+<span class="label">Connection to diffusion models</span>
+The OU process is the prototypical <em>forward noising process</em> in diffusion models. Here is the key insight: regardless of where you initialise \(X_0\) (even from a complex image distribution), the OU process will eventually push \(X_t\) toward \(\mathcal{N}(0, \sigma^2/(2\theta))\) — a simple, known Gaussian.
+<br><br>
+This solves a fundamental problem in generative modelling: we need a way to turn any data distribution into a simple distribution that we can sample from easily. The OU forward process does exactly that — it erases the structure in the data and replaces it with Gaussian noise, step by step, in a mathematically tractable way.
+<br><br>
+The MIT notes note that for \(\sigma = 0\), the OU process reduces to the linear ODE from eq. (3) of Section 2.1, with deterministic convergence to zero. Adding \(\sigma &gt; 0\) turns this into a stochastic process that converges to a Gaussian cloud rather than a single point. Figure 3 in the notes shows this transition beautifully.
+</div>
+
+<!-- ============================================================ -->
+<h2>2.8 A brief note on Ito's lemma</h2>
+
+<p>If you apply a smooth function \(g(X_t)\) to an ODE solution, ordinary calculus (the chain rule) gives \(dg = g'(X_t)\,dX_t\). For an SDE solution, there is an <em>extra term</em>.</p>
+
+<div class="box mathblock">
+<span class="label">Ito's lemma (heuristic version)</span>
+For a smooth function \(g: \mathbb{R}^d \to \mathbb{R}\) and an SDE solution \(X_t\):
+\[dg(X_t) = g'(X_t)\,dX_t + \tfrac{1}{2} g''(X_t)\,\sigma(t)^2\,dt + \cdots\]
+The <strong>extra second-order term</strong> \(\tfrac{1}{2} g''(X_t)\,\sigma^2\,dt\) comes from \((dW_t)^2 \approx dt\). In ordinary calculus, \((dx)^2 = 0\) (second-order terms vanish). In stochastic calculus, \((dW_t)^2 = dt\) does NOT vanish — it is first order in \(dt\).
+</div>
+
+<div class="box intuition">
+<span class="label">Why (dW)^2 = dt but (dt)^2 = 0</span>
+In ordinary calculus, squaring a tiny number \(dt\) gives an even tinier number \(dt^2\), which is negligible. But \(dW_t\) has standard deviation \(\sqrt{dt}\), so \((dW_t)^2\) has magnitude \(dt\) — the same order as \(dt\) itself. You cannot ignore it. This is the central mathematical surprise of Ito calculus, and it is why computing with SDEs requires a different set of rules than computing with ODEs. You will see Ito's lemma appear when the MIT notes derive the score function and the reverse SDE in Parts 3 and 8.
+</div>
+
+<p>We will not prove Ito's lemma here — full proofs belong in a graduate stochastic calculus course. The goal is simply that when you encounter the extra term in a later derivation, it does not feel mysterious.</p>
+
+<!-- ============================================================ -->
+<h2>2.9 Summary 7: diffusion models as SDEs</h2>
+
+<p>The MIT notes culminate Section 2.2 in <strong>Summary 7</strong>, which ties everything together into the formal definition of a diffusion model:</p>
+
+<div class="box mathblock">
+<span class="label">Summary 7 — SDE generative model (MIT notes Section 2.2)</span>
+A diffusion model is parameterised by a neural network \(f^\theta_t\) (the drift) and a fixed diffusion coefficient \(\sigma(t)\):
+\[X_0 \sim p_{\text{init}}, \qquad dX_t = f^\theta_t(X_t)\,dt + \sigma(t)\,dW_t\]
+To generate a sample:
+<ol>
+<li>Draw \(X_0\) from a simple distribution (e.g. a standard Gaussian).</li>
+<li>Simulate the SDE from \(t = 0\) to \(t = 1\) using Euler–Maruyama (Algorithm 2).</li>
+<li>Return \(X_1\): this should approximate a sample from \(p_{\text{data}}\).</li>
+</ol>
+A diffusion model with \(\sigma(t) = 0\) is a <em>flow model</em> (Part 1 of this guide).
+</div>
+
+<!-- ============================================================ -->
+<h2>2.10 Connection box: the road ahead</h2>
+
+<div class="box connect">
+<span class="label">How this connects to the rest of the guide</span>
+<strong>Forward process (Parts 4–7):</strong> The forward noising process is an SDE (often OU-like) that maps data \(X_1 \sim p_{\text{data}}\) to noise \(X_0 \sim p_{\text{init}}\). By choosing \(\sigma(t)\) and \(\theta\) carefully, the marginals \(p_t(x)\) have closed-form expressions, making training tractable.
+<br><br>
+<strong>Reverse-time SDE (Part 8):</strong> There exists a remarkable result (the Anderson reverse-time SDE) that says: running an SDE backwards in time produces a new SDE driven by the <em>score function</em> \(\nabla_x \log p_t(x)\). This is the theoretical heart of score-based diffusion models — and it is why learning the score function (Part 3) is so important.
+<br><br>
+<strong>Probability Flow ODE (Part 9):</strong> Every SDE has an associated deterministic ODE that generates the same marginal distributions \(p_t\). This ODE, called the probability flow ODE, allows faster sampling (no noise needed) and enables exact likelihood computation.
+<br><br>
+<strong>In one sentence:</strong> The diffusion forward process is an SDE (often OU-like) that turns data into noise; the reverse-time SDE turns noise back into data.
+</div>
+
+<!-- ============================================================ -->
+<h2>2.11 PyTorch example: simulating the OU process</h2>
+
+<p>Let us put everything together with runnable code. We simulate many independent trajectories of the 1D OU process using Euler–Maruyama, and watch the empirical distribution converge toward the stationary Gaussian.</p>
+
+<pre><code>import torch
+import math
+
+<span class="code-comment"># Teaching code: torch.manual_seed is used for reproducibility, not</span>
+<span class="code-comment"># security-sensitive RNG — this is purely a pedagogical simulation.</span>
+torch.manual_seed(42)
+
+<span class="code-comment"># OU process parameters</span>
+theta = 0.5        <span class="code-comment"># spring constant: rate of mean reversion toward 0</span>
+sigma = 1.0        <span class="code-comment"># noise amplitude: standard deviation of the Brownian kicks</span>
+
+<span class="code-comment"># Stationary distribution: N(0, sigma^2 / (2*theta))</span>
+<span class="code-comment"># sigma^2 / (2*theta) = 1.0 / 1.0 = 1.0, so stationary is N(0, 1.0)</span>
+stationary_var  = sigma**2 / (2 * theta)  <span class="code-comment"># = 1.0</span>
+stationary_std  = math.sqrt(stationary_var)  <span class="code-comment"># = 1.0</span>
+
+<span class="code-comment"># Simulation settings</span>
+n_trajectories = 10_000   <span class="code-comment"># many trajectories so the empirical distribution is smooth</span>
+T              = 5.0      <span class="code-comment"># total time to simulate (long enough to reach stationarity)</span>
+n_steps        = 500      <span class="code-comment"># number of Euler-Maruyama steps</span>
+h              = T / n_steps  <span class="code-comment"># step size h = 5.0 / 500 = 0.01</span>
+
+<span class="code-comment"># Initial condition: start far from the stationary distribution to see convergence</span>
+<span class="code-comment"># X_0 = 5.0 for ALL trajectories (a point mass at 5, far from the Gaussian N(0,1))</span>
+X = torch.full((n_trajectories,), fill_value=5.0)   <span class="code-comment"># shape: (10000,)</span>
+
+print(f"t=0.00  | mean={X.mean():.3f}  std={X.std():.3f}")
+<span class="code-comment"># Expected: t=0.00  | mean=5.000  std=0.000   (all start at 5.0)</span>
+
+<span class="code-comment"># Euler-Maruyama loop</span>
+<span class="code-comment"># Update rule: X_{t+h} = X_t + h * (-theta * X_t) + sigma * sqrt(h) * eps</span>
+<span class="code-comment">#                                 ^^^drift^^^         ^^^diffusion^^^</span>
+<span class="code-comment"># The drift -theta*X_t pulls the mean toward 0.</span>
+<span class="code-comment"># The diffusion sigma*sqrt(h)*eps injects Gaussian noise; note sqrt(h) NOT h.</span>
+
+check_times = {50, 100, 200, 500}  <span class="code-comment"># steps at which to print diagnostics</span>
+
+for step in range(1, n_steps + 1):
+    t       = (step - 1) * h              <span class="code-comment"># current time</span>
+    drift   = -theta * X                  <span class="code-comment"># shape (10000,), deterministic pull toward 0</span>
+    eps     = torch.randn(n_trajectories) <span class="code-comment"># fresh N(0,1) kick for each trajectory</span>
+    noise   = sigma * math.sqrt(h) * eps  <span class="code-comment"># scale by sqrt(h), NOT h</span>
+    X       = X + h * drift + noise       <span class="code-comment"># Euler-Maruyama update</span>
+
+    if step in check_times:
+        print(f"t={step*h:.2f}  | mean={X.mean():.3f}  std={X.std():.3f}  "
+              f"(target mean=0.000, target std={stationary_std:.3f})")
+
+<span class="code-comment"># Expected output (approximate — exact values depend on RNG seed):</span>
+<span class="code-comment"># t=0.50  | mean=3.894  std=0.441  (target mean=0.000, target std=1.000)</span>
+<span class="code-comment"># t=1.00  | mean=3.033  std=0.666  (target mean=0.000, target std=1.000)</span>
+<span class="code-comment"># t=2.00  | mean=1.839  std=0.897  (target mean=0.000, target std=1.000)</span>
+<span class="code-comment"># t=5.00  | mean=0.039  std=0.991  (target mean=0.000, target std=1.000)</span>
+
+<span class="code-comment"># Observations:</span>
+<span class="code-comment"># 1. The mean starts at 5.0 and decays toward 0 as x_0 * exp(-theta*t) = 5*exp(-0.5*t).</span>
+<span class="code-comment">#    At t=5.0: 5*exp(-2.5) ~ 5*0.082 ~ 0.41, but with noise the empirical mean fluctuates.</span>
+<span class="code-comment"># 2. The std starts at 0 (point mass) and grows toward the stationary value of 1.0.</span>
+<span class="code-comment"># 3. By t=5.0, the empirical distribution has converged: mean ~ 0, std ~ 1.</span>
+<span class="code-comment"># This is the OU forward process: it erases any initial distribution and replaces</span>
+<span class="code-comment"># it with N(0, sigma^2/(2*theta)) = N(0, 1) regardless of the starting point.</span>
+
+<span class="code-comment"># Verify the mean decay formula: E[X_t | X_0=5] = 5 * exp(-theta*t)</span>
+for t_check in [0.5, 1.0, 2.0, 5.0]:
+    theoretical_mean = 5.0 * math.exp(-theta * t_check)
+    print(f"t={t_check}: theoretical mean = {theoretical_mean:.3f}")</code></pre>
+
+<pre><code><span class="code-comment"># Expected theoretical means:</span>
+<span class="code-comment"># t=0.5: theoretical mean = 3.894</span>
+<span class="code-comment"># t=1.0: theoretical mean = 3.033</span>
+<span class="code-comment"># t=2.0: theoretical mean = 1.839</span>
+<span class="code-comment"># t=5.0: theoretical mean = 0.410</span></code></pre>
+
+<div class="box intuition">
+<span class="label">Reading the simulation output</span>
+Notice that by \(t = 5.0\) the empirical mean is near 0 and the standard deviation is near 1.0, matching the stationary distribution \(\mathcal{N}(0, 1)\). We started at a point mass at \(x = 5\) — very far from Gaussian. The OU process drove the distribution toward Gaussian regardless of where we started. That is the core property that makes OU useful for diffusion models: it is a universal "noise funnel" that maps any distribution toward a known Gaussian, step by step, in a way we can compute and invert.
+</div>
+
+<!-- ============================================================ -->
+<h2>2.12 Checkpoint: what you must be able to do</h2>
+
+<ul>
+<li><strong>Random vectors:</strong> Given a joint density \(p_{X,Y}(x,y)\), write down the marginal \(p_X(x)\) as an integral. State Bayes' rule.</li>
+<li><strong>Conditional expectation:</strong> Distinguish \(\mathbb{E}[X \mid Y = y]\) (a function) from \(\mathbb{E}[X \mid Y]\) (a random variable). State the tower property.</li>
+<li><strong>Stochastic process:</strong> Explain why a stochastic process produces different paths on different runs, while an ODE trajectory is deterministic.</li>
+<li><strong>Brownian motion:</strong> State the three defining properties (starts at zero; Gaussian increments with variance = time elapsed; independent increments). Explain why variance grows linearly in time using the additivity of variances.</li>
+<li><strong>The differential \(dW_t\):</strong> State the scaling rule: \(\text{std}(dW_t) = \sqrt{dt}\). Explain why using \(dt\) instead of \(\sqrt{dt}\) in simulation is wrong.</li>
+<li><strong>SDE structure:</strong> Identify the drift term and the diffusion term in \(dX_t = f(X_t,t)\,dt + \sigma(t)\,dW_t\). Explain what each term does.</li>
+<li><strong>Theorem 5:</strong> State (in plain words) what it guarantees and why it matters.</li>
+<li><strong>Euler–Maruyama (Algorithm 2):</strong> Write the update rule from memory, including the \(\sqrt{h}\) on the noise term. Derive it from the SDE definition.</li>
+<li><strong>Ornstein–Uhlenbeck (Example 6):</strong> Write the SDE. State what the drift \(-\theta X_t\) does geometrically (mean reversion). State the stationary distribution \(\mathcal{N}(0, \sigma^2/(2\theta))\). Derive the mean \(\mathbb{E}[X_t \mid X_0] = X_0\,e^{-\theta t}\).</li>
+<li><strong>Ito correction:</strong> State (in one sentence) why \((dW_t)^2 \approx dt\) creates an extra term in the chain rule for SDEs.</li>
+<li><strong>Big picture:</strong> Explain in two sentences how the SDE forward process in a diffusion model turns data into noise, and why the reverse-time SDE turns noise into data.</li>
+</ul>
+
+<nav class="pagenav">
+  <a class="prev" href="part01_differential_equations.html"><span class="dir">&#8249; Prev</span>Part 1 — Differential Equations</a>
+  <a class="next" href="part03_score_functions.html"><span class="dir">Next &#8250;</span>Part 3 — Score Functions</a>
+</nav>
+
+</article>
+</main>
+</div>
+<script defer src="assets/guide.js"></script>
+</body>
+</html>

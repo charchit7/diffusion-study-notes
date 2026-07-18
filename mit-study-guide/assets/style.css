@@ -1,0 +1,150 @@
+/* MIT Diffusion Notes — First-Principles Study Guide
+   Book-like reading layout with a fixed sidebar TOC. No external fonts. */
+
+:root {
+  --bg: #fbfaf7;
+  --ink: #1c1c1e;
+  --muted: #5b5b60;
+  --rule: #e3e0d8;
+  --accent: #7d54b3;       /* diffusion purple, matches course repo */
+  --accent-soft: #efe9f7;
+  --code-bg: #f3f1ea;
+  --warn-bg: #fff7e6;
+  --warn-bd: #f0c36d;
+  --intuition-bg: #eef6ff;
+  --intuition-bd: #9cc4f0;
+  --math-bg: #f6f3ec;
+  --math-bd: #d8cdb4;
+  --code-line: #e0ddd3;
+  --maxw: 820px;
+  --sidebar: 300px;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, serif;
+  line-height: 1.66;
+  font-size: 17px;
+}
+
+/* ---------- layout ---------- */
+.layout { display: flex; align-items: flex-start; }
+
+nav.toc {
+  position: sticky;
+  top: 0;
+  width: var(--sidebar);
+  height: 100vh;
+  overflow-y: auto;
+  padding: 1.4rem 1.1rem 3rem;
+  border-right: 1px solid var(--rule);
+  background: #f7f5ef;
+  flex-shrink: 0;
+  font-size: 0.92rem;
+}
+nav.toc h2 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 1.2rem 0 0.4rem; }
+nav.toc a { display: block; color: var(--ink); text-decoration: none; padding: 0.18rem 0.4rem; border-radius: 5px; }
+nav.toc a:hover { background: var(--accent-soft); color: var(--accent); }
+nav.toc a.current { background: var(--accent); color: #fff; font-weight: 600; }
+nav.toc .part-num { color: var(--muted); font-variant-numeric: tabular-nums; margin-right: 0.35rem; }
+nav.toc a.current .part-num { color: #e8dcff; }
+
+main {
+  flex: 1;
+  min-width: 0;
+  padding: 2.4rem clamp(1rem, 5vw, 3.5rem) 6rem;
+  display: flex;
+  justify-content: center;
+}
+article { width: 100%; max-width: var(--maxw); }
+
+/* ---------- typography ---------- */
+h1 { font-size: 2.0rem; line-height: 1.2; margin: 0 0 0.4rem; }
+h1 .kicker { display:block; font-size: 0.85rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); font-weight: 700; margin-bottom: 0.5rem; }
+h2 { font-size: 1.5rem; margin: 2.6rem 0 0.8rem; padding-bottom: 0.3rem; border-bottom: 2px solid var(--rule); }
+h3 { font-size: 1.18rem; margin: 1.8rem 0 0.5rem; color: #2b2b2e; }
+h4 { font-size: 1.02rem; margin: 1.3rem 0 0.4rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+p { margin: 0.7rem 0; }
+a { color: var(--accent); }
+ul, ol { padding-left: 1.4rem; }
+li { margin: 0.3rem 0; }
+hr { border: none; border-top: 1px solid var(--rule); margin: 2.4rem 0; }
+small, .muted { color: var(--muted); }
+
+/* ---------- callouts ---------- */
+.box { border-radius: 10px; padding: 0.9rem 1.1rem; margin: 1.2rem 0; border: 1px solid var(--rule); }
+.box .label { font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; display: block; margin-bottom: 0.35rem; }
+.intuition { background: var(--intuition-bg); border-color: var(--intuition-bd); }
+.intuition .label { color: #2f6fb0; }
+.mathblock { background: var(--math-bg); border-color: var(--math-bd); }
+.mathblock .label { color: #8a6d2f; }
+.warn { background: var(--warn-bg); border-color: var(--warn-bd); }
+.warn .label { color: #9a6b00; }
+.connect { background: var(--accent-soft); border-color: #cdb6ea; }
+.connect .label { color: var(--accent); }
+.prereq { background: #eefaf1; border-color: #a5d8b6; }
+.prereq .label { color: #2e7d4f; }
+
+/* equation breakdown table */
+table.symbols { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.95rem; }
+table.symbols th, table.symbols td { text-align: left; padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+table.symbols th { color: var(--muted); font-weight: 600; }
+table.symbols td:first-child { white-space: nowrap; }
+
+/* ---------- code ---------- */
+pre {
+  background: #1e1e24;
+  color: #e8e6df;
+  border-radius: 10px;
+  padding: 1rem 1.1rem;
+  overflow-x: auto;
+  font-size: 0.86rem;
+  line-height: 1.55;
+  border: 1px solid #2c2c34;
+}
+pre code { font-family: "SF Mono", Menlo, Consolas, monospace; white-space: pre; }
+:not(pre) > code {
+  background: var(--code-bg);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  font-size: 0.9em;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+}
+.code-comment { color: #8b97a8; }
+
+/* page navigation footer */
+.pagenav { display: flex; justify-content: space-between; margin-top: 3.5rem; padding-top: 1.4rem; border-top: 1px solid var(--rule); gap: 1rem; }
+.pagenav a { text-decoration: none; padding: 0.7rem 1rem; border: 1px solid var(--rule); border-radius: 8px; background: #fff; flex: 1; }
+.pagenav a:hover { border-color: var(--accent); }
+.pagenav .dir { display: block; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.pagenav .next { text-align: right; }
+
+/* MathJax: let display math scroll on small screens */
+mjx-container[display="true"] { overflow-x: auto; overflow-y: hidden; max-width: 100%; }
+
+/* cover page */
+.cover { text-align: center; padding: 2rem 0 1rem; }
+.cover h1 { font-size: 2.5rem; }
+.badge-row { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; margin: 1.2rem 0; }
+.badge { font-size: 0.8rem; background: var(--accent-soft); color: var(--accent); padding: 0.3rem 0.7rem; border-radius: 999px; border: 1px solid #cdb6ea; }
+.toc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 0.9rem; margin: 1.5rem 0; text-align: left; }
+.toc-card { border: 1px solid var(--rule); border-radius: 10px; padding: 1rem 1.1rem; background: #fff; text-decoration: none; color: var(--ink); display: block; }
+.toc-card:hover { border-color: var(--accent); box-shadow: 0 2px 10px rgba(125,84,179,0.08); }
+.toc-card .pn { font-size: 0.75rem; color: var(--accent); font-weight: 700; letter-spacing: 0.05em; }
+.toc-card .pt { font-size: 1.05rem; font-weight: 600; margin: 0.2rem 0; }
+.toc-card .pd { font-size: 0.85rem; color: var(--muted); }
+
+/* mobile */
+.menu-btn { display: none; }
+@media (max-width: 880px) {
+  nav.toc { position: fixed; left: 0; top: 0; transform: translateX(-100%); transition: transform 0.2s; z-index: 50; box-shadow: 2px 0 16px rgba(0,0,0,0.15); }
+  nav.toc.open { transform: translateX(0); }
+  .menu-btn { display: inline-flex; position: fixed; top: 0.8rem; left: 0.8rem; z-index: 60; background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 0.5rem 0.8rem; font-size: 1rem; cursor: pointer; }
+  main { padding-top: 3.6rem; }
+}

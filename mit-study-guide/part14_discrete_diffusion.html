@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Part 14 — Discrete Diffusion · Diffusion Study Guide</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [["\\(", "\\)"], ["\\(", "\\)"]], displayMath: [["\\[", "\\]"]], tags: "none" },
+    options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle contents">☰</button>
+<div class="layout">
+<nav class="toc">
+  <a href="index.html"><strong>◆ Diffusion Study Guide</strong></a>
+  <h2>Foundations</h2>
+  <a href="part00_math_foundations.html"><span class="part-num">0</span>Mathematical Foundations</a>
+  <a href="part01_differential_equations.html"><span class="part-num">1</span>Differential Equations</a>
+  <a href="part02_probability_stochastic.html"><span class="part-num">2</span>Probability &amp; Stochastic Processes</a>
+  <a href="part03_score_functions.html"><span class="part-num">3</span>Score Functions</a>
+  <h2>Diffusion Core</h2>
+  <a href="part04_diffusion_models.html"><span class="part-num">4</span>Diffusion Models (big picture)</a>
+  <a href="part05_ddpm.html"><span class="part-num">5</span>DDPM</a>
+  <a href="part06_ddim.html"><span class="part-num">6</span>DDIM</a>
+  <a href="part07_continuous_time.html"><span class="part-num">7</span>Continuous-Time Diffusion</a>
+  <h2>Continuous Formulation</h2>
+  <a href="part08_sde_formulation.html"><span class="part-num">8</span>SDE Formulation</a>
+  <a href="part09_probability_flow_ode.html"><span class="part-num">9</span>Probability Flow ODE</a>
+  <a href="part10_flow_matching.html"><span class="part-num">10</span>Flow Matching</a>
+  <a href="part11_rectified_flows.html"><span class="part-num">11</span>Rectified Flows</a>
+  <h2>Systems &amp; Reading</h2>
+  <a href="part12_stable_diffusion.html"><span class="part-num">12</span>Stable Diffusion</a>
+  <a href="part13_reading_the_notes.html"><span class="part-num">13</span>Reading the MIT Notes</a>
+  <a href="part14_discrete_diffusion.html"><span class="part-num">14</span>Discrete Diffusion</a>
+</nav>
+<main>
+<article>
+
+<h1><span class="kicker">Part 14</span>Discrete Diffusion — Diffusion Language Models</h1>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- MOTIVATION -->
+<!-- ═══════════════════════════════════════════════════════ -->
+
+<div class="box intuition">
+  <span class="label">Big picture — why this part exists</span>
+  <p>Everything in Parts 1–13 assumed the data lives in a continuous vector space \(\mathbb{R}^d\): pixels, latents, audio waveforms. You added Gaussian noise, reversed it with a score function or vector field, and called it done.</p>
+  <p><strong>Text is different.</strong> A sentence is a <em>sequence of discrete tokens</em> drawn from a vocabulary \(\mathcal{V}\). There is no notion of "add a little Gaussian noise to the word <em>cat</em>." You cannot take a derivative with respect to a token index. SDEs and ODEs simply do not exist in a finite set.</p>
+  <p>The fix: replace the SDE/ODE with a <strong>Continuous-Time Markov Chain (CTMC)</strong> — a stochastic process that <em>jumps</em> between discrete states rather than drifting continuously. Every concept you learned has a discrete-state twin. That is the thesis of §7 of the MIT notes and the thesis of this page.</p>
+</div>
+
+<div class="box connect">
+  <span class="label">Orienting analogy — one-liner dictionary</span>
+  <p><strong>Continuous world (Parts 1–13):</strong> state \(x_t \in \mathbb{R}^d\), moves smoothly, governed by a <em>vector field</em> or <em>drift</em>.<br>
+  <strong>Discrete world (Part 14):</strong> state \(X_t \in \mathcal{S}\) (a finite set), jumps instantaneously, governed by a <em>rate matrix</em>.</p>
+  <p>Everything else — probability path, marginalization trick, continuity / Fokker–Planck equation, simulation algorithm, training loss — has an exact counterpart. We will point to each one as we go.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- §14.1 STATE SPACE -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2>14.1 The Discrete State Space</h2>
+
+<div class="box prereq">
+  <span class="label">Prerequisite — discrete-state stochastic process</span>
+  <p>In Parts 1–2 you saw \(x_t \in \mathbb{R}^d\): at every time \(t\) the state is a real-valued vector. Now the state lives in a <strong>finite set</strong>.</p>
+  <p><strong>Vocabulary</strong>: \(\mathcal{V} = \{v_1, v_2, \ldots, v_V\}\), where \(V = |\mathcal{V}|\). For English text, \(\mathcal{V}\) might be 50 000 BPE tokens; for DNA, \(\mathcal{V} = \{A, T, G, C\}\).</p>
+  <p><strong>State space</strong>: \(\mathcal{S} = \mathcal{V}^d\), all sequences of length \(d\). A single element \(x \in \mathcal{S}\) is a tuple \(x = (x_1, \ldots, x_d)\) with each \(x_j \in \mathcal{V}\). Note \(|\mathcal{S}| = V^d\) — exponentially large.</p>
+  <p><strong>Distribution over \(\mathcal{S}\)</strong>: a probability mass function \(p_t : \mathcal{S} \to [0,1]\) with \(\sum_{x \in \mathcal{S}} p_t(x) = 1\). This is the discrete analogue of the density \(p_t(x)\) from Part 8.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- §14.2 CTMC AND RATE MATRIX -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2>14.2 Continuous-Time Markov Chains (§7.1)</h2>
+
+<p>A <strong>Continuous-Time Markov Chain (CTMC)</strong> is a random trajectory \(X : [0,1] \to \mathcal{S}\) that is piecewise constant — it stays at a state for a random holding time, then <em>jumps</em> to a new state. The "continuous-time" part means the jumps can happen at any real-valued \(t\), not just at integer steps. The "Markov" part means the future depends only on the present state, not the entire history (exactly like SDEs/ODEs — they are also Markov).</p>
+
+<h3>The Rate Matrix \(Q_t\) — the discrete vector field</h3>
+
+<div class="box mathblock">
+  <span class="label">Definition — rate matrix (generator)</span>
+  <p>Let \(\mathcal{S}\) be our finite state space. A <strong>rate matrix</strong> \(Q_t\) is a function</p>
+  \[Q_t : \mathcal{S} \times \mathcal{S} \to \mathbb{R}, \quad (x, y) \mapsto Q_t(y \mid x)\]
+  <p>satisfying two conditions:</p>
+  <ol>
+    <li><strong>Non-negative off-diagonal:</strong> \(Q_t(y \mid x) \geq 0\) for all \(y \neq x\). (You can't have a negative rate of jumping somewhere.)</li>
+    <li><strong>Rows sum to zero:</strong> \(\sum_{y \in \mathcal{S}} Q_t(y \mid x) = 0\) for all \(x\). This forces \(Q_t(x \mid x) = -\sum_{y \neq x} Q_t(y \mid x) \leq 0\). (Total probability is conserved.)</li>
+  </ol>
+  <p>Think of \(Q_t\) as a \(|\mathcal{S}| \times |\mathcal{S}|\) matrix where columns index "current state \(x\)" and rows index "destination state \(y\)".</p>
+</div>
+
+<h3>Intuition: \(Q_t\) is an instantaneous jump rate</h3>
+
+<div class="box intuition">
+  <span class="label">Intuition — tiny-time interpretation</span>
+  <p>In a tiny interval \([t, t+h]\) with \(h \to 0\):</p>
+  \[P(X_{t+h} = y \mid X_t = x) \approx Q_t(y \mid x) \cdot h \quad \text{for } y \neq x\]
+  <p>So \(Q_t(y \mid x)\) is the <em>rate</em> (probability per unit time) of jumping from \(x\) to \(y\). A higher value means the chain moves between those states more rapidly.</p>
+  <p>Compare to a continuous SDE: \(dx_t = f_t(x_t)\,dt + \sigma_t\,dW_t\). The drift \(f_t\) tells you the <em>direction</em> of movement; \(Q_t\) tells you the <em>rates</em> of jumping. Both are the "engine" that drives the process.</p>
+</div>
+
+<h3>The discrete Euler update</h3>
+
+<p>Recall the Euler step for an ODE (Part 1): \(x_{t+h} \approx x_t + h \cdot f_t(x_t)\). In the CTMC world, the analogous update acts on the <em>distribution</em> \(p_t\) (a row vector of length \(|\mathcal{S}|\)):</p>
+
+\[p_{t+h} \approx p_t \,(I + h\, Q_t)\]
+
+<p>This is exactly a first-order Euler step applied to the distribution. The matrix \((I + h Q_t)\) is a valid (approximate) transition matrix for small \(h\): diagonal entries are close to 1 (stay put with high prob), off-diagonal entries are \(h \cdot Q_t(y \mid x) \geq 0\) (small probability of jumping). This is called the <strong>tau-leaping</strong> approximation in the literature.</p>
+
+<table class="symbols">
+  <caption>Symbol table — rate matrix</caption>
+  <thead><tr><th>Symbol</th><th>Type / Shape</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td>\(\mathcal{V}\)</td><td>finite set, size \(V\)</td><td>vocabulary (set of possible tokens)</td></tr>
+    <tr><td>\(\mathcal{S} = \mathcal{V}^d\)</td><td>finite set, size \(V^d\)</td><td>full state space (sequences of length \(d\))</td></tr>
+    <tr><td>\(X_t\)</td><td>random variable \(\in \mathcal{S}\)</td><td>the CTMC state at time \(t\)</td></tr>
+    <tr><td>\(Q_t(y \mid x)\)</td><td>scalar, \(Q_t \in \mathbb{R}^{|\mathcal{S}| \times |\mathcal{S}|}\)</td><td>rate of jumping from \(x\) to \(y\) at time \(t\)</td></tr>
+    <tr><td>\(p_t\)</td><td>row vector, shape \([|\mathcal{S}|]\)</td><td>distribution over states at time \(t\)</td></tr>
+    <tr><td>\(p_{t+h|t}(y \mid x)\)</td><td>scalar</td><td>transition probability from \(x\) at time \(t\) to \(y\) at \(t+h\)</td></tr>
+  </tbody>
+</table>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- THEOREM 33 -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<h3>Theorem 33 — Existence and Uniqueness (MIT notes §7.1)</h3>
+
+<div class="box mathblock">
+  <span class="label">Theorem 33 (CTMC existence &amp; uniqueness)</span>
+  <p>For any rate matrix \(Q_t\) that is bounded and continuous in time, there exists a <strong>unique</strong> CTMC \(X_t\) (i.e., a unique set of transition probabilities \(p_{t+h|t}(y \mid x)\)) consistent with \(Q_t\).</p>
+</div>
+
+<div class="box connect">
+  <span class="label">Connection to Parts 1–2</span>
+  <p>This is the exact discrete analogue of the ODE/SDE existence and uniqueness theorems (Theorem 3 / Theorem 5 in the MIT notes). The message is the same: <em>specifying the "engine" (vector field or rate matrix) is enough to uniquely determine the process</em>. For machine learning, this means: train a neural network to output a rate matrix \(Q_t^\theta\), and you have implicitly defined a generative model.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- EXAMPLE 34 — TWO-STATE CTMC -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<h3>Example 34 — Two-State CTMC (the discrete OU process)</h3>
+
+<p>Let \(\mathcal{S} = \{a, b\}\) and let the chain jump between the two states at a constant rate \(\lambda &gt; 0\). The rate matrix is:</p>
+
+\[Q = \begin{pmatrix} -\lambda &amp; \lambda \\ \lambda &amp; -\lambda \end{pmatrix}\]
+
+<p>Reading the columns: column \(a\) says "if you are at \(a\), you jump to \(b\) at rate \(\lambda\) and the diagonal \(-\lambda\) ensures the row sums to zero." Column \(b\) is symmetric.</p>
+
+<p>The resulting <strong>transition probabilities</strong> over a time increment \(h\) are:</p>
+
+\[p_{t+h|t}(a \mid a) = p_{t+h|t}(b \mid b) = \frac{1 + e^{-2\lambda h}}{2}\]
+\[p_{t+h|t}(b \mid a) = p_{t+h|t}(a \mid b) = \frac{1 - e^{-2\lambda h}}{2}\]
+
+<p>Let's trace what happens to the distribution. Start with \(p_0 = (1, 0)\) (all mass on \(a\)):</p>
+
+\[p_t(a) = \frac{1 + e^{-2\lambda t}}{2}, \quad p_t(b) = \frac{1 - e^{-2\lambda t}}{2}\]
+
+<p>As \(t \to \infty\): \(e^{-2\lambda t} \to 0\), so \(p_\infty = (1/2, 1/2)\) — the <strong>uniform (stationary) distribution</strong>. The chain forgets where it started.</p>
+
+<div class="box connect">
+  <span class="label">Connection — discrete OU process</span>
+  <p>Compare to the Ornstein–Uhlenbeck process from Part 2/8: it starts at some \(x_0 \in \mathbb{R}\) and drifts toward \(\mathcal{N}(0,1)\) exponentially fast. The two-state CTMC does the same thing in a two-element set, drifting toward the uniform distribution. Higher \(\lambda\) = faster forgetting = more noise at any given \(t\). Same role as \(\sigma\) in the SDE.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- FACTORIZED RATE MATRIX & ALGORITHM 7 -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2>14.3 Factorized CTMCs and Algorithm 7</h2>
+
+<h3>Why factorization is necessary</h3>
+
+<p>The state space \(\mathcal{S} = \mathcal{V}^d\) has size \(V^d\). For GPT-scale language (\(V \approx 50000\), \(d \approx 1024\)), storing even a single column of \(Q_t\) — which has \(V^d\) entries — is physically impossible. We need a sparsity constraint.</p>
+
+<div class="box intuition">
+  <span class="label">Intuition — factorization = one token jumps at a time</span>
+  <p>The key insight: <strong>at most one token changes per jump</strong>. If the sequence is \(x = (x_1, \ldots, x_d)\), only transitions to "neighbors" \(\mathcal{N}(x)\) — sequences that differ in exactly one position — have nonzero rate. This is analogous to treating each coordinate's noise <em>independently</em> in a Gaussian diffusion model. The total number of nonzero rates per state is \(d \times (V-1)\) — linear in \(d\) and \(V\), not exponential.</p>
+</div>
+
+<div class="box mathblock">
+  <span class="label">Factorized rate matrix (MIT notes §7.1)</span>
+  <p>A CTMC model is <strong>factorized</strong> if for all \(x, y \in \mathcal{S}\):</p>
+  \[Q_t(y \mid x) = 0 \quad \text{if } y \notin \mathcal{N}(x)\]
+  <p>where \(\mathcal{N}(x)\) = sequences differing from \(x\) in at most one position. For neighbors \(y\) that differ from \(x\) only at position \(j\) (i.e., \(y_j = v_i \neq x_j\), all other positions equal), we write:</p>
+  \[Q_t(y \mid x) = Q_t^{(j)}(v_i \mid x)\]
+  <p>The per-position rate matrix satisfies \(\sum_{v_i \in \mathcal{V}} Q_t^{(j)}(v_i \mid x_j) = 0\) for each \(j\). A transformer with output shape \([d, V]\) can directly parameterize this — one row per position, one column per vocabulary token.</p>
+</div>
+
+<h3>Algorithm 7 — Sampling from a Factorized CTMC</h3>
+
+<div class="box mathblock">
+  <span class="label">Algorithm 7 (MIT notes §7.1) — tau-leaping sampler</span>
+  <p><strong>Require:</strong> trained rate network \(Q_t^\theta\) (factorized), initial distribution \(p_\text{init}\), number of steps \(n\).<br>
+  Set \(t \leftarrow 0\), step size \(h \leftarrow 1/n\).</p>
+  <ol>
+    <li>Draw \(X_0 \sim p_\text{init}\), so \(X_0 = (X_0^{(1)}, \ldots, X_0^{(d)}) \in \mathcal{V}^d\).</li>
+    <li><strong>For</strong> \(i = 1, \ldots, n\):</li>
+    <li>&nbsp;&nbsp;&nbsp;Query the network: compute per-position jump rates \(\{q_j(v)\}_{j, v} \leftarrow Q_t^\theta(\cdot \mid X_t)\).</li>
+    <li>&nbsp;&nbsp;&nbsp;<strong>For</strong> each position \(j = 1, \ldots, d\) in parallel:</li>
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Let \(x = X_t^{(j)}\) (current token at position \(j\)).</li>
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Build per-position Euler transition probabilities:<br>
+    \[\tilde{p}_{j,t}(v \mid x) = \begin{cases} h \cdot Q_t^{(j)}(v \mid x) &amp; v \neq x \\ 1 + h \cdot Q_t^{(j)}(x \mid x) &amp; v = x \end{cases}\]</li>
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Sample \(X_{t+h}^{(j)} \sim \text{Categorical}\bigl(\{\tilde{p}_{j,t}(v \mid x)\}_{v \in \mathcal{V}}\bigr)\).</li>
+    <li>&nbsp;&nbsp;&nbsp;Set \(t \leftarrow t + h\).</li>
+    <li><strong>Return</strong> \(X_1\).</li>
+  </ol>
+  <p>This is the discrete analogue of the Euler–Maruyama step. Each token is updated independently (the factorization), with a small (\(O(h^2)\)) probability that two tokens jump simultaneously — acceptable for small \(h\).</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- PyTorch Example 1 — two-state CTMC -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<h3>PyTorch: Two-state CTMC converging to uniform</h3>
+
+<pre><code><span class="code-comment"># teaching code, not security-sensitive RNG</span>
+<span class="code-comment"># Simulate the two-state CTMC from Example 34.</span>
+<span class="code-comment"># We evolve the distribution p_t using the discrete Euler step:</span>
+<span class="code-comment">#   p_{t+h} = p_t @ (I + h * Q)</span>
+
+import torch
+
+lambda_ = 2.0            <span class="code-comment"># jump rate</span>
+<span class="code-comment"># Rate matrix Q, shape [2, 2]</span>
+<span class="code-comment"># Q[y, x] = rate of jumping from state x to state y</span>
+<span class="code-comment"># (column = source state, row = destination state)</span>
+Q = torch.tensor([
+    [-lambda_,  lambda_],   <span class="code-comment"># row a: jump INTO a from each source</span>
+    [ lambda_, -lambda_],   <span class="code-comment"># row b: jump INTO b from each source</span>
+])   <span class="code-comment"># shape [2, 2]</span>
+
+<span class="code-comment"># p is a ROW vector: p[i] = P(X_t = state_i)</span>
+p = torch.tensor([[1.0, 0.0]])   <span class="code-comment"># start at state a, shape [1, 2]</span>
+
+h   = 0.001   <span class="code-comment"># small step size</span>
+n   = 1000    <span class="code-comment"># total steps  (simulates t = 0 -> 1.0)</span>
+I   = torch.eye(2)
+
+print_times = {0, 100, 300, 600, 1000}
+
+for step in range(n + 1):
+    if step in print_times:
+        t = step * h
+        print(f"t={t:.3f}  p(a)={p[0,0]:.4f}  p(b)={p[0,1]:.4f}")
+    if step &lt; n:
+        <span class="code-comment"># Euler step on the distribution (tau-leaping in distribution space)</span>
+        p = p @ (I + h * Q)   <span class="code-comment"># shape [1, 2] @ [2, 2] = [1, 2]</span>
+
+<span class="code-comment"># Expected output (approximate):</span>
+<span class="code-comment"># t=0.000  p(a)=1.0000  p(b)=0.0000</span>
+<span class="code-comment"># t=0.100  p(a)=0.8187  p(b)=0.1813   (still remembers it started at a)</span>
+<span class="code-comment"># t=0.300  p(a)=0.6703  p(b)=0.3297</span>
+<span class="code-comment"># t=0.600  p(a)=0.5878  p(b)=0.4122</span>
+<span class="code-comment"># t=1.000  p(a)=0.5084  p(b)=0.4916   (nearly uniform — converged)</span>
+<span class="code-comment"># At t->inf: p = [0.5, 0.5]  (stationary / uniform distribution)</span>
+</code></pre>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- §14.4 TRAINING -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2>14.4 Training CTMC Models (§7.2)</h2>
+
+<p>The MIT notes describe the same three-step recipe used in flow matching (Part 10), now applied to discrete state space:</p>
+<ol>
+  <li>Construct a <strong>probability path</strong> from noise to data.</li>
+  <li>Derive a <strong>conditional rate matrix</strong> and the <strong>marginal rate matrix</strong> via the marginalization trick.</li>
+  <li>Learn the marginal rate matrix in a <strong>simulation-free</strong> way (cross-entropy loss).</li>
+</ol>
+
+<h3>14.4.1 Conditional and Marginal Probability Path (§7.2.1)</h3>
+
+<p>Let \(z \in \mathcal{S}\) be a fixed clean data point (a "conditioning" anchor, analogous to \(z\) in the continuous conditional flow matching of Part 10). A <strong>conditional probability path</strong> is a family of distributions \(p_t(\cdot \mid z)\) over \(\mathcal{S}\) satisfying:</p>
+
+\[p_0(\cdot \mid z) = p_\text{init} \quad \text{(pure noise, independent of }z\text{)}\]
+\[p_1(\cdot \mid z) = \delta_z \quad \text{(all mass on the clean data point }z\text{)}\]
+
+<p>where \(\delta_z(x) = 1\) if \(x = z\), else \(0\). The <strong>marginal probability path</strong> averages over all clean data:</p>
+
+\[p_t(x) = \sum_{z \in \mathcal{S}} p_t(x \mid z)\, p_\text{data}(z)\]
+
+<p>At the endpoints: \(p_0 = p_\text{init}\) (pure noise) and \(p_1 = p_\text{data}\) (the data distribution). This is identical in structure to the continuous case (Part 10), just with an integral replaced by a sum.</p>
+
+<div class="box mathblock">
+  <span class="label">Example 35 — Factorized mixture path</span>
+  <p>Fix a monotone schedule \(\kappa_t \in [0,1]\) with \(\kappa_0 = 0\), \(\kappa_1 = 1\). The <strong>factorized mixture path</strong> corrupts each token independently:</p>
+  \[p_t(x \mid z) = \prod_{j=1}^d \bigl[\kappa_t\,\delta_{z_j}(x_j) + (1-\kappa_t)\,p_\text{init}^{(j)}(x_j)\bigr]\]
+  <p>Equivalently, to <em>sample</em> \(x \sim p_t(\cdot \mid z)\):</p>
+  <ul>
+    <li>For each position \(j\), flip a coin: with prob \(\kappa_t\) keep the clean token (\(x_j = z_j\)); with prob \(1-\kappa_t\) draw a noise token \(x_j \sim p_\text{init}^{(j)}\).</li>
+  </ul>
+  <p>At \(t=0\): \(\kappa_0=0\) so all tokens are noise. At \(t=1\): \(\kappa_1=1\) so \(x = z\). The information is progressively revealed as \(t\) increases from 0 to 1.</p>
+  <p><strong>Key difference from Gaussian paths:</strong> there is no notion of "direction" here. Probability mass does not flow continuously — it teleports. Token \(j\) either has the clean value or a noise value, with no interpolation in between.</p>
+</div>
+
+<h3>14.4.2 Conditional and Marginal Rate Matrix (§7.2.2)</h3>
+
+<p>A <strong>conditional rate matrix</strong> \(Q_t^z(y \mid x)\) is one whose CTMC "follows" the conditional path \(p_t(\cdot \mid z)\). Formally, the CTMC with rate \(Q_t^z\) and initial distribution \(p_0(\cdot \mid z)\) has marginal distribution \(p_t(\cdot \mid z)\) at every time \(t\).</p>
+
+<p>Given the conditional rate matrices for each \(z\), we want to build the <strong>marginal rate matrix</strong> that drives the marginal path \(p_t\). This is exactly the marginalization trick.</p>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- THEOREM 36 — DISCRETE MARGINALIZATION TRICK -->
+<!-- ═══════════════════════════════════════════════════════ -->
+
+<div class="box mathblock">
+  <span class="label">Theorem 36 — Discrete Marginalization Trick (MIT notes §7.2.2)</span>
+  <p>The <strong>marginal rate matrix</strong> defined by</p>
+  \[Q_t(y \mid x) = \sum_{z \in \mathcal{S}} Q_t^z(y \mid x)\, \frac{p_t(x \mid z)\, p_\text{data}(z)}{p_t(x)}\]
+  <p>is a valid rate matrix, and its CTMC follows the marginal probability path \(p_t\). In particular, \(X_1 \sim p_\text{data}\) — the model generates real data.</p>
+  <p>The fraction \(\frac{p_t(x \mid z)\, p_\text{data}(z)}{p_t(x)} = p_{1|t}(z \mid x)\) is the <strong>posterior</strong>: "given that the current noisy sequence is \(x\), what is the probability the original clean sequence was \(z\)?"</p>
+  <p>So the marginal rate matrix is a <strong>posterior-weighted average of conditional rate matrices</strong>:</p>
+  \[\boxed{Q_t(y \mid x) = \mathbb{E}\bigl[Q_t^z(y \mid x) \;\big|\; X_t = x\bigr]}\]
+</div>
+
+<div class="box connect">
+  <span class="label">Connection — this IS the flow-matching marginalization trick</span>
+  <p>In continuous flow matching (Part 10), the marginal vector field is:</p>
+  \[u_t(x) = \mathbb{E}\bigl[u_t^z(x) \mid X_t = x\bigr]\]
+  <p>The structure is <strong>identical</strong>: marginal object = conditional expectation of the conditional object, conditioned on the current state. The only difference is that \(u_t\) is a vector in \(\mathbb{R}^d\) and \(Q_t\) is a rate matrix on \(\mathcal{S}\). Same recipe, different state space.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- PROPOSITION 2 — KOLMOGOROV FORWARD EQUATION -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<h3>Proposition 2 — Kolmogorov Forward Equation</h3>
+
+<div class="box mathblock">
+  <span class="label">Proposition 2 (KFE, MIT notes §7.2.2)</span>
+  <p>Let \(Q_t\) be the rate matrix of a CTMC. The distribution \(p_t\) is the marginal of this CTMC if and only if it satisfies the <strong>Kolmogorov Forward Equation (KFE)</strong>:</p>
+  \[\frac{d}{dt} p_t(x) = \sum_{y \in \mathcal{S}} p_t(y)\, Q_t(x \mid y)\]
+  <p>In matrix form (with \(p_t\) as a row vector):</p>
+  \[\frac{d}{dt} p_t = p_t\, Q_t\]
+  <p>This is a <em>linear ODE</em> over \(\mathbb{R}^{|\mathcal{S}|}\), and its solution is unique by the ODE existence-uniqueness theorem (Theorem 3 in the notes) — which is precisely why Theorem 36's proof works.</p>
+</div>
+
+<div class="box connect">
+  <span class="label">Connection — KFE is the discrete Fokker–Planck / continuity equation</span>
+  <p>You have seen two continuous analogues of the KFE in this guide:</p>
+  <ul>
+    <li><strong>Part 8 (Fokker–Planck):</strong> \(\partial_t p_t = -\nabla \cdot (f_t p_t) + \frac{\sigma^2}{2}\Delta p_t\) — governs the density of an SDE.</li>
+    <li><strong>Part 10 (Continuity equation):</strong> \(\partial_t p_t + \nabla \cdot (u_t p_t) = 0\) — governs the density of an ODE flow.</li>
+  </ul>
+  <p>The KFE \(\frac{d}{dt} p_t = p_t Q_t\) is the <strong>same equation in discrete space</strong>. All three say: "the rate matrix / vector field / drift determines how the distribution evolves." The key structural insight is that in all cases, the governing equation is <em>linear</em> in \(p_t\), which makes the marginalization trick possible.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- §14.4.3 LEARNING / THEOREM 38 -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<h3>14.4.3 Learning the Marginal Rate Matrix (§7.2.3)</h3>
+
+<div class="box mathblock">
+  <span class="label">Theorem 38 — Marginalization for factorized mixture path (MIT notes §7.2.3)</span>
+  <p>For the factorized mixture path (Example 35), the marginal rate matrix is also factorized and has the form: for position \(j\), token \(v_i \neq x_j\),</p>
+  \[Q_t^{(j)}(v_i \mid x) = \dot{\kappa}_t\, \frac{p_{1|t}(z_j = v_i \mid x)}{1 - \kappa_t}\]
+  <p>where \(\dot{\kappa}_t = \frac{d}{dt}\kappa_t\) is the schedule's derivative and \(p_{1|t}(z_j = v_i \mid x)\) is the posterior probability that the \(j\)-th clean token is \(v_i\), given the current noisy sequence \(x\).</p>
+</div>
+
+<div class="box intuition">
+  <span class="label">Intuition — the rate matrix is just a posterior classifier</span>
+  <p>Look at the formula: the marginal rate matrix is <em>entirely determined</em> by \(p_{1|t}(z_j = v_i \mid x)\) — the per-token probability of the clean token. This is a classifier: "given the noisy sequence \(x\) at time \(t\), what is the clean token at position \(j\)?"</p>
+  <p>Training amounts to training a denoiser / classifier per position. No special CTMC machinery needed at training time — just cross-entropy. The CTMC structure only shows up during sampling (Algorithm 7).</p>
+  <p>Compare to score matching (Part 3): the score \(\nabla \log p_t(x)\) was the training target there; here the token posterior \(p_{1|t}(z_j \mid x)\) is the training target. Both are learned by regression to a conditional signal.</p>
+</div>
+
+<h3>Algorithm 8 — Training (MIT notes §7.2.3)</h3>
+
+<div class="box mathblock">
+  <span class="label">Algorithm 8 — Training a factorized CTMC (Discrete Flow Matching)</span>
+  <p><strong>Require:</strong> dataset \(\{z\} \sim p_\text{data}\), noise marginals \(p_\text{init}^{(j)}\), schedule \(\kappa_t\), posterior network \(f^\theta\) (e.g. a transformer), optimizer.</p>
+  <ol>
+    <li><strong>Repeat</strong> for each training iteration:</li>
+    <li>&nbsp;&nbsp;Sample a clean sequence \(z \sim p_\text{data}\).</li>
+    <li>&nbsp;&nbsp;Sample time \(t \sim \text{Unif}[0,1]\), compute \(\kappa \leftarrow \kappa_t\).</li>
+    <li>&nbsp;&nbsp;For each position \(j = 1, \ldots, d\) in parallel: sample mask \(m_j \sim \text{Bernoulli}(\kappa)\); sample noise \(\xi_j \sim p_\text{init}^{(j)}\); set \(x_j = m_j z_j + (1-m_j)\xi_j\).</li>
+    <li>&nbsp;&nbsp;Assemble noisy sequence \(x = (x_1, \ldots, x_d)\).</li>
+    <li>&nbsp;&nbsp;Run network: \(\hat{p}_{1|t}(\cdot \mid x) \leftarrow \text{softmax}(f^\theta(x, t))\), output shape \([d, V]\).</li>
+    <li>&nbsp;&nbsp;Compute Discrete Flow Matching loss (token-wise cross-entropy):</li>
+  </ol>
+  \[\mathcal{L}_\text{DFM}(\theta) = -\frac{1}{d}\sum_{j=1}^d \log \hat{p}_{1|t}(z_j \mid x)\]
+  <ol start="8">
+    <li>&nbsp;&nbsp;Update: \(\theta \leftarrow \theta - \eta\, \nabla_\theta \mathcal{L}_\text{DFM}(\theta)\).</li>
+  </ol>
+  <p><strong>Post-training:</strong> at inference, use Algorithm 7 with \(Q_t^\theta\) recovered from \(\hat{p}_{1|t}\) via Theorem 38.</p>
+</div>
+
+<div class="box connect">
+  <span class="label">Connection — Discrete Flow Matching = Continuous Flow Matching</span>
+  <p>In Part 10, the Conditional Flow Matching (CFM) loss was an MSE regression to the conditional vector field. Here, the Discrete Flow Matching loss is a cross-entropy regression to the conditional posterior. Both are <em>simulation-free</em>: you never need to run the full forward or reverse process during training — just sample \((z, t, x)\) and compute a local loss. Same framework, same elegance.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- EXAMPLE 39 — MASKED DIFFUSION LANGUAGE MODEL -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2>14.5 Example 39 — Masked Diffusion Language Models (MDLMs)</h2>
+
+<div class="box intuition">
+  <span class="label">Intuition — BERT meets diffusion</span>
+  <p>The most practical and important special case: set \(p_\text{init} = \delta_{[\text{mask}]}\). That is, the "noise" distribution puts all mass on a special <strong>[MASK]</strong> token added to the vocabulary.</p>
+  <ul>
+    <li><strong>Forward process (corruption):</strong> each token is independently masked with probability \(1 - \kappa_t\). At \(t=0\), all tokens are masked. At \(t=1\), all tokens are clean.</li>
+    <li><strong>Reverse process (generation):</strong> start from all-[MASK], run Algorithm 7, and the network progressively unmasked tokens over \(n\) steps.</li>
+    <li><strong>Training target:</strong> given a partially masked sequence \(x\) and time \(t\), predict the clean token \(z_j\) at each masked position — standard cross-entropy, exactly like BERT's masked language modeling (MLM) objective.</li>
+  </ul>
+  <p>The key upgrade over BERT: BERT is a discriminative model trained once with random masking and never generates sequences. MDLM is a <em>generative</em> model with a principled sampling schedule — it can generate full sequences by iterative unmasking, in parallel across all positions, in a fixed number of steps.</p>
+</div>
+
+<div class="box mathblock">
+  <span class="label">MDLM setup (MIT notes Example 39)</span>
+  <p>Extend vocabulary: \(\mathcal{V}' = \mathcal{V} \cup \{[\text{mask}]\}\). Set \(p_\text{init} = \delta_{[\text{mask}]^d}\) (sequence of all mask tokens). The factorized mixture path with this noise distribution gives:</p>
+  \[x_j = \begin{cases} z_j &amp; \text{with prob } \kappa_t \\ [\text{mask}] &amp; \text{with prob } 1 - \kappa_t \end{cases}\]
+  <p>The network \(f^\theta\) takes a partially masked sequence \(x\) and time \(t\) and outputs logits of shape \([d, V]\) — a predicted clean token distribution per position. Loss = cross-entropy over masked positions.</p>
+  <p>During generation: start with \(x = [\text{mask}]^d\), run Algorithm 7 for \(n\) steps. The rate matrix (from Theorem 38) ensures that each step unmasking a token is done according to the learned posterior — not greedily, but stochastically with the correct marginal.</p>
+</div>
+
+<div class="box connect">
+  <span class="label">Connection — MDLM vs autoregressive LMs</span>
+  <p><strong>Autoregressive (GPT-style):</strong> generates left-to-right, one token at a time, \(O(d)\) sequential steps. Highly expressive but inherently sequential.</p>
+  <p><strong>MDLM:</strong> generates all positions in <em>parallel</em>, with \(n\) refinement steps (typically \(n \ll d\)). Potentially much faster at inference. Each step can update many tokens simultaneously (factorized rate matrix). State-of-the-art MDLMs (e.g. SEDD, MDLM — <em>Masked Diffusion Language Models</em> by Sahoo et al. 2024, and related work) approach GPT-class perplexity on language benchmarks, making this a serious competitor for language generation.</p>
+  <p>The tradeoff: autoregressive models have an exact likelihood; MDLMs require ELBO-style bounds. But the parallel generation and controllable refinement make them attractive for many applications (protein design, code generation, constrained text generation).</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- PyTorch Example 2 — masked diffusion illustration -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<h3>PyTorch: Masked diffusion training pair</h3>
+
+<pre><code><span class="code-comment"># teaching code, not security-sensitive RNG</span>
+<span class="code-comment"># Illustrate one training step of a Masked Diffusion Language Model.</span>
+<span class="code-comment"># We build a (clean, masked) pair (z, x) that the model would learn to invert.</span>
+
+import torch
+
+<span class="code-comment"># Vocabulary: 5 real tokens + 1 [MASK] token (index 5)</span>
+V    = 5
+MASK = 5          <span class="code-comment"># special mask token index</span>
+d    = 8          <span class="code-comment"># sequence length</span>
+
+torch.manual_seed(42)   <span class="code-comment"># reproducibility for teaching</span>
+
+<span class="code-comment"># Clean sequence z  shape [d]  — a "sentence" from the dataset</span>
+z = torch.randint(0, V, (d,))
+print(f"Clean sequence z:   {z.tolist()}  shape {list(z.shape)}")
+<span class="code-comment"># e.g. [0, 3, 4, 1, 2, 0, 3, 2]</span>
+
+<span class="code-comment"># Sample a random time t in [0, 1]</span>
+t = torch.rand(1).item()
+kappa_t = t                  <span class="code-comment"># linear schedule: kappa_t = t</span>
+print(f"Sampled time t={t:.3f},  kappa_t={kappa_t:.3f}")
+<span class="code-comment"># kappa_t = fraction of tokens KEPT clean</span>
+
+<span class="code-comment"># Sample noisy sequence x via factorized mixture path</span>
+<span class="code-comment"># Each token j is kept (x_j = z_j) with prob kappa_t,</span>
+<span class="code-comment"># else replaced with [MASK] (x_j = MASK_INDEX)</span>
+mask_coin = torch.bernoulli(torch.full((d,), kappa_t))   <span class="code-comment"># 1=keep, 0=mask  shape [d]</span>
+x = torch.where(mask_coin.bool(), z, torch.full((d,), MASK, dtype=torch.long))
+print(f"Noisy  sequence x:  {x.tolist()}  shape {list(x.shape)}")
+<span class="code-comment"># e.g. [MASK, 3, MASK, 1, 2, MASK, 3, 2]  (some tokens replaced by 5)</span>
+
+<span class="code-comment"># This (z, x) pair is the training example:</span>
+<span class="code-comment">#   Input  to network f^theta: x (partially masked sequence), t</span>
+<span class="code-comment">#   Target for network:        z (clean sequence)</span>
+<span class="code-comment"># The loss is cross-entropy:  -sum_j log p(z_j | x, t)</span>
+
+<span class="code-comment"># Simulate a toy "perfect predictor" returning one-hot logits over V tokens</span>
+<span class="code-comment"># (in practice, this is the transformer output, shape [d, V])</span>
+perfect_logits = torch.zeros(d, V)
+for j in range(d):
+    perfect_logits[j, z[j]] = 10.0   <span class="code-comment"># very confident about the true token</span>
+loss = torch.nn.functional.cross_entropy(perfect_logits, z)
+print(f"Training loss (perfect predictor): {loss.item():.4f}")
+<span class="code-comment"># Expected output: loss near 0.0  (perfect predictor)</span>
+
+<span class="code-comment"># Shapes summary:</span>
+<span class="code-comment">#   z:              [d]       = [8]     clean sequence</span>
+<span class="code-comment">#   x:              [d]       = [8]     noisy (partially masked) sequence</span>
+<span class="code-comment">#   mask_coin:      [d]       = [8]     Bernoulli mask (1=keep, 0=mask)</span>
+<span class="code-comment">#   perfect_logits: [d, V]    = [8, 5]  network output logits per token position</span>
+</code></pre>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- REMARK 40 — GENERATOR MATCHING -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2>14.6 Remark 40 — Generator Matching</h2>
+
+<div class="box connect">
+  <span class="label">Remark 40 (MIT notes) — Everything is one family</span>
+  <p>Why did the CTMC recipe look so familiar? Because flow matching, diffusion, and CTMC training are all instances of a single unifying framework called <strong>Generator Matching</strong> (Holderrieth et al., 2024 [19]).</p>
+  <p>A <em>generator</em> is the mathematical object that drives any Markov process: vector fields drive ODEs, drifts/diffusion coefficients drive SDEs, rate matrices drive CTMCs. The generator matching loss — "regress the marginal generator to the conditional generator, using the posterior as weights" — is the one principle that produces CFM, score matching, and Discrete Flow Matching as special cases.</p>
+  <p>The framework extends further: smooth manifolds (protein backbone angles), mixed continuous-discrete spaces (joint text and image generation), and general jump processes all fit the same recipe. Everything in this guide is one family.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- MASTER ANALOGY TABLE -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2>14.7 Master Analogy Table</h2>
+
+<table class="symbols">
+  <caption>Continuous vs Discrete — the complete dictionary</caption>
+  <thead>
+    <tr>
+      <th>Concept</th>
+      <th>Continuous (Flow Matching / Diffusion)</th>
+      <th>Discrete (CTMC / Discrete Flow Matching)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>State space</strong></td>
+      <td>\(x_t \in \mathbb{R}^d\), continuous vector</td>
+      <td>\(X_t \in \mathcal{S} = \mathcal{V}^d\), discrete sequence</td>
+    </tr>
+    <tr>
+      <td><strong>The "engine"</strong></td>
+      <td>Vector field \(u_t(x) \in \mathbb{R}^d\) (ODE) or drift \(f_t + \sigma_t\dot{W}\) (SDE)</td>
+      <td>Rate matrix \(Q_t(y \mid x) \in \mathbb{R}^{|\mathcal{S}| \times |\mathcal{S}|}\)</td>
+    </tr>
+    <tr>
+      <td><strong>Evolution equation</strong></td>
+      <td>Continuity eq. / Fokker–Planck: \(\partial_t p_t = -\nabla \cdot (u_t p_t)\)</td>
+      <td>Kolmogorov Forward Eq.: \(\tfrac{d}{dt}p_t = p_t Q_t\)</td>
+    </tr>
+    <tr>
+      <td><strong>Existence &amp; uniqueness</strong></td>
+      <td>Theorem 3 (ODE), Theorem 5 (SDE)</td>
+      <td>Theorem 33 (CTMC)</td>
+    </tr>
+    <tr>
+      <td><strong>Marginalization trick</strong></td>
+      <td>\(u_t(x) = \mathbb{E}[u_t^z(x) \mid X_t = x]\)</td>
+      <td>\(Q_t(y \mid x) = \mathbb{E}[Q_t^z(y \mid x) \mid X_t = x]\) (Thm. 36)</td>
+    </tr>
+    <tr>
+      <td><strong>Training objective</strong></td>
+      <td>CFM loss: MSE to conditional vector field (§3.2)</td>
+      <td>DFM loss: cross-entropy to token posterior (Alg. 8)</td>
+    </tr>
+    <tr>
+      <td><strong>Training target network</strong></td>
+      <td>Vector field \(u_t^\theta(x) \in \mathbb{R}^d\)</td>
+      <td>Token posterior \(f^\theta(x,t) \in \mathbb{R}^{d \times V}\) (softmax)</td>
+    </tr>
+    <tr>
+      <td><strong>Sampler (Euler step)</strong></td>
+      <td>Euler / Euler–Maruyama: \(x_{t+h} = x_t + h\,u_t\)</td>
+      <td>Tau-leaping: \(\tilde{p}_{t+h|t} = I + h\,Q_t\) (Alg. 7)</td>
+    </tr>
+    <tr>
+      <td><strong>Practical noise</strong></td>
+      <td>Gaussian \(\mathcal{N}(0,I)\) at \(t=0\)</td>
+      <td>[MASK]\(^d\) at \(t=0\) (MDLM) or uniform tokens</td>
+    </tr>
+    <tr>
+      <td><strong>Key example</strong></td>
+      <td>OU process → Gaussian; DDPM; stable diffusion</td>
+      <td>Two-state CTMC → uniform; MDLM / SEDD for text</td>
+    </tr>
+    <tr>
+      <td><strong>Unifying framework</strong></td>
+      <td colspan="2" style="text-align:center;"><em>Generator Matching (Remark 40) — both are special cases</em></td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- CHECKPOINT -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<h2>14.8 Checkpoint — Can you answer these?</h2>
+
+<ol>
+  <li>Why can't you add Gaussian noise to a text token? What property of tokens makes this impossible?</li>
+  <li>Write the 2×2 rate matrix for a two-state CTMC with jump rate \(\lambda\). Verify that the rows sum to zero and the off-diagonal entries are non-negative.</li>
+  <li>What is the stationary distribution of the two-state CTMC? How does \(\lambda\) affect how quickly it is reached?</li>
+  <li>Why must a practical CTMC model be factorized? What constraint does factorization impose?</li>
+  <li>State Theorem 33 in one sentence. Which theorem in the continuous world is it analogous to?</li>
+  <li>In the discrete marginalization trick (Theorem 36), what plays the role of the "posterior"? Write the formula and identify each term.</li>
+  <li>State the Kolmogorov Forward Equation. Which two equations from earlier parts does it generalize?</li>
+  <li>In Algorithm 8, what does the network \(f^\theta\) actually predict? What is the shape of its output?</li>
+  <li>What is a Masked Diffusion Language Model? How does its forward process differ from BERT's masked language model?</li>
+  <li>Fill in the analogy: CFM loss is MSE to the conditional ____; DFM loss is cross-entropy to the conditional ____.</li>
+  <li>What does Remark 40 (Generator Matching) say about the relationship between flow matching, score matching, and CTMC training?</li>
+</ol>
+
+<div class="box warn">
+  <span class="label">Common confusion — time direction convention</span>
+  <p>The MIT notes (§7) use the convention \(t=0\) = noise and \(t=1\) = clean data, which is the <em>opposite</em> of DDPM (where \(t=0\) is clean). This matches the flow-matching convention used in Parts 10–11. Keep track: when you read \(p_\text{init}\), that is the \(t=0\) noise distribution, and \(p_\text{data}\) is the \(t=1\) target. Algorithm 7 runs from \(t=0\) to \(t=1\) — it starts from noise and generates data.</p>
+</div>
+
+<nav class="pagenav">
+  <a class="prev" href="part13_reading_the_notes.html"><span class="dir">&#8249; Prev</span>Part 13 — Reading the MIT Notes</a>
+  <a class="next" href="index.html"><span class="dir">Done &#8250;</span>Back to the overview</a>
+</nav>
+
+</article>
+</main>
+</div>
+<script defer src="assets/guide.js"></script>
+</body>
+</html>

@@ -1,0 +1,1164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Part 5 — DDPM · Diffusion Study Guide</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [["\\(", "\\)"]], displayMath: [["\\[", "\\]"]], tags: "none" },
+    options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle contents">☰</button>
+<div class="layout">
+<nav class="toc">
+  <a href="index.html"><strong>◆ Diffusion Study Guide</strong></a>
+  <h2>Foundations</h2>
+  <a href="part00_math_foundations.html"><span class="part-num">0</span>Mathematical Foundations</a>
+  <a href="part01_differential_equations.html"><span class="part-num">1</span>Differential Equations</a>
+  <a href="part02_probability_stochastic.html"><span class="part-num">2</span>Probability &amp; Stochastic Processes</a>
+  <a href="part03_score_functions.html"><span class="part-num">3</span>Score Functions</a>
+  <h2>Diffusion Core</h2>
+  <a href="part04_diffusion_models.html"><span class="part-num">4</span>Diffusion Models (big picture)</a>
+  <a href="part05_ddpm.html"><span class="part-num">5</span>DDPM</a>
+  <a href="part06_ddim.html"><span class="part-num">6</span>DDIM</a>
+  <a href="part07_continuous_time.html"><span class="part-num">7</span>Continuous-Time Diffusion</a>
+  <h2>Continuous Formulation</h2>
+  <a href="part08_sde_formulation.html"><span class="part-num">8</span>SDE Formulation</a>
+  <a href="part09_probability_flow_ode.html"><span class="part-num">9</span>Probability Flow ODE</a>
+  <a href="part10_flow_matching.html"><span class="part-num">10</span>Flow Matching</a>
+  <a href="part11_rectified_flows.html"><span class="part-num">11</span>Rectified Flows</a>
+  <h2>Systems &amp; Reading</h2>
+  <a href="part12_stable_diffusion.html"><span class="part-num">12</span>Stable Diffusion</a>
+  <a href="part13_reading_the_notes.html"><span class="part-num">13</span>Reading the MIT Notes</a>
+  <a href="part14_discrete_diffusion.html"><span class="part-num">14</span>Discrete Diffusion</a>
+</nav>
+<main>
+<article>
+
+<h1><span class="kicker">Part 5</span>DDPM — Denoising Diffusion Probabilistic Models</h1>
+
+<p class="muted">
+  Parts 0–4 built the full toolkit: vectors, flows, SDEs, score functions, and the
+  big-picture forward/reverse idea. This part zooms in on <em>DDPM</em> (Ho et al., 2020),
+  the first landmark discrete-time diffusion model. By the end you will have derived
+  every equation from scratch, understood why the simple noise-prediction loss works,
+  and seen a minimal PyTorch implementation of both training and sampling.
+</p>
+
+<div class="box prereq">
+<span class="label">Prerequisites</span>
+<ul>
+  <li><strong>Part 0</strong> — Gaussian distributions, the "variances add" property,
+    reparameterization \(x = \mu + \sigma\varepsilon\), \(\varepsilon \sim \mathcal{N}(0,I)\).</li>
+  <li><strong>Part 2</strong> — Brownian motion, the idea that noise accumulates over steps.</li>
+  <li><strong>Part 3</strong> — the score \(\nabla_x \log p_t(x)\) and the
+    score&thinsp;↔&thinsp;\(\varepsilon\)&thinsp;↔&thinsp;\(x_0\) triangle.</li>
+  <li><strong>Part 4</strong> — the two-phase (forward / reverse) picture at a high level.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>5.1 Big picture: what DDPM does and why it is special</h2>
+
+<p>
+  The MIT notes present diffusion models from the <em>continuous-time SDE</em> viewpoint
+  (probability paths, flow matching). DDPM was historically the <em>discrete-time</em>
+  entry point that made diffusion models practical. The two formulations describe
+  the same mathematics; DDPM just makes a concrete set of choices:
+</p>
+
+<ul>
+  <li>Use exactly \(T\) discrete time steps (\(T = 1000\) in the original paper).</li>
+  <li>At each step, add a small controlled amount of Gaussian noise (a Markov chain).</li>
+  <li>Train a neural network to reverse <em>one step</em> of that chain.</li>
+  <li>Derive a simple mean-squared loss by a variational lower bound argument.</li>
+</ul>
+
+<div class="box intuition">
+<span class="label">Intuition — why discrete steps?</span>
+Imagine you are teaching someone to restore a shredded document.
+If you hand them the entire shredded pile and say "reconstruct the original", it is
+nearly impossible. But if you hand them the document one tear at a time and ask
+"what did this look like before this single tear?", each sub-task is easy.
+DDPM makes the same trade: turn one hard generative problem into \(T\) tractable
+denoising problems, each requiring only one small step of noise to be removed.
+</div>
+
+<!-- ============================================================ -->
+<h2>5.2 The forward (noising) Markov chain</h2>
+
+<h3>5.2.1 One-step noising kernel</h3>
+
+<p>
+  Let \(x_0 \in \mathbb{R}^d\) be a clean data point (e.g. a flattened image).
+  DDPM defines a <em>forward process</em> by repeatedly applying a fixed Gaussian
+  kernel to produce a sequence \(x_0, x_1, \ldots, x_T\):
+</p>
+
+\[
+  q(x_t \mid x_{t-1})
+  \;=\;
+  \mathcal{N}\!\bigl(x_t;\;\underbrace{\sqrt{1 - \beta_t}\,x_{t-1}}_{\text{signal}},\;
+  \underbrace{\beta_t\, I}_{\text{noise}}\bigr),
+  \qquad t = 1, \ldots, T.
+\]
+
+<div class="box mathblock">
+<span class="label">Symbol table — forward chain</span>
+<table class="symbols">
+  <tr><th>Symbol</th><th>Meaning</th><th>Shape / range</th></tr>
+  <tr><td>\(d\)</td><td>data dimensionality</td><td>scalar, e.g. \(d = 784\) for MNIST</td></tr>
+  <tr><td>\(T\)</td><td>total number of noising steps</td><td>scalar, typically 1000</td></tr>
+  <tr><td>\(t\)</td><td>discrete time index</td><td>\(t \in \{1, \ldots, T\}\)</td></tr>
+  <tr><td>\(x_0\)</td><td>clean data point</td><td>\(\mathbb{R}^d\)</td></tr>
+  <tr><td>\(x_t\)</td><td>noisy data at step \(t\)</td><td>\(\mathbb{R}^d\)</td></tr>
+  <tr><td>\(\beta_t\)</td><td>noise variance at step \(t\) (<em>noise schedule</em>)</td><td>\((0, 1)\), e.g. linearly from \(10^{-4}\) to \(0.02\)</td></tr>
+  <tr><td>\(\sqrt{1-\beta_t}\)</td><td>signal attenuation factor</td><td>scalar \(\in (0,1)\)</td></tr>
+  <tr><td>\(I\)</td><td>identity matrix</td><td>\(\mathbb{R}^{d\times d}\)</td></tr>
+</table>
+</div>
+
+<div class="box intuition">
+<span class="label">Intuition — what one step does</span>
+Each step does two things simultaneously:
+<ol>
+  <li><strong>Shrinks the signal</strong> by multiplying by \(\sqrt{1-\beta_t} &lt; 1\).
+    Over many steps the original signal gets driven toward zero.</li>
+  <li><strong>Injects fresh Gaussian noise</strong> with variance \(\beta_t\).
+    Over many steps the distribution approaches \(\mathcal{N}(0, I)\).</li>
+</ol>
+The two effects are carefully balanced so that the total variance stays near 1
+throughout (you can verify: if \(\operatorname{Var}[x_{t-1}] \approx 1\) then
+\(\operatorname{Var}[x_t] = (1-\beta_t)\cdot 1 + \beta_t = 1\)). This keeps
+the numerics stable across all 1000 steps.
+</div>
+
+<h3>5.2.2 Toy example — one step in 1-D</h3>
+
+<p>
+  Let \(d=1\), \(x_0 = 2.0\), \(\beta_1 = 0.1\).
+  Then \(q(x_1 \mid x_0) = \mathcal{N}(x_1;\, \sqrt{0.9}\cdot 2.0,\; 0.1)\).
+  The mean is \(\approx 1.897\) and the standard deviation is \(\sqrt{0.1} \approx 0.316\).
+  A sample might be \(x_1 \approx 1.897 + 0.316 \cdot \varepsilon\) for
+  \(\varepsilon \sim \mathcal{N}(0,1)\).
+  After 1000 such steps with slowly growing \(\beta_t\), the resulting \(x_{1000}\)
+  will be indistinguishable from \(\mathcal{N}(0,1)\).
+</p>
+
+<!-- ============================================================ -->
+<h2>5.3 The closed-form jump — the key algebraic payoff</h2>
+
+<p>
+  Simulating the full 1000-step chain for every training update would be catastrophically
+  slow. DDPM gets around this with a beautiful algebraic trick: you can jump from
+  \(x_0\) to any \(x_t\) <em>in a single shot</em>.
+</p>
+
+<h3>5.3.1 Defining \(\alpha_t\) and \(\bar{\alpha}_t\)</h3>
+
+<p>
+  Introduce two shorthand quantities:
+</p>
+
+\[
+  \alpha_t \;:=\; 1 - \beta_t, \qquad
+  \bar{\alpha}_t \;:=\; \prod_{s=1}^{t} \alpha_s
+  \;=\; \alpha_1 \cdot \alpha_2 \cdots \alpha_t.
+\]
+
+<div class="box mathblock">
+<span class="label">Symbol table — cumulative products</span>
+<table class="symbols">
+  <tr><th>Symbol</th><th>Meaning</th><th>Value range</th></tr>
+  <tr><td>\(\alpha_t\)</td><td>"keep fraction" at step \(t\)</td><td>\((0,1)\), close to 1 for small \(\beta_t\)</td></tr>
+  <tr><td>\(\bar{\alpha}_t\)</td><td>cumulative product up to step \(t\)</td><td>decreasing from \(\approx 1\) (at \(t=0\)) to \(\approx 0\) (at \(t=T\))</td></tr>
+  <tr><td>\(1 - \bar{\alpha}_t\)</td><td>cumulative noise variance</td><td>increasing from \(\approx 0\) to \(\approx 1\)</td></tr>
+</table>
+</div>
+
+<div class="box intuition">
+<span class="label">Intuition — why these products appear</span>
+Each step multiplies the signal by \(\sqrt{\alpha_t}\).
+After \(t\) steps the signal has been multiplied by
+\(\sqrt{\alpha_1}\cdot\sqrt{\alpha_2}\cdots\sqrt{\alpha_t} = \sqrt{\bar{\alpha}_t}\).
+The noises from each step also accumulate — but independently, so their variances add.
+The formula below makes this precise.
+</div>
+
+<h3>5.3.2 Deriving the closed-form for two steps, then the general case</h3>
+
+<p>
+  <strong>Setup.</strong> We use the reparameterization trick from Part 0: if
+  \(x \sim \mathcal{N}(\mu, \sigma^2 I)\) then \(x = \mu + \sigma\,\varepsilon\)
+  where \(\varepsilon \sim \mathcal{N}(0, I)\). We will also use
+  <strong>Property B (variances add for independent Gaussians)</strong> from Part 0:
+  if \(\varepsilon_1 \sim \mathcal{N}(0, \sigma_1^2 I)\) and
+  \(\varepsilon_2 \sim \mathcal{N}(0, \sigma_2^2 I)\) are independent, then
+  \(\sigma_1 \varepsilon_1 + \sigma_2 \varepsilon_2 \sim \mathcal{N}(0,\,(\sigma_1^2 + \sigma_2^2)I)\).
+</p>
+
+<p><strong>Step 1: derive \(q(x_1 \mid x_0)\) in reparameterized form.</strong></p>
+
+\[
+  x_1 = \sqrt{\alpha_1}\,x_0 + \sqrt{\beta_1}\,\varepsilon_1,
+  \qquad \varepsilon_1 \sim \mathcal{N}(0, I).
+\]
+
+<p>This is just rewriting \(q(x_1 \mid x_0) = \mathcal{N}(\sqrt{\alpha_1}\,x_0, \beta_1 I)\)
+in reparameterized form (using \(\beta_1 = 1 - \alpha_1\)).</p>
+
+<p><strong>Step 2: substitute into \(q(x_2 \mid x_1)\).</strong></p>
+
+\[
+  x_2 = \sqrt{\alpha_2}\,x_1 + \sqrt{\beta_2}\,\varepsilon_2,
+  \qquad \varepsilon_2 \sim \mathcal{N}(0, I),\;\varepsilon_2 \perp \varepsilon_1.
+\]
+
+<p>Plug in the expression for \(x_1\):</p>
+
+\[
+  x_2
+  = \sqrt{\alpha_2}\bigl(\sqrt{\alpha_1}\,x_0 + \sqrt{\beta_1}\,\varepsilon_1\bigr)
+    + \sqrt{\beta_2}\,\varepsilon_2
+  = \sqrt{\alpha_2 \alpha_1}\,x_0
+    + \underbrace{\sqrt{\alpha_2 \beta_1}\,\varepsilon_1
+    + \sqrt{\beta_2}\,\varepsilon_2}_{\text{two independent Gaussian vectors}}.
+\]
+
+<p>Apply Property B to the noise term. The two vectors are independent with variances
+\(\alpha_2 \beta_1\) and \(\beta_2 = 1 - \alpha_2\) respectively, so their sum has variance:</p>
+
+\[
+  \alpha_2 \beta_1 + \beta_2
+  = \alpha_2(1 - \alpha_1) + (1 - \alpha_2)
+  = \alpha_2 - \alpha_2\alpha_1 + 1 - \alpha_2
+  = 1 - \alpha_1\alpha_2
+  = 1 - \bar{\alpha}_2.
+\]
+
+<p>Therefore we can write the combined noise as \(\sqrt{1 - \bar{\alpha}_2}\,\bar{\varepsilon}\)
+where \(\bar{\varepsilon} \sim \mathcal{N}(0, I)\), giving:</p>
+
+\[
+  \boxed{
+    x_2 = \sqrt{\bar{\alpha}_2}\,x_0 + \sqrt{1 - \bar{\alpha}_2}\,\bar{\varepsilon},
+    \quad \bar{\varepsilon} \sim \mathcal{N}(0, I).
+  }
+\]
+
+<p>This is exactly \(q(x_2 \mid x_0) = \mathcal{N}(\sqrt{\bar{\alpha}_2}\,x_0,\,(1-\bar{\alpha}_2)I)\).</p>
+
+<div class="box mathblock">
+<span class="label">The general closed-form jump (induction)</span>
+<p>
+The same "plug-in + variances-add" argument works for any number of steps.
+By induction, for all \(t \in \{1, \ldots, T\}\):
+</p>
+\[
+  q(x_t \mid x_0)
+  \;=\;
+  \mathcal{N}\!\bigl(x_t;\;\sqrt{\bar{\alpha}_t}\,x_0,\;(1-\bar{\alpha}_t)\,I\bigr),
+\]
+or equivalently in reparameterized form:
+\[
+  x_t
+  \;=\;
+  \underbrace{\sqrt{\bar{\alpha}_t}\,x_0}_{\text{attenuated signal}}
+  \;+\;
+  \underbrace{\sqrt{1 - \bar{\alpha}_t}\,\varepsilon}_{\text{accumulated noise}},
+  \qquad \varepsilon \sim \mathcal{N}(0, I).
+\]
+<p>
+<strong>Inductive step (sketch):</strong> suppose \(x_{t-1} = \sqrt{\bar{\alpha}_{t-1}}\,x_0 + \sqrt{1-\bar{\alpha}_{t-1}}\,\varepsilon'\).
+Apply one more kernel: \(x_t = \sqrt{\alpha_t}\,x_{t-1} + \sqrt{\beta_t}\,\varepsilon''\).
+Substitute, combine the two independent noise terms by Property B, and verify the combined
+variance is \(\alpha_t(1-\bar{\alpha}_{t-1}) + \beta_t = 1 - \bar{\alpha}_t\). QED.
+</p>
+</div>
+
+<div class="box intuition">
+<span class="label">Why this matters — training becomes trivially fast</span>
+<p>
+Without this formula, producing a training example \((x_t, x_0)\) would require
+simulating the entire chain from step 1 to step \(t\) — up to 1000 forward passes.
+<em>With</em> the formula you need exactly <strong>one</strong> matrix-free operation:
+sample \(\varepsilon \sim \mathcal{N}(0,I)\), compute
+\(x_t = \sqrt{\bar{\alpha}_t}\,x_0 + \sqrt{1-\bar{\alpha}_t}\,\varepsilon\).
+The whole training loop lives at \(O(1)\) cost per step, regardless of \(T\).
+</p>
+</div>
+
+<h3>5.3.3 Mini PyTorch example — verifying the closed form</h3>
+
+<pre><code><span class="code-comment"># Verify the closed-form jump q(x_t | x_0) = N(sqrt(abar_t)*x0, (1-abar_t)*I)
+# Teaching code — uses torch.manual_seed for reproducibility, not security.</span>
+import torch
+
+torch.manual_seed(0)  <span class="code-comment"># reproducible teaching example</span>
+
+T      = 1000
+d      = 4        <span class="code-comment"># tiny dimension for fast inspection</span>
+N      = 100_000  <span class="code-comment"># number of Monte Carlo samples</span>
+
+<span class="code-comment"># --- Build the linear beta schedule (Ho et al. 2020 defaults) ---</span>
+beta   = torch.linspace(1e-4, 0.02, T)   <span class="code-comment"># shape: (T,)</span>
+alpha  = 1.0 - beta                      <span class="code-comment"># shape: (T,)   alpha_t = 1 - beta_t</span>
+abar   = torch.cumprod(alpha, dim=0)     <span class="code-comment"># shape: (T,)   abar_t = prod_{s=1}^t alpha_s</span>
+
+<span class="code-comment"># --- Pick a specific time step to test ---</span>
+t_idx  = 499        <span class="code-comment"># 0-indexed, so this is t = 500 in 1-indexed notation</span>
+ab_t   = abar[t_idx]
+print(f"abar at t=500:   {ab_t:.4f}")   <span class="code-comment"># expected: ~0.13 for linear schedule</span>
+print(f"1-abar at t=500: {1-ab_t:.4f}") <span class="code-comment"># expected: ~0.87</span>
+
+<span class="code-comment"># --- Fixed clean data point (same for all samples) ---</span>
+x0 = torch.ones(d) * 3.0   <span class="code-comment"># x0 = [3, 3, 3, 3], shape: (d,)</span>
+
+<span class="code-comment"># --- Method 1: simulate the full chain step-by-step (slow ground truth) ---</span>
+x_chain = x0.unsqueeze(0).expand(N, -1).clone()  <span class="code-comment"># shape: (N, d)</span>
+for s in range(t_idx + 1):
+    noise    = torch.randn_like(x_chain)
+    x_chain  = alpha[s].sqrt() * x_chain + beta[s].sqrt() * noise
+<span class="code-comment"># x_chain[:,0] should be N(sqrt(abar_t)*3, 1-abar_t)
+# Expected mean: sqrt(0.13)*3 ~ 1.08,  expected var: ~0.87</span>
+
+<span class="code-comment"># --- Method 2: closed-form jump (instant) ---</span>
+eps      = torch.randn(N, d)                            <span class="code-comment"># shape: (N, d)</span>
+x_jump   = ab_t.sqrt() * x0 + (1 - ab_t).sqrt() * eps  <span class="code-comment"># shape: (N, d)</span>
+
+<span class="code-comment"># --- Compare statistics on dimension 0 ---</span>
+print(f"\nMethod 1 (full chain) — mean: {x_chain[:,0].mean():.3f}, "
+      f"var: {x_chain[:,0].var():.3f}")
+print(f"Method 2 (closed form) — mean: {x_jump[:,0].mean():.3f}, "
+      f"var: {x_jump[:,0].var():.3f}")
+print(f"Theory               — mean: {(ab_t.sqrt()*3.0):.3f}, "
+      f"var: {(1-ab_t):.3f}")
+
+<span class="code-comment"># Expected output (approximate, varies with N and seed):
+# abar at t=500:   0.1307
+# 1-abar at t=500: 0.8693
+# Method 1 (full chain) — mean: 1.083,  var: 0.869
+# Method 2 (closed form) — mean: 1.081, var: 0.868
+# Theory               — mean: 1.083,  var: 0.869
+# The two methods give near-identical statistics.</span>
+</code></pre>
+
+<!-- ============================================================ -->
+<h2>5.4 The reverse chain — learning to undo one step</h2>
+
+<h3>5.4.1 What the reverse chain looks like</h3>
+
+<p>
+  The forward chain takes data and turns it into noise. To generate new data we need to
+  run it in reverse: starting from pure noise \(x_T \sim \mathcal{N}(0, I)\), iteratively
+  sample \(x_{T-1}, x_{T-2}, \ldots, x_0\). This requires knowing the
+  <em>reverse conditional</em>:
+</p>
+
+\[
+  p_\theta(x_{t-1} \mid x_t)
+  \;=\;
+  \mathcal{N}\!\bigl(x_{t-1};\;\mu_\theta(x_t, t),\;\Sigma_t\bigr).
+\]
+
+<p>
+  The subscript \(\theta\) signals that the mean \(\mu_\theta\) is output by a learned
+  neural network; the variance \(\Sigma_t\) is typically set to a fixed schedule (more
+  on this below). The network sees \(x_t\) and the time index \(t\), and predicts the
+  center of the Gaussian from which \(x_{t-1}\) should be sampled.
+</p>
+
+<div class="box intuition">
+<span class="label">Intuition — why Gaussian reverse steps?</span>
+When the forward-step variance \(\beta_t\) is small, Anderson (1982) and
+Feller (1949) show that the true reverse \(q(x_{t-1} \mid x_t)\) is also
+approximately Gaussian. DDPM exploits this: for small enough \(\beta_t\),
+parameterizing the reverse as a Gaussian is nearly lossless. This is why the
+schedule uses small \(\beta_t\) values (\(10^{-4}\) to \(0.02\)).
+</div>
+
+<h3>5.4.2 The true reverse posterior \(q(x_{t-1} \mid x_t, x_0)\)</h3>
+
+<p>
+  During <em>training</em> we have access to the clean \(x_0\), so we can compute
+  the exact posterior via Bayes' rule:
+</p>
+
+\[
+  q(x_{t-1} \mid x_t, x_0)
+  \;\propto\;
+  q(x_t \mid x_{t-1})\;q(x_{t-1} \mid x_0).
+\]
+
+<p>
+  Both factors on the right are Gaussians (from the forward chain). The product of
+  two Gaussians in \(x_{t-1}\) is also Gaussian — this is Gaussian conjugacy. After
+  completing the square in \(x_{t-1}\) one obtains:
+</p>
+
+\[
+  q(x_{t-1} \mid x_t, x_0)
+  \;=\;
+  \mathcal{N}\!\bigl(x_{t-1};\;\tilde{\mu}_t(x_t, x_0),\;\tilde{\beta}_t\,I\bigr),
+\]
+
+<p>with posterior mean and variance:</p>
+
+\[
+  \tilde{\mu}_t(x_t, x_0)
+  \;=\;
+  \frac{\sqrt{\bar{\alpha}_{t-1}}\,\beta_t}{1 - \bar{\alpha}_t}\,x_0
+  \;+\;
+  \frac{\sqrt{\alpha_t}\,(1 - \bar{\alpha}_{t-1})}{1 - \bar{\alpha}_t}\,x_t,
+\]
+
+\[
+  \tilde{\beta}_t
+  \;=\;
+  \frac{(1 - \bar{\alpha}_{t-1})\,\beta_t}{1 - \bar{\alpha}_t}.
+\]
+
+<div class="box mathblock">
+<span class="label">Equation breakdown — posterior mean \(\tilde{\mu}_t\)</span>
+<p>The posterior mean is a <em>weighted interpolation</em> between two anchor points:</p>
+<ul>
+  <li>
+    \(\frac{\sqrt{\bar{\alpha}_{t-1}}\,\beta_t}{1-\bar{\alpha}_t}\,x_0\):
+    a term that "reaches back" toward the clean data \(x_0\),
+    weighted by how much noise has accumulated (\(\beta_t\)) and how far
+    \(x_{t-1}\) would be from \(x_0\) on average (\(\sqrt{\bar{\alpha}_{t-1}}\)).
+  </li>
+  <li>
+    \(\frac{\sqrt{\alpha_t}(1-\bar{\alpha}_{t-1})}{1-\bar{\alpha}_t}\,x_t\):
+    a term that "holds on" to the current noisy sample \(x_t\),
+    weighted by how much of the variance at step \(t\) was already present at step \(t-1\)
+    (\(1-\bar{\alpha}_{t-1}\)).
+  </li>
+</ul>
+<p>
+At early steps (large \(t\), almost pure noise) the \(x_t\) term dominates because
+\(1 - \bar{\alpha}_{t-1}\) is large. At late steps (small \(t\), almost clean) the
+\(x_0\) term dominates because \(\bar{\alpha}_{t-1} \approx 1\) and
+\(1-\bar{\alpha}_{t-1} \approx 0\).
+</p>
+</div>
+
+<div class="box mathblock">
+<span class="label">Equation breakdown — posterior variance \(\tilde{\beta}_t\)</span>
+<p>
+\(\tilde{\beta}_t = \frac{(1-\bar{\alpha}_{t-1})\beta_t}{1-\bar{\alpha}_t}\).
+This is always smaller than \(\beta_t\): conditioning on \(x_0\) reduces uncertainty.
+At early steps it is close to \(\beta_t\) (not much extra info from \(x_0\) when the
+data is already very noisy). At late steps it shrinks to near zero (knowing \(x_0\)
+pins down \(x_{t-1}\) almost exactly).
+</p>
+</div>
+
+<p>
+  <strong>Why is this useful?</strong>
+  This posterior is the <em>target</em> for the learned reverse step.
+  If the network can reproduce \(\tilde{\mu}_t\), then the learned reverse
+  \(p_\theta\) matches the true reverse, and sampling will produce real data.
+</p>
+
+<!-- ============================================================ -->
+<h2>5.5 The training objective — from ELBO to noise prediction</h2>
+
+<h3>5.5.1 The variational bound (ELBO)</h3>
+
+<p>
+  We want to maximize the log-likelihood \(\log p_\theta(x_0)\).
+  Since the latent chain \(x_1, \ldots, x_T\) is unobserved, we lower-bound
+  it by the ELBO (Evidence Lower BOund), the same trick as in VAEs:
+</p>
+
+\[
+  \log p_\theta(x_0) \;\geq\; \mathcal{L}_{\mathrm{ELBO}}
+  \;=\; \mathbb{E}_q\!\left[\log \frac{p_\theta(x_{0:T})}{q(x_{1:T}\mid x_0)}\right].
+\]
+
+<p>After expanding \(p_\theta(x_{0:T}) = p(x_T)\prod_{t=1}^T p_\theta(x_{t-1}\mid x_t)\)
+and \(q(x_{1:T}\mid x_0) = \prod_{t=1}^T q(x_t \mid x_{t-1})\), and using
+standard KL-divergence algebra, the ELBO decomposes into three additive terms:</p>
+
+\[
+  \mathcal{L}_{\mathrm{ELBO}}
+  \;=\;
+  \underbrace{-D_{\mathrm{KL}}\bigl(q(x_T\mid x_0)\;\|\;p(x_T)\bigr)}_{L_T,\;\text{prior matching}}
+  +
+  \sum_{t=2}^{T}
+  \underbrace{-D_{\mathrm{KL}}\bigl(q(x_{t-1}\mid x_t, x_0)\;\|\;p_\theta(x_{t-1}\mid x_t)\bigr)}_{L_{t-1},\;\text{denoising terms}}
+  +
+  \underbrace{\mathbb{E}_q\!\left[\log p_\theta(x_0 \mid x_1)\right]}_{L_0,\;\text{reconstruction}}.
+\]
+
+<div class="box mathblock">
+<span class="label">ELBO decomposition — term by term</span>
+<ul>
+  <li>
+    <strong>\(L_T\):</strong> how well does the final noisy distribution \(q(x_T \mid x_0)\)
+    match the prior \(p(x_T) = \mathcal{N}(0,I)\)?
+    Since the schedule is fixed (no parameters), this term is a constant and can be ignored
+    during training.
+  </li>
+  <li>
+    <strong>\(L_{t-1}\) for \(t = 2, \ldots, T\):</strong>
+    KL divergence between the (intractable) true reverse \(q(x_{t-1}\mid x_t, x_0)\)
+    and the learned reverse \(p_\theta(x_{t-1}\mid x_t)\).
+    Both are Gaussians, so the KL has a closed form.
+    <em>This is where all the learning happens.</em>
+  </li>
+  <li>
+    <strong>\(L_0\):</strong> reconstruction of \(x_0\) from \(x_1\);
+    in practice often handled separately or folded into the main loss.
+  </li>
+</ul>
+</div>
+
+<h3>5.5.2 From KL between Gaussians to matching means</h3>
+
+<p>
+  The KL divergence between two Gaussians with the same covariance is proportional
+  to the squared difference of their means. Both \(q(x_{t-1}\mid x_t, x_0)\) and
+  \(p_\theta(x_{t-1}\mid x_t)\) are Gaussian; DDPM fixes
+  \(\Sigma_t = \tilde{\beta}_t I\) (the posterior variance). Then:
+</p>
+
+\[
+  D_{\mathrm{KL}}\bigl(q(x_{t-1}\mid x_t, x_0)\;\|\;p_\theta(x_{t-1}\mid x_t)\bigr)
+  \;\propto\;
+  \frac{1}{2\tilde{\beta}_t}
+  \bigl\|\tilde{\mu}_t(x_t, x_0) - \mu_\theta(x_t, t)\bigr\|^2.
+\]
+
+<p>So minimizing \(L_{t-1}\) is equivalent to making the network's predicted mean
+\(\mu_\theta(x_t, t)\) match the true posterior mean \(\tilde{\mu}_t(x_t, x_0)\).</p>
+
+<h3>5.5.3 Reparameterize: predict noise instead of mean</h3>
+
+<p>
+  Recall that \(x_t = \sqrt{\bar{\alpha}_t}\,x_0 + \sqrt{1-\bar{\alpha}_t}\,\varepsilon\).
+  Solving for \(x_0\):
+</p>
+
+\[
+  x_0
+  \;=\;
+  \frac{x_t - \sqrt{1-\bar{\alpha}_t}\,\varepsilon}{\sqrt{\bar{\alpha}_t}}.
+\]
+
+<p>Substitute this into the posterior mean formula \(\tilde{\mu}_t(x_t, x_0)\).
+After algebra (which carefully collects terms in \(x_t\) and \(\varepsilon\)):</p>
+
+\[
+  \tilde{\mu}_t(x_t, x_0)
+  \;=\;
+  \frac{1}{\sqrt{\alpha_t}}
+  \!\left(x_t - \frac{\beta_t}{\sqrt{1-\bar{\alpha}_t}}\,\varepsilon\right).
+\]
+
+<p>
+  This is the key rewrite. Instead of directly predicting \(\tilde{\mu}_t\),
+  the network can equivalently predict the noise \(\varepsilon\) and compute
+  the mean implicitly. Define the noise-predicting network:
+</p>
+
+\[
+  \mu_\theta(x_t, t)
+  \;:=\;
+  \frac{1}{\sqrt{\alpha_t}}
+  \!\left(x_t - \frac{\beta_t}{\sqrt{1-\bar{\alpha}_t}}\,\varepsilon_\theta(x_t, t)\right).
+\]
+
+<p>Then the per-step loss \(L_{t-1}\) becomes (up to a constant prefactor):</p>
+
+\[
+  L_{t-1}
+  \;\propto\;
+  \mathbb{E}_{x_0,\,\varepsilon}\!
+  \left[
+    \left\|\varepsilon - \varepsilon_\theta\!\left(\sqrt{\bar{\alpha}_t}\,x_0
+    + \sqrt{1-\bar{\alpha}_t}\,\varepsilon,\;t\right)\right\|^2
+  \right].
+\]
+
+<h3>5.5.4 The simple loss — \(\mathcal{L}_{\mathrm{simple}}\)</h3>
+
+<p>
+  Ho et al. (2020) found empirically that dropping the time-dependent weighting
+  \(\frac{\beta_t^2}{2\tilde{\beta}_t \alpha_t (1-\bar{\alpha}_t)}\) and training
+  with equal weight across all \(t\) gives better sample quality. The final training
+  objective is:
+</p>
+
+\[
+  \mathcal{L}_{\mathrm{simple}}
+  \;=\;
+  \mathbb{E}_{t \sim \mathcal{U}\{1,T\},\;\; x_0 \sim p_{\mathrm{data}},\;\;
+  \varepsilon \sim \mathcal{N}(0,I)}
+  \!\left[
+    \left\|
+      \varepsilon
+      \;-\;
+      \varepsilon_\theta\!\bigl(
+        \underbrace{\sqrt{\bar{\alpha}_t}\,x_0 + \sqrt{1-\bar{\alpha}_t}\,\varepsilon}_{= x_t},
+        \;t
+      \bigr)
+    \right\|^2
+  \right].
+\]
+
+<div class="box mathblock">
+<span class="label">Every symbol in \(\mathcal{L}_{\mathrm{simple}}\)</span>
+<table class="symbols">
+  <tr><th>Symbol</th><th>Meaning</th></tr>
+  <tr><td>\(t \sim \mathcal{U}\{1, T\}\)</td><td>time step sampled uniformly from \(\{1, 2, \ldots, T\}\)</td></tr>
+  <tr><td>\(x_0 \sim p_{\mathrm{data}}\)</td><td>clean training example drawn from the dataset</td></tr>
+  <tr><td>\(\varepsilon \sim \mathcal{N}(0, I)\)</td><td>fresh standard Gaussian noise, same shape as \(x_0\)</td></tr>
+  <tr><td>\(\sqrt{\bar{\alpha}_t}\,x_0 + \sqrt{1-\bar{\alpha}_t}\,\varepsilon\)</td><td>the noisy sample \(x_t\), computed in one shot via the closed-form jump</td></tr>
+  <tr><td>\(\varepsilon_\theta(x_t, t)\)</td><td>network's predicted noise; input is the noisy sample and the time index, output has the same shape as \(\varepsilon\)</td></tr>
+  <tr><td>\(\|\cdot\|^2\)</td><td>sum of squared differences over all dimensions of \(\mathbb{R}^d\) (MSE up to constant \(1/d\))</td></tr>
+</table>
+<p>
+<strong>Training in words:</strong> (1) pick a random clean example; (2) pick a random
+time step; (3) sample noise; (4) corrupt the example with that noise; (5) ask the network
+to guess what noise was added; (6) update toward making the guess more accurate.
+</p>
+</div>
+
+<div class="box warn">
+<span class="label">Warning — why dropping the weighting works (and when it might not)</span>
+<p>
+The ELBO derivation gives each \(L_{t-1}\) a weight
+\(\propto \frac{\beta_t^2}{2\tilde{\beta}_t\alpha_t(1-\bar{\alpha}_t)}\).
+Ho et al. drop this weight, effectively upweighting steps where the schedule would
+have assigned low importance. This can be seen as a form of <em>loss re-balancing</em>
+that puts more gradient signal on steps the ELBO considers "easy" (low-\(t\)).
+In practice it improves perceptual quality (FID score), probably because
+those easy steps matter most for fine detail. <strong>However</strong>, if you care
+about exact likelihood estimation (bits-per-dimension), use the full ELBO weighting —
+the simple loss is not a valid likelihood lower bound.
+</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5.6 The score ↔ ε ↔ x₀ triangle revisited</h2>
+
+<p>
+  In Part 3 we drew a triangle of three equivalent prediction targets.
+  DDPM completes that triangle in the discrete-time setting.
+</p>
+
+<p>
+  The score function of the marginal \(q_t(x_t)\) satisfies (by the Tweedie formula
+  / Gaussian conditional score, as derived in Part 3):
+</p>
+
+\[
+  \nabla_{x_t} \log q_t(x_t)
+  \;=\;
+  -\frac{1}{\sqrt{1 - \bar{\alpha}_t}}\,\varepsilon,
+  \quad\text{where } x_t = \sqrt{\bar{\alpha}_t}\,x_0 + \sqrt{1-\bar{\alpha}_t}\,\varepsilon.
+\]
+
+<p>Therefore the noise-predicting network \(\varepsilon_\theta\) is related to the score by:</p>
+
+\[
+  \varepsilon_\theta(x_t, t)
+  \;\approx\;
+  -\sqrt{1 - \bar{\alpha}_t}\;\nabla_{x_t}\log q_t(x_t).
+\]
+
+<div class="box connect">
+<span class="label">Connection — MIT notes notation</span>
+<p>
+The MIT notes (§4.3, Example 23) use the continuous-time Gaussian probability path
+\(p_t(x \mid z) = \mathcal{N}(\alpha_t z,\, \beta_t^2 I)\) with the noise-predictor
+re-parameterization \(\varepsilon_\theta^t \approx -\beta_t\,s_\theta^t\),
+where \(s_\theta^t = \nabla_x \log p_t(x)\) is the score network.
+In DDPM notation: \(\alpha_t^{\mathrm{notes}} \leftrightarrow \sqrt{\bar{\alpha}_t}^{\mathrm{DDPM}}\)
+and \(\beta_t^{\mathrm{notes}} \leftrightarrow \sqrt{1-\bar{\alpha}_t}^{\mathrm{DDPM}}\).
+The identity \(\varepsilon_\theta = -\sqrt{1-\bar{\alpha}_t}\,\nabla_{x_t}\log q_t(x_t)\)
+is the discrete analogue of Equation (55) in the notes.
+In both cases: <em>learning to predict noise is the same as learning the score.</em>
+</p>
+</div>
+
+<div class="box mathblock">
+<span class="label">The score ↔ ε ↔ x₀ triangle (DDPM version)</span>
+<p>All three prediction targets are algebraically equivalent given \(x_t\) and \(t\):</p>
+<ul>
+  <li>
+    <strong>Predict \(\varepsilon\):</strong>
+    \(\varepsilon_\theta(x_t,t) \approx \varepsilon\).
+    DDPM's default. Numerically stable; used in \(\mathcal{L}_{\mathrm{simple}}\).
+  </li>
+  <li>
+    <strong>Predict \(x_0\):</strong>
+    \(x_0\text{-network} \approx \frac{x_t - \sqrt{1-\bar{\alpha}_t}\,\varepsilon_\theta}{\sqrt{\bar{\alpha}_t}}\).
+    Recovers clean data directly; used in some later works (DDIM, \(v\)-prediction).
+  </li>
+  <li>
+    <strong>Predict the score:</strong>
+    \(s_\theta(x_t,t) \approx \nabla_{x_t}\log q_t(x_t) = -\varepsilon / \sqrt{1-\bar{\alpha}_t}\).
+    Connects to the SDE / continuous-time formulation.
+  </li>
+</ul>
+<p>
+Any one of the three can be converted to the other two via the closed-form jump formula.
+The choice affects only numerical conditioning, not expressiveness.
+</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5.7 The sampling algorithm</h2>
+
+<h3>5.7.1 Deriving the reverse-step update</h3>
+
+<p>
+  Given a trained \(\varepsilon_\theta\), to generate data we run the reverse chain.
+  At each step \(t\) we compute the posterior mean estimate using the network's predicted
+  noise, then add a small amount of fresh noise to maintain stochasticity:
+</p>
+
+\[
+  x_{t-1}
+  \;=\;
+  \underbrace{\frac{1}{\sqrt{\alpha_t}}
+  \!\left(x_t - \frac{\beta_t}{\sqrt{1-\bar{\alpha}_t}}\,\varepsilon_\theta(x_t, t)\right)}_{\text{estimated mean }\mu_\theta(x_t,t)}
+  \;+\;
+  \underbrace{\sqrt{\beta_t}\,z}_{\text{added noise}},
+  \qquad z \sim \mathcal{N}(0, I),\;\;z = 0 \text{ when } t = 1.
+\]
+
+<div class="box mathblock">
+<span class="label">Equation breakdown — sampling step</span>
+<table class="symbols">
+  <tr><th>Term</th><th>What it does</th></tr>
+  <tr><td>\(\frac{1}{\sqrt{\alpha_t}}\)</td><td>undoes the signal scaling from the forward step \(q(x_t \mid x_{t-1})\)</td></tr>
+  <tr><td>\(-\frac{\beta_t}{\sqrt{\alpha_t}\sqrt{1-\bar{\alpha}_t}}\,\varepsilon_\theta(x_t,t)\)</td><td>subtracts the estimated noise, scaled so the result is in the right units</td></tr>
+  <tr><td>\(\sqrt{\beta_t}\,z\)</td><td>fresh noise injection; its variance matches \(\tilde{\beta}_t \approx \beta_t\) at large \(t\), ensuring the distribution remains calibrated</td></tr>
+  <tr><td>\(z = 0\) at \(t=1\)</td><td>at the very last step we are generating \(x_0\) so we do not add noise — taking the mean produces a deterministic clean output</td></tr>
+</table>
+<p>
+<strong>Intuition for the mean term:</strong> the network predicts \(\varepsilon\),
+so we subtract the "estimated noise content" from \(x_t\) and scale back to
+the appropriate magnitude for \(x_{t-1}\). This is analogous to one step of
+gradient descent on the (negative log) data density — the score viewpoint.
+</p>
+<p>
+<strong>Intuition for the added noise:</strong> the true reverse posterior
+\(q(x_{t-1}\mid x_t, x_0)\) has variance \(\tilde{\beta}_t &gt; 0\).
+Adding \(\sqrt{\beta_t}\,z\) approximates sampling from a Gaussian centered at
+\(\mu_\theta\), which is necessary for \(p_\theta\) to match the true reverse.
+Without it (i.e. always taking the mean), the model would be deterministic and
+could not model multi-modal distributions at large \(t\).
+</p>
+</div>
+
+<h3>5.7.2 Full sampling algorithm</h3>
+
+<div class="box mathblock">
+<span class="label">Algorithm — DDPM Sampling</span>
+<ol>
+  <li>Sample \(x_T \sim \mathcal{N}(0, I)\).</li>
+  <li>For \(t = T, T-1, \ldots, 2\):
+    <ol type="a">
+      <li>Sample \(z \sim \mathcal{N}(0, I)\).</li>
+      <li>Compute \(\hat{\varepsilon} = \varepsilon_\theta(x_t, t)\).</li>
+      <li>Update: \(x_{t-1} = \frac{1}{\sqrt{\alpha_t}}\!\left(x_t - \frac{\beta_t}{\sqrt{1-\bar{\alpha}_t}}\hat{\varepsilon}\right) + \sqrt{\beta_t}\,z\).</li>
+    </ol>
+  </li>
+  <li>For \(t = 1\): compute \(x_0 = \frac{1}{\sqrt{\alpha_1}}\!\left(x_1 - \frac{\beta_1}{\sqrt{1-\bar{\alpha}_1}}\,\varepsilon_\theta(x_1, 1)\right)\) (no noise added).</li>
+  <li>Return \(x_0\).</li>
+</ol>
+<p>
+Each forward pass of \(\varepsilon_\theta\) requires one network evaluation.
+Total cost: \(T = 1000\) network calls per generated sample (DDIM in Part 6
+reduces this dramatically).
+</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5.8 Practical notes — schedules, time embeddings, and architecture</h2>
+
+<div class="box intuition">
+<span class="label">Practical notes</span>
+
+<p><strong>Noise schedules.</strong>
+Ho et al. (2020) used a <em>linear schedule</em>: \(\beta_t\) grows linearly from
+\(10^{-4}\) to \(0.02\) over \(T=1000\) steps.
+Nichol &amp; Dhariwal (2021) found that at high resolutions the linear schedule
+causes \(\bar{\alpha}_t\) to decay too fast near \(t=T\), wasting compute on steps
+that are already pure noise. They introduced the <em>cosine schedule</em>:
+</p>
+
+\[
+  \bar{\alpha}_t
+  \;=\;
+  \frac{f(t)}{f(0)},
+  \quad
+  f(t) = \cos\!\left(\frac{t/T + s}{1 + s} \cdot \frac{\pi}{2}\right)^2,
+  \quad s = 0.008.
+\]
+
+<p>This gives a smoother, more gradual decay of signal-to-noise ratio and typically
+improves log-likelihood and sample quality.</p>
+
+<p><strong>Number of steps \(T\).</strong>
+\(T = 1000\) is the DDPM default. Larger \(T\) gives more accurate approximation
+of the continuous SDE limit but is slower to sample. DDIM (Part 6) shows that
+sampling quality is acceptable with far fewer steps post-training.</p>
+
+<p><strong>Time embedding.</strong>
+The network \(\varepsilon_\theta(x_t, t)\) must accept the scalar time index \(t\)
+as a second input. In practice, \(t\) is converted to a high-dimensional
+<em>sinusoidal embedding</em> (analogous to positional encodings in transformers):
+\[
+  \mathrm{emb}(t) = [\sin(\omega_1 t), \cos(\omega_1 t), \ldots, \sin(\omega_k t), \cos(\omega_k t)]
+  \in \mathbb{R}^{2k},
+\]
+then projected through a small MLP and added to each residual block of the UNet.
+This lets the same set of weights serve as the denoiser at <em>every</em> step.</p>
+
+<p><strong>Why one network for all \(t\)?</strong>
+The task at step \(t=999\) (recover signal from near-pure noise) is structurally
+different from the task at \(t=1\) (remove a tiny hair of noise from an almost-clean
+image). Yet both tasks share the same weights. This works because the time embedding
+provides sufficient context — the network learns a family of conditional denoisers
+indexed by \(t\), analogous to a conditional neural field.</p>
+
+<p><strong>UNet architecture.</strong>
+The canonical backbone is a UNet with residual blocks, group normalization, and
+self-attention layers at lower resolutions. The UNet's skip connections help the
+network use both coarse and fine features simultaneously, which is important because
+different noise levels require denoising at different spatial scales.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5.9 PyTorch implementation — loss and verification</h2>
+
+<h3>5.9.1 Building the schedule and verifying statistics</h3>
+
+<p>
+  The code below builds \(\alpha\), \(\bar{\alpha}\) from a linear \(\beta\) schedule
+  and confirms the closed-form jump matches a full-chain simulation (same experiment as
+  Section 5.3.3, reproduced here as a stand-alone snippet for reference).
+</p>
+
+<pre><code><span class="code-comment"># Part A: Build the noise schedule and verify q(x_t | x_0) statistics.
+# Teaching code — RNG seeded for reproducibility, not security.</span>
+import torch
+
+def make_schedule(T: int = 1000,
+                  beta_start: float = 1e-4,
+                  beta_end: float = 0.02) -&gt; dict:
+    """
+    Returns a dict of pre-computed schedule tensors.
+    All tensors have shape (T,) and are 0-indexed:
+      index 0  corresponds to t=1 in the paper,
+      index T-1 corresponds to t=T.
+    """
+    beta  = torch.linspace(beta_start, beta_end, T)    <span class="code-comment"># (T,)  beta_t</span>
+    alpha = 1.0 - beta                                  <span class="code-comment"># (T,)  alpha_t = 1 - beta_t</span>
+    abar  = torch.cumprod(alpha, dim=0)                 <span class="code-comment"># (T,)  abar_t = prod_{s=1}^t alpha_s</span>
+    return {"beta": beta, "alpha": alpha, "abar": abar}
+
+sched = make_schedule()
+print("beta  range:", sched["beta"].min().item(), "to", sched["beta"].max().item())
+<span class="code-comment"># expected: 0.0001 to 0.02</span>
+print("abar  range:", sched["abar"].min().item(), "to", sched["abar"].max().item())
+<span class="code-comment"># expected: ~0.0 to ~0.9999  (abar_T close to 0, abar_1 close to 1)</span>
+print("abar at t=1  :", sched["abar"][0].item())    <span class="code-comment"># ~0.9999</span>
+print("abar at t=500:", sched["abar"][499].item())  <span class="code-comment"># ~0.13</span>
+print("abar at t=999:", sched["abar"][998].item())  <span class="code-comment"># ~0.00004  (almost 0)</span>
+</code></pre>
+
+<h3>5.9.2 The training loss \(\mathcal{L}_{\mathrm{simple}}\)</h3>
+
+<pre><code><span class="code-comment"># Part B: Minimal training loss implementing L_simple.
+# Teaching code — RNG seeded for reproducibility, not security.</span>
+import torch
+import torch.nn as nn
+
+torch.manual_seed(42)
+
+<span class="code-comment"># ---------------------------------------------------------------
+# Stub model: a tiny linear network that accepts (x_t, t_emb)
+# concatenated and outputs noise of the same shape as x_t.
+# In a real DDPM this would be a time-conditioned UNet.
+# ---------------------------------------------------------------</span>
+class StubEpsNet(nn.Module):
+    """
+    Minimal noise-predicting network for illustration.
+    Input:  x_t  of shape (B, d)
+            t    of shape (B,) containing integer time indices in [0, T-1]
+    Output: predicted eps of shape (B, d)
+    """
+    def __init__(self, d: int, T: int, emb_dim: int = 16):
+        super().__init__()
+        self.T       = T
+        self.emb_dim = emb_dim
+        <span class="code-comment"># Learnable time embedding table: one vector per time step</span>
+        self.time_emb = nn.Embedding(T, emb_dim)       <span class="code-comment"># shape: (T, emb_dim)</span>
+        <span class="code-comment"># Simple MLP: [d + emb_dim] -&gt; [128] -&gt; [d]</span>
+        self.net = nn.Sequential(
+            nn.Linear(d + emb_dim, 128),
+            nn.SiLU(),
+            nn.Linear(128, d),
+        )
+
+    def forward(self, x_t: torch.Tensor, t: torch.Tensor) -&gt; torch.Tensor:
+        <span class="code-comment"># x_t: (B, d),  t: (B,) int64</span>
+        emb  = self.time_emb(t)                        <span class="code-comment"># (B, emb_dim)</span>
+        inp  = torch.cat([x_t, emb], dim=-1)           <span class="code-comment"># (B, d + emb_dim)</span>
+        return self.net(inp)                            <span class="code-comment"># (B, d)</span>
+
+
+def compute_loss(model: nn.Module,
+                 x0: torch.Tensor,
+                 sched: dict) -&gt; torch.Tensor:
+    """
+    Compute L_simple for a batch of clean examples x0.
+
+    Args:
+        model : noise-predicting network eps_theta(x_t, t)
+        x0    : clean data batch, shape (B, d)
+        sched : schedule dict from make_schedule()
+
+    Returns:
+        scalar loss tensor (MSE averaged over batch and dimensions)
+    """
+    B, d = x0.shape
+    T    = sched["abar"].shape[0]
+
+    <span class="code-comment"># --- Step 1: sample a random time step for each example in the batch ---</span>
+    t = torch.randint(0, T, (B,), dtype=torch.long)    <span class="code-comment"># (B,)  values in {0, ..., T-1}</span>
+
+    <span class="code-comment"># --- Step 2: sample noise ---</span>
+    eps = torch.randn_like(x0)                          <span class="code-comment"># (B, d)  eps ~ N(0, I)</span>
+
+    <span class="code-comment"># --- Step 3: form the noisy sample via the closed-form jump ---</span>
+    abar_t  = sched["abar"][t]                          <span class="code-comment"># (B,)   scalar abar per example</span>
+    <span class="code-comment"># Reshape to (B, 1) so broadcasting works with (B, d) tensors</span>
+    sqrt_ab  = abar_t.sqrt().unsqueeze(1)               <span class="code-comment"># (B, 1)</span>
+    sqrt_1ab = (1.0 - abar_t).sqrt().unsqueeze(1)       <span class="code-comment"># (B, 1)</span>
+    x_t = sqrt_ab * x0 + sqrt_1ab * eps                 <span class="code-comment"># (B, d)  noisy sample</span>
+
+    <span class="code-comment"># --- Step 4: predict the noise ---</span>
+    eps_pred = model(x_t, t)                            <span class="code-comment"># (B, d)  eps_theta(x_t, t)</span>
+
+    <span class="code-comment"># --- Step 5: MSE between true noise and predicted noise ---</span>
+    loss = ((eps - eps_pred) ** 2).mean()               <span class="code-comment"># scalar</span>
+    return loss
+
+
+<span class="code-comment"># ---------------------------------------------------------------
+# Quick sanity check — untrained model, random data
+# ---------------------------------------------------------------</span>
+d     = 8          <span class="code-comment"># data dimension (e.g. 8 features)</span>
+B     = 32         <span class="code-comment"># batch size</span>
+T     = 1000
+sched = make_schedule(T=T)
+
+model = StubEpsNet(d=d, T=T)
+x0    = torch.randn(B, d)                               <span class="code-comment"># (32, 8)  fake clean data</span>
+loss  = compute_loss(model, x0, sched)
+print(f"loss (untrained): {loss.item():.4f}")
+<span class="code-comment"># Expected: ~1.0 (for an untrained network predicting zero, MSE ≈ E[eps^2] = 1.0)</span>
+
+<span class="code-comment"># ---------------------------------------------------------------
+# Show shapes at each step for one example (B=1)
+# ---------------------------------------------------------------</span>
+B1   = 1
+x0_1 = torch.randn(B1, d)
+t1   = torch.randint(0, T, (B1,))
+eps1 = torch.randn_like(x0_1)
+ab1  = sched["abar"][t1].sqrt().unsqueeze(1)
+s1   = (1 - sched["abar"][t1]).sqrt().unsqueeze(1)
+xt1  = ab1 * x0_1 + s1 * eps1
+print(f"\nShapes — x0: {x0_1.shape}, t: {t1.shape}, eps: {eps1.shape}, x_t: {xt1.shape}")
+<span class="code-comment"># Expected: x0: torch.Size([1, 8]), t: torch.Size([1]),
+#           eps: torch.Size([1, 8]), x_t: torch.Size([1, 8])</span>
+print(f"t sampled: {t1.item()}, abar_t: {sched['abar'][t1].item():.4f}")
+<span class="code-comment"># Expected: some integer in [0, 999] and its corresponding abar value</span>
+</code></pre>
+
+<h3>5.9.3 Sampling loop (inference)</h3>
+
+<pre><code><span class="code-comment"># Sampling loop — runs the reverse chain to generate x0 from x_T ~ N(0,I).
+# Teaching code — RNG seeded for reproducibility, not security.</span>
+import torch
+
+@torch.no_grad()
+def ddpm_sample(model: nn.Module,
+                sched: dict,
+                shape: tuple,
+                device: str = "cpu") -&gt; torch.Tensor:
+    """
+    Generate a batch of samples using the DDPM reverse chain.
+
+    Args:
+        model  : trained eps_theta network
+        sched  : schedule dict from make_schedule()
+        shape  : (B, d) tuple — batch size and data dimension
+        device : 'cpu' or 'cuda'
+
+    Returns:
+        x0_gen : generated samples, shape (B, d)
+    """
+    T     = sched["beta"].shape[0]
+    beta  = sched["beta"].to(device)
+    alpha = sched["alpha"].to(device)
+    abar  = sched["abar"].to(device)
+
+    <span class="code-comment"># --- Start from pure noise ---</span>
+    x = torch.randn(*shape, device=device)              <span class="code-comment"># (B, d)  x_T ~ N(0, I)</span>
+
+    for t_idx in reversed(range(T)):                    <span class="code-comment"># t = T-1, T-2, ..., 0</span>
+        t_batch = torch.full((shape[0],), t_idx,
+                             dtype=torch.long, device=device)  <span class="code-comment"># (B,)</span>
+
+        <span class="code-comment"># --- Predict noise ---</span>
+        eps_hat = model(x, t_batch)                     <span class="code-comment"># (B, d)</span>
+
+        <span class="code-comment"># --- Compute the mean of p_theta(x_{t-1} | x_t) ---</span>
+        coeff   = beta[t_idx] / (1.0 - abar[t_idx]).sqrt()    <span class="code-comment"># scalar: beta_t / sqrt(1-abar_t)</span>
+        mean    = (x - coeff * eps_hat) / alpha[t_idx].sqrt() <span class="code-comment"># (B, d)</span>
+
+        <span class="code-comment"># --- Add stochastic noise (skip at t=0, the final step) ---</span>
+        if t_idx &gt; 0:
+            z    = torch.randn_like(x)                  <span class="code-comment"># (B, d)  fresh noise</span>
+            x    = mean + beta[t_idx].sqrt() * z        <span class="code-comment"># (B, d)  x_{t-1}</span>
+        else:
+            x    = mean                                 <span class="code-comment"># final step: no noise added</span>
+
+    return x                                            <span class="code-comment"># (B, d)  generated x_0</span>
+
+
+<span class="code-comment"># --- Quick sanity check with stub (untrained) model ---</span>
+torch.manual_seed(7)
+d, B   = 8, 4
+sched  = make_schedule(T=1000)
+model  = StubEpsNet(d=d, T=1000)
+x_gen  = ddpm_sample(model, sched, shape=(B, d))
+print(f"Generated shape: {x_gen.shape}")               <span class="code-comment"># expected: torch.Size([4, 8])</span>
+print(f"Mean: {x_gen.mean():.3f},  Std: {x_gen.std():.3f}")
+<span class="code-comment"># With an untrained model the output will NOT look like data —
+# it will be roughly N(0,1)-shaped since the model outputs near-zero noise.
+# After training, x_gen.mean() and x_gen.std() should match the data distribution.
+# Expected for untrained: Mean ~ 0.0, Std ~ 1.0</span>
+</code></pre>
+
+<!-- ============================================================ -->
+<h2>5.10 End-to-end connection to the MIT notes</h2>
+
+<div class="box connect">
+<span class="label">Connection — DDPM in the MIT notes framework</span>
+<p>
+The MIT notes (Appendix E / Summary 45) describe DDPM as a special case of the
+continuous-time SDE framework with the following correspondences:
+</p>
+<ul>
+  <li>
+    <strong>Forward process</strong>: the Markov chain \(q(x_t \mid x_{t-1})\) is a
+    discretization of the Ornstein-Uhlenbeck SDE
+    \(dX_t = -\frac{1}{2}\beta(t) X_t\,dt + \sqrt{\beta(t)}\,dW_t\),
+    where the continuous variance schedule \(\beta(t)\) interpolates the discrete values.
+  </li>
+  <li>
+    <strong>Probability path</strong>: the notes' Gaussian path
+    \(p_t(x \mid z) = \mathcal{N}(\alpha_t z, \beta_t^2 I)\)
+    matches \(q(x_t \mid x_0) = \mathcal{N}(\sqrt{\bar{\alpha}_t} x_0, (1-\bar{\alpha}_t)I)\)
+    under the identification \(\alpha_t^{\text{notes}} = \sqrt{\bar{\alpha}_t^{\text{DDPM}}}\),
+    \(\beta_t^{\text{notes}} = \sqrt{1-\bar{\alpha}_t^{\text{DDPM}}}\).
+  </li>
+  <li>
+    <strong>Training loss</strong>: \(\mathcal{L}_{\mathrm{simple}}\) is the denoising
+    score matching loss (Theorem 22 in the notes, §4.3) with the weighting dropped.
+    The notes state explicitly that dropping \(1/\beta_t^2\) (the numerical instability
+    factor near \(\beta_t \to 0\)) was the key practical contribution of Ho et al.
+  </li>
+  <li>
+    <strong>Sampling</strong>: the DDPM reverse step is one Euler–Maruyama step of the
+    reverse SDE from Theorem 17 in the notes, with
+    diffusion coefficient \(\sigma_t = \sqrt{\beta_t}\).
+  </li>
+  <li>
+    <strong>Inverted time convention</strong>: the notes use \(t=0\) for clean data and
+    \(t=1\) for noise; DDPM uses \(t=0\) for clean and \(t=T\) for noise.
+    When reading papers, always check which convention is in use.
+  </li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>5.11 Checkpoint</h2>
+
+<div class="box prereq">
+<span class="label">Checkpoint — can you answer these?</span>
+<ol>
+  <li>
+    Write down \(q(x_t \mid x_{t-1})\). What are its mean and variance?
+    Explain in words what each term does.
+  </li>
+  <li>
+    State the closed-form \(q(x_t \mid x_0)\) without looking.
+    Which algebraic property lets you combine multiple steps into one?
+  </li>
+  <li>
+    Given \(x_0 = [1, 0]\), \(\bar{\alpha}_t = 0.25\), write down the
+    distribution of \(x_t\) as a concrete Gaussian.
+    What are its mean vector and covariance matrix?
+  </li>
+  <li>
+    What is the true reverse posterior \(q(x_{t-1} \mid x_t, x_0)\)?
+    Write down \(\tilde{\mu}_t\) and \(\tilde{\beta}_t\). Why can't you use
+    this directly at test time?
+  </li>
+  <li>
+    Write down \(\mathcal{L}_{\mathrm{simple}}\) and identify every symbol.
+    In pseudocode, outline the four lines of a training step.
+  </li>
+  <li>
+    How does \(\varepsilon_\theta\) relate to \(\nabla_{x_t}\log q_t(x_t)\)?
+    State the formula.
+  </li>
+  <li>
+    Write down one step of the DDPM sampling update.
+    Explain why we set \(z = 0\) at \(t = 1\).
+  </li>
+  <li>
+    What is the cosine schedule and why was it introduced?
+    What problem does it fix compared to the linear schedule?
+  </li>
+  <li>
+    In the MIT notes, the training loss is called <em>denoising score matching</em>.
+    In DDPM it is called <em>noise prediction</em>. Are they different objectives?
+    Why or why not?
+  </li>
+  <li>
+    (Code) Modify <code>compute_loss</code> to implement the <em>weighted</em> ELBO
+    version of \(L_{t-1}\) (include the per-step coefficient).
+    When would you prefer this over \(\mathcal{L}_{\mathrm{simple}}\)?
+  </li>
+</ol>
+</div>
+
+<nav class="pagenav">
+  <a class="prev" href="part04_diffusion_models.html"><span class="dir">&#8249; Prev</span>Part 4 — Diffusion Models</a>
+  <a class="next" href="part06_ddim.html"><span class="dir">Next ›</span>Part 6 — DDIM</a>
+</nav>
+
+</article>
+</main>
+</div>
+<script defer src="assets/guide.js"></script>
+</body>
+</html>

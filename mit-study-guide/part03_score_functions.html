@@ -1,0 +1,899 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Part 3 — Score Functions · Diffusion Study Guide</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [["\\(", "\\)"]], displayMath: [["\\[", "\\]"]], tags: "none" },
+    options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle contents">☰</button>
+<div class="layout">
+<nav class="toc">
+  <a href="index.html"><strong>◆ Diffusion Study Guide</strong></a>
+  <h2>Foundations</h2>
+  <a href="part00_math_foundations.html"><span class="part-num">0</span>Mathematical Foundations</a>
+  <a href="part01_differential_equations.html"><span class="part-num">1</span>Differential Equations</a>
+  <a href="part02_probability_stochastic.html"><span class="part-num">2</span>Probability &amp; Stochastic Processes</a>
+  <a href="part03_score_functions.html"><span class="part-num">3</span>Score Functions</a>
+  <h2>Diffusion Core</h2>
+  <a href="part04_diffusion_models.html"><span class="part-num">4</span>Diffusion Models (big picture)</a>
+  <a href="part05_ddpm.html"><span class="part-num">5</span>DDPM</a>
+  <a href="part06_ddim.html"><span class="part-num">6</span>DDIM</a>
+  <a href="part07_continuous_time.html"><span class="part-num">7</span>Continuous-Time Diffusion</a>
+  <h2>Continuous Formulation</h2>
+  <a href="part08_sde_formulation.html"><span class="part-num">8</span>SDE Formulation</a>
+  <a href="part09_probability_flow_ode.html"><span class="part-num">9</span>Probability Flow ODE</a>
+  <a href="part10_flow_matching.html"><span class="part-num">10</span>Flow Matching</a>
+  <a href="part11_rectified_flows.html"><span class="part-num">11</span>Rectified Flows</a>
+  <h2>Systems &amp; Reading</h2>
+  <a href="part12_stable_diffusion.html"><span class="part-num">12</span>Stable Diffusion</a>
+  <a href="part13_reading_the_notes.html"><span class="part-num">13</span>Reading the MIT Notes</a>
+  <a href="part14_discrete_diffusion.html"><span class="part-num">14</span>Discrete Diffusion</a>
+</nav>
+<main>
+<article>
+
+<h1><span class="kicker">Part 3</span>Score Functions</h1>
+
+<p class="muted">The score function \(\nabla_x \log p(x)\) is the single most important
+vector field in the whole diffusion story. It tells a sampling algorithm, at every
+point in space, which direction to walk to increase the probability of the current
+location. This part builds it from scratch — from the definition of a gradient
+through to the closed form for Gaussians, the conditional-vs-marginal split, and the
+denoising score-matching objective that actually makes it trainable. Every symbol is
+defined before it appears in any equation.</p>
+
+<div class="box prereq">
+<span class="label">Prerequisites</span>
+<ul>
+  <li><strong>Part 0</strong>: you know what \(\nabla_x f(x)\) means (the vector of
+  partial derivatives, pointing in the direction of steepest increase of \(f\)) and
+  you can read the Gaussian density \(\mathcal{N}(x;\mu,\sigma^2 I)\).</li>
+  <li><strong>Part 2</strong>: you have seen how a forward SDE gradually noises data,
+  producing a time-indexed family of densities \(p_t(x)\).</li>
+  <li>No prior knowledge of score matching, variational inference, or energy-based
+  models is assumed.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>3.1 What Is the Score? Intuition Before Equations</h2>
+
+<p>Imagine laying a probability density \(p(x)\) over the 2-D plane. High-probability
+regions are mountain peaks; low-probability regions are valleys. The density is a
+landscape. Now at every single point \(x\) on that landscape, draw an arrow that
+points in the direction of the steepest uphill slope. You have just drawn the
+<strong>score function</strong>.</p>
+
+<div class="box intuition">
+<span class="label">Core mental model — memorize this picture</span>
+<p>The score \(s(x) = \nabla_x \log p(x)\) is a <em>vector field</em>:</p>
+<ul>
+  <li><strong>Direction</strong>: points toward the nearest high-density region
+  ("up the hill of log-probability").</li>
+  <li><strong>Magnitude</strong>: proportional to the steepness of that hill.
+  Near a sharp peak the arrows are long; on a flat plateau they are short;
+  exactly at a mode (the peak) the arrow is zero because you are already at
+  the top.</li>
+  <li><strong>Intuitive use</strong>: if you start anywhere in space and keep
+  taking small steps in the direction of the score, you will climb toward the
+  most probable region — toward where real data lives. This is the key idea
+  behind <em>Langevin dynamics</em> (Section 3.6).</li>
+</ul>
+<p>The MIT notes (§4.1, p. 19) say exactly this: "the score \(\nabla \log q(x)\)
+is the direction of steepest ascent with respect to log-likelihood."
+This is Figure 8 in those notes: a 2-D density on the left, arrows pointing
+uphill on the right.</p>
+</div>
+
+<p>Before we write any equation, let us nail down every symbol we will need.</p>
+
+<table class="symbols">
+<tr><th>Symbol</th><th>Type / Shape</th><th>Meaning</th></tr>
+<tr><td>\(x\)</td><td>vector \(\in \mathbb{R}^d\)</td><td>a data point (e.g. a noisy image flattened to \(d\) numbers)</td></tr>
+<tr><td>\(p(x)\)</td><td>scalar \(\geq 0\)</td><td>probability density evaluated at \(x\); integrates to 1 over \(\mathbb{R}^d\)</td></tr>
+<tr><td>\(\log p(x)\)</td><td>scalar \(\in (-\infty, 0]\)</td><td>log-likelihood; replaces multiplication with addition</td></tr>
+<tr><td>\(\nabla_x\)</td><td>operator \(\to \mathbb{R}^d\)</td><td>gradient w.r.t. \(x\): the \(i\)-th component is \(\partial / \partial x_i\)</td></tr>
+<tr><td>\(s(x)\)</td><td>vector \(\in \mathbb{R}^d\)</td><td>the score function \(\nabla_x \log p(x)\); same shape as \(x\)</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>3.2 The Equation Piece by Piece: Why \(\log\) and Why It Drops the Normalizer</h2>
+
+<p>Most densities we encounter are written as</p>
+
+<div class="box mathblock">
+<span class="label">Unnormalized density form</span>
+\[
+  p(x) = \frac{1}{Z}\,\tilde{p}(x)
+\]
+<p>where \(\tilde{p}(x) \geq 0\) is an <em>unnormalized energy function</em> that we
+can compute, and \(Z = \int \tilde{p}(x)\,dx\) is the <em>partition function</em>
+(normalizing constant) that is usually <strong>intractable</strong> — in high
+dimensions, \(Z\) requires integrating over all of \(\mathbb{R}^d\), which is
+impossible to do exactly for most interesting distributions.</p>
+</div>
+
+<p>Now take the logarithm and then the gradient:</p>
+
+<div class="box mathblock">
+<span class="label">The normalizer vanishes — key algebraic fact</span>
+\[
+\begin{aligned}
+\nabla_x \log p(x)
+  &= \nabla_x \log \!\left(\frac{\tilde{p}(x)}{Z}\right) \\[4pt]
+  &= \nabla_x \bigl[\log \tilde{p}(x) - \log Z\bigr] \\[4pt]
+  &= \nabla_x \log \tilde{p}(x) - \nabla_x \log Z \\[4pt]
+  &= \nabla_x \log \tilde{p}(x) - 0
+\end{aligned}
+\]
+<p>because \(\log Z\) is a constant — it does not depend on \(x\) — so its gradient
+is zero.</p>
+\[
+  \boxed{\nabla_x \log p(x) = \nabla_x \log \tilde{p}(x)}
+\]
+</div>
+
+<p>This is a profound computational gift. To evaluate or learn the score you only
+need to be able to differentiate \(\tilde{p}(x)\), not to compute \(Z\). Energy-based
+models, for example, set \(\tilde{p}(x) = e^{-E(x)}\) (so
+\(\log \tilde{p}(x) = -E(x)\)) and work entirely with the score
+\(-\nabla_x E(x)\) without ever computing \(Z\).</p>
+
+<p>The \(\log\) also converts products into sums, which stabilizes floating-point
+arithmetic (densities are often tiny numbers; their logarithms are
+moderate negatives) and converts the exponential in a Gaussian into a quadratic
+— giving us a clean closed form, as we see next.</p>
+
+<!-- ============================================================ -->
+<h2>3.3 Worked Toy: Score of a Gaussian — Full Algebra</h2>
+
+<p>The single most important closed form in this entire course is the score of a
+<em>Gaussian</em> density. We will derive it completely, line by line, so it
+becomes second nature.</p>
+
+<p>Start with the multivariate isotropic Gaussian density. Every symbol defined
+first:</p>
+
+<table class="symbols">
+<tr><th>Symbol</th><th>Shape</th><th>Meaning</th></tr>
+<tr><td>\(\mu\)</td><td>\(\mathbb{R}^d\)</td><td>the mean vector (center of the Gaussian)</td></tr>
+<tr><td>\(\sigma^2\)</td><td>scalar \(&gt; 0\)</td><td>variance (controls spread); \(\sigma\) is the standard deviation</td></tr>
+<tr><td>\(I_d\)</td><td>\(d \times d\) matrix</td><td>identity matrix; \(\sigma^2 I_d\) is the covariance</td></tr>
+<tr><td>\(\|x - \mu\|^2\)</td><td>scalar</td><td>squared Euclidean distance \(\sum_{i=1}^d (x_i - \mu_i)^2\)</td></tr>
+<tr><td>\((2\pi\sigma^2)^{d/2}\)</td><td>scalar</td><td>the normalizing constant \(Z\)</td></tr>
+</table>
+
+<div class="box mathblock">
+<span class="label">Gaussian density</span>
+\[
+  \mathcal{N}(x;\,\mu,\,\sigma^2 I_d) \;=\;
+  \frac{1}{(2\pi\sigma^2)^{d/2}}
+  \exp\!\left(-\frac{\|x - \mu\|^2}{2\sigma^2}\right)
+\]
+</div>
+
+<p><strong>Step 1: take the log.</strong></p>
+
+\[
+\log \mathcal{N}(x;\mu,\sigma^2 I_d)
+  = -\frac{d}{2}\log(2\pi\sigma^2) - \frac{\|x-\mu\|^2}{2\sigma^2}
+\]
+
+<p>The first term \(-\frac{d}{2}\log(2\pi\sigma^2)\) is a constant in \(x\)
+(it does not contain \(x\) anywhere), so its gradient is zero.</p>
+
+<p><strong>Step 2: take the gradient w.r.t. \(x\).</strong></p>
+
+\[
+\nabla_x \log \mathcal{N}(x;\mu,\sigma^2 I_d)
+  = \nabla_x\!\left[-\frac{\|x-\mu\|^2}{2\sigma^2}\right]
+  = -\frac{1}{2\sigma^2}\,\nabla_x \|x-\mu\|^2
+\]
+
+<p><strong>Step 3: compute \(\nabla_x \|x - \mu\|^2\).</strong> Expand the
+squared norm:</p>
+
+\[
+\|x - \mu\|^2 = (x-\mu)^\top(x-\mu) = \sum_{i=1}^d (x_i - \mu_i)^2
+\]
+
+Taking the partial derivative w.r.t. the \(i\)-th coordinate:
+\(\partial/\partial x_i\, (x_i - \mu_i)^2 = 2(x_i - \mu_i)\).
+Stacking all partials back into a vector: \(\nabla_x \|x-\mu\|^2 = 2(x - \mu)\).
+
+<p><strong>Step 4: put it together.</strong></p>
+
+<div class="box mathblock">
+<span class="label">Score of a Gaussian — the most important formula in this course</span>
+\[
+  \boxed{
+    \nabla_x \log \mathcal{N}(x;\,\mu,\,\sigma^2 I_d)
+    \;=\; -\frac{x - \mu}{\sigma^2}
+  }
+\]
+</div>
+
+<div class="box intuition">
+<span class="label">Geometric interpretation — read this carefully</span>
+<ul>
+  <li><strong>Direction</strong>: \(-(x - \mu)\) is the vector pointing
+  <em>from \(x\) back toward the mean \(\mu\)</em>. The score always aims at
+  the center. No matter where you are, the "uphill" direction points straight
+  to \(\mu\). This makes perfect sense: the Gaussian has one peak, at
+  \(\mu\).</li>
+  <li><strong>Magnitude</strong>: the factor \(1/\sigma^2\) means that for a
+  <em>narrow</em> Gaussian (small \(\sigma^2\)), the arrows are <em>long</em>
+  even when \(x\) is close to \(\mu\) — the landscape is steep. For a
+  <em>wide</em> Gaussian (large \(\sigma^2\)), the arrows are short — the
+  landscape is flat.</li>
+  <li><strong>At the peak</strong>: when \(x = \mu\), the score is
+  \(\mathbf{0}\). Correct — you are already at the top.</li>
+  <li><strong>Linear in \(x\)</strong>: the score of a Gaussian is a linear
+  (actually affine) function of \(x\). This linearity is the secret behind
+  many analytic results in diffusion models.</li>
+</ul>
+</div>
+
+<h4>Verify with PyTorch autograd</h4>
+
+<pre><code>import torch
+<span class="code-comment"># Teaching code — no security-sensitive RNG. Manual seed for reproducibility.</span>
+torch.manual_seed(42)
+
+<span class="code-comment"># -------------------------------------------------------------------
+# Analytic score of N(x ; mu, sigma^2 * I)  =>  -(x - mu) / sigma^2
+# -------------------------------------------------------------------</span>
+
+d      = 3                                  <span class="code-comment"># dimension</span>
+mu     = torch.tensor([1.0, -2.0, 0.5])    <span class="code-comment"># mean vector, shape (3,)</span>
+sigma2 = 0.5                               <span class="code-comment"># variance (scalar)</span>
+x      = torch.tensor([0.2, 1.0, -1.0])   <span class="code-comment"># query point, shape (3,)</span>
+
+<span class="code-comment"># Analytic formula</span>
+score_analytic = -(x - mu) / sigma2        <span class="code-comment"># shape (3,)</span>
+print("Analytic score:", score_analytic)
+<span class="code-comment"># Expected: tensor([ 1.6000, -6.0000,  3.0000])</span>
+
+<span class="code-comment"># -------------------------------------------------------------------
+# Autograd score: differentiate log N(x ; mu, sigma^2 * I) w.r.t. x
+# -------------------------------------------------------------------</span>
+
+x_ad = x.clone().requires_grad_(True)       <span class="code-comment"># tell PyTorch to track gradients</span>
+
+<span class="code-comment"># log N(x ; mu, sigma^2 I) up to the constant term  (constant drops out anyway)</span>
+log_px = -torch.sum((x_ad - mu)**2) / (2 * sigma2)
+
+log_px.backward()                           <span class="code-comment"># compute d(log_px)/d(x_ad)</span>
+score_autograd = x_ad.grad                  <span class="code-comment"># shape (3,)</span>
+print("Autograd score:", score_autograd)
+<span class="code-comment"># Expected: tensor([ 1.6000, -6.0000,  3.0000])  -- matches analytic exactly</span>
+
+<span class="code-comment"># Check they agree</span>
+print("Max abs diff:", (score_analytic - score_autograd).abs().max().item())
+<span class="code-comment"># Expected: 0.0  (exact float match)</span></code></pre>
+
+<!-- ============================================================ -->
+<h2>3.4 The Time-Dependent Score \(\nabla_x \log p_t(x)\)</h2>
+
+<p>In diffusion models the forward process gradually corrupts data with noise over a
+time interval \(t \in [0, 1]\). At each time step \(t\) we have a different density
+\(p_t(x)\) — so we also have a different score field at each \(t\). The score
+becomes a function of both the current position <em>and</em> the current time:</p>
+
+<div class="box mathblock">
+<span class="label">Time-dependent score function</span>
+\[
+  s(x, t) \;=\; \nabla_x \log p_t(x)
+  \qquad s:\,\mathbb{R}^d \times [0,1] \to \mathbb{R}^d
+\]
+</div>
+
+<table class="symbols">
+<tr><th>Symbol</th><th>Meaning</th></tr>
+<tr><td>\(t \in [0,1]\)</td><td>time index along the forward noising process</td></tr>
+<tr><td>\(p_t(x)\)</td><td>the density of the noisy data at time \(t\); \(p_0 \approx p_{\text{data}}\), \(p_1 \approx \mathcal{N}(0,I)\)</td></tr>
+<tr><td>\(\nabla_x \log p_t(x)\)</td><td>score at position \(x\) and time \(t\); a \(d\)-dimensional vector</td></tr>
+</table>
+
+<div class="box intuition">
+<span class="label">How the score field changes with time</span>
+<p>Imagine \(p_t\) as a slowly melting mountain range. At \(t = 0\) the landscape
+is complex — many sharp peaks where real images live. As \(t\) increases noise is
+added and the peaks blur and merge. At \(t = 1\) the landscape is a single broad
+Gaussian hill centered at the origin. The score field starts complicated and
+gradually simplifies into \(-x\) (the score of a standard Gaussian).</p>
+<p>The neural network \(s_\theta(x, t)\) has to learn the entire time-indexed
+family of vector fields from data — a harder problem than learning a single
+field, but the Gaussian structure at large \(t\) provides a useful anchor.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3.5 Conditional vs. Marginal Score (MIT Notes §4.1)</h2>
+
+<p>The forward process is designed so that the noisy sample \(x_t\) is
+conditionally Gaussian given the clean sample \(z\). This gives us two flavors
+of score that the notes introduce on page 19.</p>
+
+<h3>Setup: the probability paths</h3>
+
+<p>Fix a clean data sample \(z \sim p_{\text{data}}\). The <strong>Gaussian
+probability path</strong> is:</p>
+
+<div class="box mathblock">
+<span class="label">Gaussian forward process (conditional)</span>
+\[
+  p_t(x \mid z) \;=\; \mathcal{N}\!\bigl(x;\;\alpha_t z,\;\beta_t^2 I_d\bigr)
+\]
+<p>In words: at time \(t\), the noisy sample \(x_t\) is distributed as a Gaussian
+centered at the scaled clean data \(\alpha_t z\) with variance \(\beta_t^2\). The
+<em>signal-to-noise ratio</em> is controlled by the schedule \((\alpha_t, \beta_t)\)
+with \(\alpha_0 \approx 1, \beta_0 \approx 0\) (clean data) and
+\(\alpha_1 \approx 0, \beta_1 \approx 1\) (pure noise).</p>
+</div>
+
+<p>Integrating out (marginalizing) the unknown clean sample \(z\) gives the
+<strong>marginal density</strong>:</p>
+
+\[
+  p_t(x) \;=\; \int p_t(x \mid z)\,p_{\text{data}}(z)\,dz
+\]
+
+<p>This is intractable in closed form for a real data distribution (we can't
+actually do the integral over all possible images).</p>
+
+<h3>Two flavors of score</h3>
+
+<table class="symbols">
+<tr><th>Name</th><th>Formula</th><th>Tractable?</th><th>Reason</th></tr>
+<tr>
+  <td><strong>Conditional score</strong></td>
+  <td>\(\nabla_x \log p_t(x \mid z)\)</td>
+  <td>Yes</td>
+  <td>\(p_t(x|z)\) is a Gaussian — we just derived its score</td>
+</tr>
+<tr>
+  <td><strong>Marginal score</strong></td>
+  <td>\(\nabla_x \log p_t(x)\)</td>
+  <td>No (directly)</td>
+  <td>\(p_t(x)\) requires integrating over all \(z\); unknown in closed form</td>
+</tr>
+</table>
+
+<h3>The marginalization formula (MIT Notes Eq. 38)</h3>
+
+<p>The notes derive a key identity. Define the posterior \(p_t(z \mid x)\) as the
+distribution over clean data given the noisy observation. Then:</p>
+
+<div class="box mathblock">
+<span class="label">Marginal score = posterior-weighted average of conditional scores</span>
+\[
+  \nabla_x \log p_t(x) \;=\;
+  \mathbb{E}_{z \sim p_t(z \mid x)}\!\bigl[\,\nabla_x \log p_t(x \mid z)\,\bigr]
+\]
+<p>This is Equation (38) in the MIT notes. The proof (their §4.1) uses the
+identity \(\partial_y \log y = 1/y\) combined with the chain rule twice to
+show that the marginal score equals the conditional score averaged over the
+posterior distribution of clean samples.</p>
+</div>
+
+<div class="box intuition">
+<span class="label">Why this formula is so important</span>
+<p>Think of it this way. When you observe a noisy image \(x_t\), you don't know
+which clean image \(z\) produced it — many clean images could have. Each
+candidate \(z\) has a conditional score \(\nabla_x \log p_t(x|z)\) pointing
+toward its own reconstruction. The <em>marginal</em> score takes a weighted
+vote of all those directions, weighted by how likely each \(z\) was to have
+produced \(x_t\). The result is the best-guess "uphill" direction given
+your uncertainty about the true clean image.</p>
+<p>This is the <em>score analogue</em> of the flow-matching marginalization
+trick (Part 10): the marginal quantity = expectation of the conditional
+quantity over the posterior. The same algebraic structure appears everywhere
+in this field.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3.6 Proposition 1: The Score–Noise–Data Triangle (MIT Notes §4.1)</h2>
+
+<p>For a Gaussian probability path the conditional score has a strikingly clean
+form that connects it to two other prediction targets: the noise \(\varepsilon\)
+and the clean sample \(z\).</p>
+
+<h3>The conditional score in closed form</h3>
+
+<p>Recall the Gaussian score formula from Section 3.3. Apply it with
+\(\mu = \alpha_t z\) and \(\sigma^2 = \beta_t^2\):</p>
+
+<div class="box mathblock">
+<span class="label">Conditional score for a Gaussian path (Example 15, MIT Notes p. 19)</span>
+\[
+  \nabla_x \log p_t(x \mid z)
+  \;=\; -\frac{x - \alpha_t z}{\beta_t^2}
+\]
+<p>Symbols: \(\alpha_t \in (0,1]\) is the signal-scaling schedule; \(\beta_t &gt; 0\)
+is the noise-scaling schedule; \(z \in \mathbb{R}^d\) is the clean sample;
+\(x \in \mathbb{R}^d\) is the noisy point.</p>
+</div>
+
+<p>Now substitute the reparameterization identity. If
+\(x_t = \alpha_t z + \beta_t \varepsilon\) with \(\varepsilon \sim \mathcal{N}(0, I_d)\),
+then</p>
+
+\[
+  x_t - \alpha_t z = \beta_t \varepsilon
+  \quad \Rightarrow \quad
+  -\frac{x_t - \alpha_t z}{\beta_t^2}
+  = -\frac{\beta_t \varepsilon}{\beta_t^2}
+  = -\frac{\varepsilon}{\beta_t}
+\]
+
+<div class="box mathblock">
+<span class="label">Proposition 1 — Conversion Formula (MIT Notes §4.1) — the triangle</span>
+<p>For the Gaussian path \(p_t(x|z) = \mathcal{N}(x;\,\alpha_t z,\,\beta_t^2 I_d)\)
+and the reparameterization \(x_t = \alpha_t z + \beta_t \varepsilon\),
+\(\varepsilon \sim \mathcal{N}(0, I)\):</p>
+\[
+\underbrace{\nabla_x \log p_t(x_t \mid z)}_{\text{score}}
+\;=\;
+\underbrace{-\frac{x_t - \alpha_t z}{\beta_t^2}}_{\text{clean-data form}}
+\;=\;
+\underbrace{-\frac{\varepsilon}{\beta_t}}_{\text{noise form}}
+\]
+<p>Same identity holds for the marginals (integrate both sides over
+\(p_t(z|x)\)):</p>
+\[
+  \nabla_x \log p_t(x)
+  \;=\; -\frac{x - \alpha_t\,\mathbb{E}_{p_t(z|x)}[z]}{\beta_t^2}
+  \;=\; -\frac{\mathbb{E}_{p_t(\varepsilon|x)}[\varepsilon]}{\beta_t}
+\]
+</div>
+
+<div class="box intuition">
+<span class="label">The score–noise–data triangle: three ways to parametrize the same thing</span>
+<p>Proposition 1 says that for a Gaussian path, knowing any one of the three
+quantities below lets you compute the other two via a simple linear formula:</p>
+<ul>
+  <li><strong>\(s_\theta(x_t, t)\)</strong> — the score (gradient of log-density)</li>
+  <li><strong>\(\varepsilon_\theta(x_t, t)\)</strong> — the noise prediction
+  (\(\varepsilon\) that was added)</li>
+  <li><strong>\(\hat{x}_\theta(x_t, t)\)</strong> — the clean-data prediction
+  (denoiser, \(\mathbb{E}[z | x_t]\))</li>
+</ul>
+<p>The conversion is:</p>
+\[
+  s_\theta = -\frac{\varepsilon_\theta}{\beta_t},
+  \qquad
+  \varepsilon_\theta = -\beta_t\,s_\theta,
+  \qquad
+  \hat{x}_\theta = \frac{x_t + \beta_t^2\,s_\theta}{\alpha_t}
+\]
+<p>This triangle is the algebraic backbone of the entire diffusion model zoo.
+DDPM (Part 5) predicts \(\varepsilon_\theta\). Some models predict
+\(\hat{x}_\theta\). Others predict \(s_\theta\) directly (score-based
+models). They are all the same model, just reparameterized.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3.7 Remark 16: Reparameterization and the DDPM Noise Predictor</h2>
+
+<p>Remark 16 in the MIT notes (§4.1) expands on why the triangle above is
+more than just algebraic convenience. The key observation is:</p>
+
+<blockquote>
+<em>"Both the conditional vector field and the conditional score are linear
+functions of \(x\) and \(z\). After marginalizing, both sides are just a linear
+reparameterization of the posterior mean \(\mathbb{E}_{z|x}[z]\). Any quantity
+that recovers this posterior mean can also recover the vector field and
+score."</em>
+</blockquote>
+
+<p>In DDPM (Part 5), Ho et al. (2020) chose to predict noise \(\varepsilon_\theta\)
+rather than the score \(s_\theta\) for a concrete numerical reason: near \(t=0\)
+(very little noise added) the denominator \(\beta_t\) is tiny, which makes the
+score \(s_\theta = -\varepsilon_\theta/\beta_t\) very large and numerically
+unstable to train. By predicting \(\varepsilon_\theta\) directly and <em>dropping</em>
+the \(1/\beta_t^2\) weight from the loss (an implicit re-weighting), DDPM gets a
+well-conditioned training signal across all time steps.</p>
+
+<div class="box connect">
+<span class="label">Connecting forward: Part 5 (DDPM)</span>
+<p>In Part 5 we will see DDPM's explicit training objective</p>
+\[
+  \mathcal{L}_{\text{simple}} = \mathbb{E}_{z, \varepsilon, t}\bigl[\,
+    \|\varepsilon - \varepsilon_\theta(\alpha_t z + \beta_t \varepsilon,\, t)\|^2
+  \bigr]
+\]
+which is exactly the denoising score matching objective (Section 3.8 below)
+with the \(1/\beta_t^2\) weight dropped for stability. The score network
+\(s_\theta = -\varepsilon_\theta / \beta_t\) and the noise predictor
+\(\varepsilon_\theta\) are thus the same neural network in different clothes.
+</div>
+
+<!-- ============================================================ -->
+<h2>3.8 Why the Score Matters: Langevin Dynamics and the Reverse SDE</h2>
+
+<p>Having the score function — either in closed form or approximated by a neural
+network — unlocks two sampling algorithms.</p>
+
+<div class="box connect">
+<span class="label">Two payoffs of knowing the score — preview of Parts 8 and 9</span>
+
+<p><strong>(a) Langevin dynamics</strong>: the discrete iteration</p>
+\[
+  x_{k+1} \;=\; x_k + \eta\,\nabla_x \log p(x_k) + \sqrt{2\eta}\,\xi_k,
+  \quad \xi_k \sim \mathcal{N}(0, I)
+\]
+converges to samples from \(p\) as step size \(\eta \to 0\). The score tells
+the particle which direction to drift; the noise \(\xi_k\) prevents it from
+collapsing to the mode. This is the prototype of every diffusion sampler.
+
+<p><strong>(b) Reverse-time SDE (Anderson 1982)</strong>: the forward noising
+SDE has a reverse process whose drift involves the score:</p>
+\[
+  dX_t = \bigl[f_t(X_t) - \sigma_t^2\,\nabla_x \log p_t(X_t)\bigr]\,dt
+         + \sigma_t\,d\bar{W}_t
+\]
+<p>Here \(f_t\) is the forward drift and \(\sigma_t\) is the diffusion
+coefficient. <em>The only unknown in the reverse SDE is the score.</em>
+Once we have \(s_\theta \approx \nabla_x \log p_t\), we can integrate this
+SDE backwards from \(t=1\) (noise) to \(t=0\) (data). This is the mathematical
+foundation of every diffusion model sampler. Full details in Parts 8–9.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3.9 Score Matching: Learning the Score from Data (MIT Notes §4.3, Theorem 22, Algorithm 4)</h2>
+
+<p>We need to learn the marginal score \(\nabla_x \log p_t(x)\) without knowing
+\(p_t\) in closed form. This section explains how.</p>
+
+<h3>The ideal objective and why it is intractable</h3>
+
+<p>The natural idea is to train a neural network \(s_\theta(x, t)\) to minimize
+its squared error against the true marginal score:</p>
+
+<div class="box mathblock">
+<span class="label">Score matching loss (ideal, intractable)</span>
+\[
+  \mathcal{L}_{\text{SM}}(\theta)
+  \;=\;
+  \mathbb{E}_{t,\,x_t \sim p_t}\!\Bigl[
+    \bigl\|s_\theta(x_t,\, t) - \nabla_x \log p_t(x_t)\bigr\|^2
+  \Bigr]
+\]
+<p>We want \(s_\theta\) to match the true score everywhere. But
+\(\nabla_x \log p_t(x)\) requires knowing \(p_t\), which requires integrating
+over all clean data — intractable.</p>
+</div>
+
+<p>However, the conditional score \(\nabla_x \log p_t(x|z)\) <em>is</em>
+tractable: for a Gaussian path it is the closed form \(-(x - \alpha_t z)/\beta_t^2\)
+that we derived above.</p>
+
+<h3>Denoising score matching (the tractable substitute)</h3>
+
+<div class="box mathblock">
+<span class="label">Denoising score matching loss (Algorithm 4, MIT Notes §4.3)</span>
+\[
+  \mathcal{L}_{\text{DSM}}(\theta)
+  \;=\;
+  \mathbb{E}_{t,\, z \sim p_{\text{data}},\, x_t \sim p_t(\cdot|z)}\!\Bigl[
+    \bigl\|s_\theta(x_t,\, t) - \nabla_x \log p_t(x_t \mid z)\bigr\|^2
+  \Bigr]
+\]
+<p>The conditional target \(\nabla_x \log p_t(x_t|z)\) is fully computable
+given \(z\) and \(t\). We sample \(z\) from the dataset, sample
+\(\varepsilon \sim \mathcal{N}(0,I)\), set \(x_t = \alpha_t z + \beta_t \varepsilon\),
+and use the closed-form conditional score \(= -\varepsilon/\beta_t\).</p>
+</div>
+
+<h3>Theorem 22: the two losses share the same minimizer</h3>
+
+<p>The remarkable result (Theorem 22 in the MIT notes) is that the ideal loss
+\(\mathcal{L}_{\text{SM}}\) and the tractable surrogate \(\mathcal{L}_{\text{DSM}}\)
+differ by a constant that does not depend on \(\theta\):</p>
+
+<div class="box mathblock">
+<span class="label">Theorem 22 (MIT Notes §4.3) — Denoising Score Matching</span>
+\[
+  \mathcal{L}_{\text{SM}}(\theta)
+  \;=\;
+  \mathcal{L}_{\text{DSM}}(\theta) + C
+\]
+where \(C\) is a constant independent of \(\theta\). Therefore:
+\[
+  \nabla_\theta \mathcal{L}_{\text{SM}}(\theta)
+  \;=\;
+  \nabla_\theta \mathcal{L}_{\text{DSM}}(\theta)
+\]
+and the minimizer \(\theta^*\) of the denoising loss satisfies
+\(s_{\theta^*}(\cdot, t) = \nabla_x \log p_t(\cdot)\).
+
+<p>The proof mirrors the analogous result for flow matching (Theorem 12): expand
+the squared error, observe that the cross term is zero because
+\(\mathbb{E}_{z|x_t}[\nabla_x \log p_t(x_t|z)] = \nabla_x \log p_t(x_t)\)
+(Eq. 38), leaving \(\mathcal{L}_{\text{SM}}\) equal to \(\mathcal{L}_{\text{DSM}}\)
+plus a variance term that does not depend on \(\theta\).</p>
+</div>
+
+<div class="box intuition">
+<span class="label">Why this works — the key intuition</span>
+<p>When you ask the network to match the <em>conditional</em> score rather than
+the marginal score, you are giving it a noisier target (the conditional score
+varies with which \(z\) was sampled). But the noise is <em>unbiased</em>: on
+average over all possible clean samples \(z\), the conditional score equals
+the marginal score. So minimizing the variance of the error is mathematically
+equivalent to minimizing the error against the true marginal target.</p>
+<p>This is the same logic as supervised learning with noisy labels: if the
+label noise is zero-mean and independent of the model parameters, the noisy
+labels give the same gradient on average as the clean labels.</p>
+</div>
+
+<h3>Algorithm 4 — Score Matching Training Procedure</h3>
+
+<p>The MIT notes summarize the training loop (Algorithm 4, §4.3) for a Gaussian
+probability path. In the noise-predictor form (\(\varepsilon_\theta\)):</p>
+
+<ol>
+  <li>Sample a mini-batch of clean examples \(z \sim p_{\text{data}}\).</li>
+  <li>Sample a random time \(t \sim \text{Uniform}[0,1]\).</li>
+  <li>Sample noise \(\varepsilon \sim \mathcal{N}(0, I_d)\).</li>
+  <li>Form the noisy sample \(x_t = \alpha_t z + \beta_t \varepsilon\).</li>
+  <li>Compute the loss (score form or equivalent noise form):</li>
+</ol>
+
+<div class="box mathblock">
+<span class="label">Practical training objectives (Algorithm 4)</span>
+\[
+  \mathcal{L}_{\text{score}}(\theta)
+  = \mathbb{E}\Bigl[\bigl\|s_\theta(x_t, t) + \tfrac{\varepsilon}{\beta_t}\bigr\|^2\Bigr]
+  \qquad \text{(unstable near } t=0\text{)}
+\]
+\[
+  \mathcal{L}_{\text{noise}}(\theta)
+  = \mathbb{E}\Bigl[\bigl\|\varepsilon_\theta(x_t, t) - \varepsilon\bigr\|^2\Bigr]
+  \qquad \text{(stable: DDPM objective)}
+\]
+<p>Both objectives have the same minimizer. The noise form drops the
+\(1/\beta_t^2\) re-weighting, trading off sample quality near \(t\approx 0\)
+for numerical stability. The MIT notes note that the score form "is numerically
+unstable for \(\beta_t \approx 0\)" and that DDPM resolves this by switching to
+\(\varepsilon_\theta\).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3.10 PyTorch: Analytic Score on a Grid + 1-D Denoising Score Matching</h2>
+
+<h3>Part A — Visualizing the Gaussian score on a 2-D grid</h3>
+
+<pre><code>import torch
+import math
+<span class="code-comment"># Teaching code — no security-sensitive RNG, just reproducible pedagogy.</span>
+torch.manual_seed(0)
+
+<span class="code-comment"># -----------------------------------------------------------------
+# Build a 2-D grid of query points x = (x1, x2)
+# -----------------------------------------------------------------</span>
+N   = 20                             <span class="code-comment"># grid points per axis</span>
+lin = torch.linspace(-3, 3, N)
+x1, x2 = torch.meshgrid(lin, lin, indexing='ij')  <span class="code-comment"># both shape (N, N)</span>
+x = torch.stack([x1, x2], dim=-1)                 <span class="code-comment"># shape (N, N, 2)</span>
+x_flat = x.reshape(-1, 2)                         <span class="code-comment"># shape (N*N, 2)</span>
+
+<span class="code-comment"># -----------------------------------------------------------------
+# Gaussian parameters
+# -----------------------------------------------------------------</span>
+mu     = torch.tensor([1.0, -0.5])  <span class="code-comment"># mean, shape (2,)</span>
+sigma2 = 1.2                        <span class="code-comment"># scalar variance</span>
+
+<span class="code-comment"># -----------------------------------------------------------------
+# Analytic score: -(x - mu) / sigma^2   shape (N*N, 2)
+# -----------------------------------------------------------------</span>
+score_analytic = -(x_flat - mu) / sigma2
+
+<span class="code-comment"># -----------------------------------------------------------------
+# Autograd score: differentiate log N(x; mu, sigma^2 I) w.r.t x
+# -----------------------------------------------------------------</span>
+x_ad = x_flat.clone().requires_grad_(True)
+log_px = -torch.sum((x_ad - mu)**2, dim=-1) / (2 * sigma2)  <span class="code-comment"># shape (N*N,)</span>
+log_px.sum().backward()              <span class="code-comment"># gradient of sum = sum of gradients</span>
+score_autograd = x_ad.grad           <span class="code-comment"># shape (N*N, 2)</span>
+
+<span class="code-comment"># -----------------------------------------------------------------
+# They should match exactly
+# -----------------------------------------------------------------</span>
+max_err = (score_analytic - score_autograd).abs().max().item()
+print(f"Max error analytic vs autograd: {max_err:.2e}")
+<span class="code-comment"># Expected: 0.00e+00  (exact float match)</span>
+
+<span class="code-comment"># -----------------------------------------------------------------
+# Sanity check: score at the mean should be zero
+# -----------------------------------------------------------------</span>
+score_at_mean = -(mu - mu) / sigma2
+print("Score at mean:", score_at_mean)
+<span class="code-comment"># Expected: tensor([0., 0.])  -- zero vector, we are at the peak</span>
+
+<span class="code-comment"># -----------------------------------------------------------------
+# Sanity check: score at a point far from the mean should be large
+# -----------------------------------------------------------------</span>
+x_far = torch.tensor([3.0, 3.0])
+score_far = -(x_far - mu) / sigma2
+print("Score at (3,3):", score_far)
+<span class="code-comment"># Expected: tensor([-1.6667,  2.9167])  -- large magnitude pointing back to mu</span></code></pre>
+
+<h3>Part B — Tiny 1-D denoising score matching with an MLP</h3>
+
+<p>We train a small neural network to learn the score of a mixture of two
+1-D Gaussians using the denoising score matching objective. After training, we
+verify that the learned vector field points toward the data.</p>
+
+<pre><code>import torch
+import torch.nn as nn
+<span class="code-comment"># Teaching code — no security-sensitive RNG.</span>
+torch.manual_seed(7)
+
+<span class="code-comment"># -----------------------------------------------------------------
+# 1-D data distribution: mixture of two Gaussians
+#   p_data(z) = 0.5 * N(-2, 0.3^2) + 0.5 * N(+2, 0.3^2)
+# -----------------------------------------------------------------</span>
+def sample_data(n):
+    which = torch.bernoulli(0.5 * torch.ones(n))   <span class="code-comment"># 0 or 1, shape (n,)</span>
+    means = torch.where(which.bool(),
+                        torch.full((n,), -2.0),
+                        torch.full((n,), +2.0))
+    return means + 0.3 * torch.randn(n)             <span class="code-comment"># shape (n,)</span>
+
+<span class="code-comment"># -----------------------------------------------------------------
+# Gaussian path schedule:  alpha_t = 1 - t,  beta_t = sqrt(t)
+#   x_t = alpha_t * z + beta_t * eps,  eps ~ N(0,1)
+#   Conditional score = -(x_t - alpha_t*z) / beta_t^2 = -eps / beta_t
+# -----------------------------------------------------------------</span>
+def alpha(t): return 1.0 - t
+def beta(t):  return t.sqrt().clamp(min=1e-3)   <span class="code-comment"># avoid /0 at t=0</span>
+
+<span class="code-comment"># -----------------------------------------------------------------
+# Score network: tiny MLP(x, t) -> scalar score (1-D)
+#   Input dim = 2 (x concatenated with t), output dim = 1
+# -----------------------------------------------------------------</span>
+class ScoreNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(2, 64), nn.Tanh(),
+            nn.Linear(64, 64), nn.Tanh(),
+            nn.Linear(64, 1)
+        )
+    def forward(self, x, t):
+        <span class="code-comment"># x: shape (B,)   t: shape (B,)</span>
+        xt = torch.stack([x, t], dim=-1)   <span class="code-comment"># shape (B, 2)</span>
+        return self.net(xt).squeeze(-1)    <span class="code-comment"># shape (B,)</span>
+
+model = ScoreNet()
+optimizer = torch.optim.Adam(model.parameters(), lr=3e-3)
+
+<span class="code-comment"># -----------------------------------------------------------------
+# Training loop: denoising score matching
+#   Loss = E[ || s_theta(x_t, t) - (-eps/beta_t) ||^2 ]
+#        = E[ || s_theta(x_t, t) + eps/beta_t ||^2 ]
+# -----------------------------------------------------------------</span>
+n_steps   = 2000
+batch_sz  = 512
+
+for step in range(n_steps):
+    z   = sample_data(batch_sz)                          <span class="code-comment"># shape (B,)   clean data</span>
+    t   = torch.rand(batch_sz).clamp(0.05, 1.0)         <span class="code-comment"># shape (B,)   random time</span>
+    eps = torch.randn(batch_sz)                          <span class="code-comment"># shape (B,)   noise</span>
+
+    at  = alpha(t); bt = beta(t)
+    x_t = at * z + bt * eps                             <span class="code-comment"># shape (B,)   noisy sample</span>
+
+    <span class="code-comment"># Conditional score target: -eps / beta_t</span>
+    target = -eps / bt                                  <span class="code-comment"># shape (B,)</span>
+
+    pred   = model(x_t, t)                              <span class="code-comment"># shape (B,)</span>
+    loss   = ((pred - target) ** 2).mean()
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    if step % 500 == 0:
+        print(f"step {step:4d}  loss={loss.item():.4f}")
+<span class="code-comment"># Expected output (approximately):
+#   step    0  loss=12.3421
+#   step  500  loss=0.8234
+#   step 1000  loss=0.5512
+#   step 1500  loss=0.4801
+# (values vary; key is rapid decay toward ~0.4-0.5)</span>
+
+<span class="code-comment"># -----------------------------------------------------------------
+# Verification: at t=0.5, the learned score should point
+# TOWARD the data clusters (toward -2 from the right, toward +2 from the left)
+# -----------------------------------------------------------------</span>
+model.eval()
+with torch.no_grad():
+    t_check = torch.full((5,), 0.5)
+    x_check = torch.tensor([-3.0, -1.0, 0.0, 1.0, 3.0])
+    score_check = model(x_check, t_check)
+    print("\nLearned score at t=0.5:")
+    for xi, si in zip(x_check.tolist(), score_check.tolist()):
+        direction = "right (+)" if si &gt; 0 else "left  (-)"
+        print(f"  x={xi:+.1f}  score={si:+.3f}  ({direction})")
+<span class="code-comment"># Expected behavior (not exact values):
+#   x=-3.0  score=+...  (right, toward cluster at -2)
+#   x=-1.0  score=-...  (left,  toward cluster at -2)
+#   x= 0.0  score near 0 or ambiguous (between the two clusters)
+#   x=+1.0  score=+...  (right, toward cluster at +2)
+#   x=+3.0  score=-...  (left,  toward cluster at +2)
+# The arrows at x=-3 and x=+3 correctly point inward toward the data.</span></code></pre>
+
+<div class="box warn">
+<span class="label">Important caveat</span>
+<p>The verification above uses \(t = 0.5\) — meaning moderately noisy samples.
+At very small \(t\) (nearly clean data) the network's score field becomes more
+complex and harder to read by eye because the two clusters are sharply resolved.
+At large \(t\) (nearly pure noise) the score should approach \(-x\) (the score
+of a standard Gaussian), which provides another sanity check: confirm that
+<code>model(x_check, torch.ones(5))</code> returns values close to
+<code>-x_check</code>.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3.11 Where the Score Appears in the MIT Notes — Quick Reference</h2>
+
+<table class="symbols">
+<tr><th>Location in MIT Notes</th><th>What is introduced</th></tr>
+<tr><td>§4.1 (p. 19), Eq. (38)</td><td>Marginal score as posterior expectation of conditional score</td></tr>
+<tr><td>§4.1, Example 15</td><td>Closed-form conditional score for Gaussian paths</td></tr>
+<tr><td>§4.1, Proposition 1</td><td>Score ↔ vector field ↔ noise conversion formula</td></tr>
+<tr><td>§4.1, Remark 16</td><td>Denoiser as common reparameterization; connection to DDPM</td></tr>
+<tr><td>§4.3, Theorem 22</td><td>Denoising score matching equals score matching up to constant</td></tr>
+<tr><td>§4.3, Example 23</td><td>Score matching loss specialized to Gaussian paths → noise prediction</td></tr>
+<tr><td>§4.3, Algorithm 4</td><td>Complete training procedure for score networks</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>3.12 Checkpoint — Test Yourself</h2>
+
+<ol>
+  <li>Without looking at any formula, state in words what \(\nabla_x \log p(x)\)
+  is and describe its direction and magnitude near a peak, far from a peak, and
+  at a mode.</li>
+  <li>Why does the normalizing constant \(Z\) vanish when you take
+  \(\nabla_x \log p(x)\)? Write out the two-line algebra.</li>
+  <li>Derive \(\nabla_x \log \mathcal{N}(x;\mu, \sigma^2 I)\) from scratch.
+  What is its value at \(x = \mu\)? Why?</li>
+  <li>Write out the Gaussian probability path \(p_t(x|z)\). Identify the mean and
+  variance. Use the Gaussian score formula to obtain the conditional score.</li>
+  <li>State Proposition 1 in words: what is the relationship between the score,
+  the noise \(\varepsilon\), and the clean data \(z\)? Why does this triangle
+  exist only for Gaussian paths?</li>
+  <li>Why can we minimize \(\mathcal{L}_{\text{DSM}}\) instead of
+  \(\mathcal{L}_{\text{SM}}\)? What does Theorem 22 guarantee?</li>
+  <li>What is the practical reason DDPM predicts \(\varepsilon\) instead of the
+  score \(s\) directly? Connect to Remark 16.</li>
+  <li>Name two things you can do with the score function once you have learned it.
+  Which parts of this guide cover each?</li>
+  <li>In the PyTorch toy, what change to the training loop would let you check
+  the learned score against the analytic Gaussian score of a single Gaussian
+  (not a mixture)?</li>
+</ol>
+
+<nav class="pagenav">
+  <a class="prev" href="part02_probability_stochastic.html"><span class="dir">‹ Prev</span>Part 2 — Probability &amp; Stochastic Processes</a>
+  <a class="next" href="part04_diffusion_models.html"><span class="dir">Next ›</span>Part 4 — Diffusion Models</a>
+</nav>
+
+</article>
+</main>
+</div>
+<script defer src="assets/guide.js"></script>
+</body>
+</html>

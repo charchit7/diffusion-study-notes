@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Part 12 — Stable Diffusion · Diffusion Study Guide</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [["\\(", "\\)"]], displayMath: [["\\[", "\\]"]], tags: "none" },
+    options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle contents">☰</button>
+<div class="layout">
+<nav class="toc">
+  <a href="index.html"><strong>◆ Diffusion Study Guide</strong></a>
+  <h2>Foundations</h2>
+  <a href="part00_math_foundations.html"><span class="part-num">0</span>Mathematical Foundations</a>
+  <a href="part01_differential_equations.html"><span class="part-num">1</span>Differential Equations</a>
+  <a href="part02_probability_stochastic.html"><span class="part-num">2</span>Probability &amp; Stochastic Processes</a>
+  <a href="part03_score_functions.html"><span class="part-num">3</span>Score Functions</a>
+  <h2>Diffusion Core</h2>
+  <a href="part04_diffusion_models.html"><span class="part-num">4</span>Diffusion Models (big picture)</a>
+  <a href="part05_ddpm.html"><span class="part-num">5</span>DDPM</a>
+  <a href="part06_ddim.html"><span class="part-num">6</span>DDIM</a>
+  <a href="part07_continuous_time.html"><span class="part-num">7</span>Continuous-Time Diffusion</a>
+  <h2>Continuous Formulation</h2>
+  <a href="part08_sde_formulation.html"><span class="part-num">8</span>SDE Formulation</a>
+  <a href="part09_probability_flow_ode.html"><span class="part-num">9</span>Probability Flow ODE</a>
+  <a href="part10_flow_matching.html"><span class="part-num">10</span>Flow Matching</a>
+  <a href="part11_rectified_flows.html"><span class="part-num">11</span>Rectified Flows</a>
+  <h2>Systems &amp; Reading</h2>
+  <a href="part12_stable_diffusion.html"><span class="part-num">12</span>Stable Diffusion</a>
+  <a href="part13_reading_the_notes.html"><span class="part-num">13</span>Reading the MIT Notes</a>
+  <a href="part14_discrete_diffusion.html"><span class="part-num">14</span>Discrete Diffusion</a>
+</nav>
+<main>
+<article>
+
+<h1><span class="kicker">Part 12</span>Stable Diffusion — the full system</h1>
+
+<!-- ═══════════════════════════════════════════════════════ 0. BIG PICTURE -->
+
+<h2>12.0 &nbsp; Orienting diagram — what Stable Diffusion actually is</h2>
+
+<p>Every part of this guide so far has built one piece of the puzzle. This part assembles them into a production text-to-image system. Before any equations, here is the full pipeline in words:</p>
+
+<div class="box intuition">
+<span class="label">Intuition — the four-component pipeline</span>
+<p><strong>Step A — Latent encoder (VAE encoder).</strong>
+A trained encoder \(E\) compresses a 512×512×3 pixel image into a 64×64×4 latent tensor \(z\).
+The latent space is smooth and roughly Gaussian — a perfect home for diffusion.</p>
+<p><strong>Step B — Latent denoiser/velocity network (U-Net or DiT).</strong>
+The diffusion or flow-matching model runs <em>entirely in latent space</em>.
+It takes a noisy latent \(x_t\), the current time \(t\), and a text prompt \(y\), and predicts the velocity \(u^\theta_t(x_t \mid y)\).
+The network is conditioned on \(t\) via sinusoidal embeddings and on \(y\) via a frozen text encoder (CLIP / T5) plus cross-attention.</p>
+<p><strong>Step C — Classifier-free guidance (CFG).</strong>
+At sampling time we run the denoiser <em>twice</em> — once with the prompt and once with an empty prompt — then extrapolate in the direction of the prompt.
+This is the key practical trick that makes prompt adherence sharp.</p>
+<p><strong>Step D — Latent decoder (VAE decoder).</strong>
+Once the ODE/SDE sampler has produced a clean latent \(z_1\), the VAE decoder \(D\) maps it back to a full-resolution pixel image.</p>
+<p style="margin-top:0.8em;font-style:italic;">
+Schematic (left → right):<br>
+[text prompt] → text encoder → prompt embedding \(\tilde{y}\)<br>
+[Gaussian noise] → ODE sampler (uses U-Net/DiT + CFG, lives in latent space) → clean latent \(z\) → VAE decoder → pixel image
+</p>
+</div>
+
+<p>In the MIT notes this corresponds to §6 overall, with guidance in §5, architectures in §6.1, VAEs in §6.2, and case studies in §6.3.</p>
+
+
+<!-- ═══════════════════════════════════════════════════════ 1. AUTOENCODERS & VAEs -->
+
+<h2>12.1 &nbsp; Autoencoders and Variational Autoencoders (§6.2)</h2>
+
+<h3>12.1.1 &nbsp; Why we even need a latent space</h3>
+
+<p>A 1024×1024 RGB image is a vector in \(\mathbb{R}^{3\,145\,728}\). Our flow-matching network must output a vector of the same dimension at every forward pass. Training on millions of such vectors is prohibitively expensive. The solution is <em>compression</em>: find a smooth, low-dimensional space where the real structure of natural images lives, run diffusion there, then decode back.</p>
+
+<div class="box intuition">
+<span class="label">Intuition — the manifold hypothesis</span>
+Natural images don't fill \(\mathbb{R}^{3\times 512\times 512}\) uniformly — they cluster near a much lower-dimensional "manifold of plausible images". An autoencoder finds coordinates on that manifold. Diffusion in those coordinates is far cheaper, and the decoder knows how to re-inflate them into pixels.
+</div>
+
+<h3>12.1.2 &nbsp; Standard Autoencoders</h3>
+
+<p>A <strong>standard autoencoder (AE)</strong> consists of two deterministic functions:</p>
+
+<table class="symbols">
+  <tr><th>Symbol</th><th>Shape / meaning</th></tr>
+  <tr><td>\(\mu_\phi : \mathbb{R}^d \to \mathbb{R}^k\)</td><td>Encoder — maps pixel image \(x\) to latent \(z\). Parameters \(\phi\).</td></tr>
+  <tr><td>\(\mu_\theta : \mathbb{R}^k \to \mathbb{R}^d\)</td><td>Decoder — maps latent \(z\) back to pixel space. Parameters \(\theta\).</td></tr>
+  <tr><td>\(d\)</td><td>Data dimension, e.g. \(3\times512\times512 = 786\,432\).</td></tr>
+  <tr><td>\(k\)</td><td>Latent dimension, e.g. \(4\times64\times64 = 16\,384\). Typically \(k \ll d\).</td></tr>
+</table>
+
+<p>Trained with a <strong>reconstruction loss</strong>:</p>
+
+\[
+\mathcal{L}_\text{AE}(\phi, \theta) = \mathbb{E}_{x \sim p_\text{data}}\bigl[\|\mu_\theta(\mu_\phi(x)) - x\|^2\bigr]
+\]
+
+<p><strong>Problem.</strong> The AE imposes no structure on what the latent distribution \(p_\text{latent}(z) = \mu_\phi(x),\ x\sim p_\text{data}\) looks like. If it turns out to be multi-modal or very spiky, the diffusion model trained on those latents will have a hard time. We need to <em>regularise</em> the latent space to be approximately Gaussian.</p>
+
+<h3>12.1.3 &nbsp; Variational Autoencoders — motivation and definition</h3>
+
+<p>A <strong>variational autoencoder (VAE)</strong> upgrades the deterministic encoder to a <em>probabilistic</em> one: instead of outputting a single point \(z\), the encoder outputs a whole Gaussian distribution over latents.</p>
+
+<table class="symbols">
+  <tr><th>Symbol</th><th>Shape / meaning</th></tr>
+  <tr><td>\(q_\phi(z \mid x)\)</td><td>Encoder distribution. Diagonal Gaussian \(\mathcal{N}(\mu_\phi(x),\, \sigma^2_\phi(x)\,I_k)\).</td></tr>
+  <tr><td>\(\mu_\phi(x) \in \mathbb{R}^k\)</td><td>Mean of the encoding, produced by a neural net with params \(\phi\).</td></tr>
+  <tr><td>\(\sigma^2_\phi(x) \in \mathbb{R}^k_{\ge 0}\)</td><td>Per-dimension variance of the encoding (also a neural net output).</td></tr>
+  <tr><td>\(p_\theta(x \mid z)\)</td><td>Decoder distribution \(\mathcal{N}(\mu_\theta(z),\, \tilde{\sigma}^2 I_d)\). Fixed variance \(\tilde{\sigma}^2\) in practice.</td></tr>
+  <tr><td>\(p_\text{prior}(z)\)</td><td>Prior \(\mathcal{N}(0, I_k)\) — the "ideal" latent distribution we want to enforce.</td></tr>
+</table>
+
+<h3>12.1.4 &nbsp; The reparameterisation trick</h3>
+
+<p>We need to sample \(z \sim q_\phi(z \mid x)\) inside the computational graph so gradients flow through \(\phi\). Direct sampling is not differentiable. The trick:</p>
+
+<div class="box mathblock">
+<span class="label">Formal — reparameterisation</span>
+<p>Sample \(\varepsilon \sim \mathcal{N}(0, I_k)\) (no parameters, no gradients needed), then set</p>
+\[
+z = \mu_\phi(x) + \sigma_\phi(x) \odot \varepsilon
+\]
+<p>where \(\odot\) is elementwise multiplication. Now \(z\) is a deterministic function of \((\phi, x, \varepsilon)\), so \(\partial z / \partial \phi\) is well-defined and we can backpropagate.</p>
+</div>
+
+<div class="box intuition">
+<span class="label">Intuition — why it works</span>
+Think of \(\varepsilon\) as randomness that "lives outside the model". The mean and standard deviation are outputs of the network; \(\varepsilon\) is just noise we inject <em>after</em> the network. Gradients flow freely through \(\mu_\phi\) and \(\sigma_\phi\), not through \(\varepsilon\).
+</div>
+
+<h3>12.1.5 &nbsp; The \(\beta\)-VAE training objective (Algorithm 6 in the notes)</h3>
+
+<p>The full loss has two terms. Every symbol is defined in the table above.</p>
+
+<div class="box mathblock">
+<span class="label">Formal — \(\beta\)-VAE ELBO</span>
+\[
+\mathcal{L}_\text{VAE}(\phi, \theta)
+= \underbrace{\mathbb{E}_{x \sim p_\text{data}}\,\mathbb{E}_{\varepsilon \sim \mathcal{N}(0,I)}\bigl[\|\mu_\theta(z) - x\|^2\bigr]}_{\text{Term 1: reconstruction loss}}
++\; \beta \cdot \underbrace{\mathbb{E}_{x \sim p_\text{data}}\bigl[D_\text{KL}(q_\phi(z \mid x)\,\|\,\mathcal{N}(0,I_k))\bigr]}_{\text{Term 2: KL regularisation}}
+\]
+<p>with \(z = \mu_\phi(x) + \sigma_\phi(x)\odot\varepsilon\) (reparameterisation). \(\beta \ge 0\) is a hyperparameter, typically \(\beta \ll 1\) in modern practice.</p>
+</div>
+
+<p><strong>Term 1 — reconstruction.</strong> After encoding and decoding, how close do we get back to \(x\)? Minimising this drives the encoder and decoder to be inverses of each other.</p>
+
+<p><strong>Term 2 — KL regularisation.</strong> \(D_\text{KL}(q_\phi(z \mid x) \| \mathcal{N}(0, I_k))\) measures how far the encoding distribution for a given \(x\) deviates from a unit Gaussian. Minimising this forces every encoded point to look Gaussian — meaning the aggregate latent distribution will also be approximately Gaussian, and easy to diffuse.</p>
+
+<p><strong>Closed form for diagonal Gaussians.</strong> When \(q_\phi(z \mid x) = \mathcal{N}(\mu, \text{diag}(\sigma^2))\) and the prior is \(\mathcal{N}(0, I_k)\), the KL has a beautiful closed form (Example 31 in the notes):</p>
+
+\[
+D_\text{KL}\bigl(\mathcal{N}(\mu, \sigma^2 I) \,\|\, \mathcal{N}(0, I)\bigr)
+= \frac{1}{2}\sum_{j=1}^{k}\bigl(\mu_j^2 + \sigma_j^2 - \log\sigma_j^2 - 1\bigr)
+\]
+
+<p>Let's break that sum dimension-by-dimension. For a single dimension \(j\):</p>
+
+<ul>
+  <li>\(\mu_j^2\): penalises the mean for drifting away from 0.</li>
+  <li>\(\sigma_j^2\): penalises the variance for being too large.</li>
+  <li>\(-\log \sigma_j^2\): <em>rewards</em> having some variance (prevents posterior collapse to a delta).</li>
+  <li>\(-1\): just a constant so the sum is 0 when \(\mu_j=0, \sigma_j=1\) (perfect Gaussian).</li>
+</ul>
+
+<div class="box connect">
+<span class="label">Connection — KL teaser from Part 0</span>
+In Part 0 we briefly met the KL divergence as a measure of "how different two distributions are". Here it serves as a loss term that pulls the learned encoder distribution toward the standard Gaussian prior. Exactly the same quantity shows up in the ELBO derivation that motivates diffusion models (the variational lower bound on log-likelihood). The VAE ELBO and the diffusion training loss are cousins.
+</div>
+
+<div class="box warn">
+<span class="label">Warning — \(\beta\) too large causes posterior collapse</span>
+If \(\beta\) is large, the KL term dominates and the model learns to output \(q_\phi(z \mid x) \approx \mathcal{N}(0, I)\) regardless of \(x\) — the encoder ignores the input entirely. Modern SD-style VAEs use very small \(\beta\) (often \(\ll 0.01\)) and sometimes a "KL warm-up" schedule that starts at \(\beta=0\).
+</div>
+
+<h3>12.1.6 &nbsp; Why a VAE latent space is good for diffusion</h3>
+
+<p>After training, the VAE provides:</p>
+<ol>
+  <li><strong>Compression:</strong> a 512×512×3 image (786k dims) becomes a 64×64×4 latent (16k dims) — roughly 48× fewer dimensions, so diffusion is ~48× cheaper per step.</li>
+  <li><strong>Regularity:</strong> the KL term forces the latent distribution to be approximately \(\mathcal{N}(0, I)\) — exactly the prior distribution that flow matching starts from.</li>
+  <li><strong>Semantic structure:</strong> nearby latents decode to perceptually similar images. The diffusion model learns semantically meaningful trajectories.</li>
+</ol>
+
+
+<!-- ═══════════════════════════════════════════════════════ 2. LATENT DIFFUSION -->
+
+<h2>12.2 &nbsp; Latent Diffusion — running flow matching in latent space (Remark 32)</h2>
+
+<div class="box mathblock">
+<span class="label">Formal — Latent Diffusion recipe (Remark 32)</span>
+<p><strong>Training time:</strong></p>
+<ol>
+  <li>Draw \(x \sim p_\text{data}\) (a pixel image).</li>
+  <li>Encode to latent: sample \(z \sim q_\phi(z \mid x)\), i.e., \(z = \mu_\phi(x) + \sigma_\phi(x)\odot\varepsilon\), \(\varepsilon \sim \mathcal{N}(0,I)\).</li>
+  <li>Run the flow-matching / diffusion training loop on \(z\) instead of \(x\). Everything from Parts 5–11 applies unchanged, just with \(z\) as the data.</li>
+</ol>
+<p><strong>Inference time:</strong></p>
+<ol>
+  <li>Sample \(z_0 \sim \mathcal{N}(0, I_k)\) (pure noise in latent space).</li>
+  <li>Run the ODE/SDE solver from \(t=0\) to \(t=1\), producing a clean latent \(z_1\).</li>
+  <li>Decode: \(\hat{x} = \mu_\theta(z_1)\) — take the <em>mean</em> of the decoder to avoid sampling noise.</li>
+</ol>
+</div>
+
+<div class="box intuition">
+<span class="label">Intuition — perceptually equivalent compression</span>
+A well-trained VAE filters out high-frequency pixel noise (imperceptible detail) and preserves semantic content (shapes, textures, composition). The diffusion model only has to learn how to generate the semantically important part. This is why latent diffusion produces sharp, coherent images even with modest compute — not because of magic, but because the hard perceptual details are handled by the deterministic decoder.
+</div>
+
+<div class="box prereq">
+<span class="label">Prerequisite check</span>
+Everything in Parts 8–11 (SDEs, probability flow ODEs, flow matching, rectified flows) applies word-for-word in latent space. The only change is that the data variable \(x\) is replaced by the latent variable \(z\). The training loss, the ODE, the schedules — all identical.
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════ 3. CONDITIONING -->
+
+<h2>12.3 &nbsp; Conditioning: embedding \(t\) and the prompt \(y\) (§6.1.1)</h2>
+
+<p>The network \(u^\theta_t(x \mid y)\) has three inputs: a latent vector \(x\), a time scalar \(t\), and a conditioning variable \(y\) (a text prompt). Both \(t\) and \(y\) need to be converted into fixed-size vectors before the network can use them.</p>
+
+<h3>12.3.1 &nbsp; Time embedding — sinusoidal / Fourier features</h3>
+
+<p>A single scalar \(t \in [0,1]\) carries almost no information for a deep network. We expand it into a \(d\)-dimensional vector using sinusoidal features:</p>
+
+\[
+\text{TimeEmb}(t) = \left[\sin(w_1 t),\, \cos(w_1 t),\, \sin(w_2 t),\, \cos(w_2 t),\, \ldots\right] \in \mathbb{R}^d
+\]
+
+where the frequencies are spaced logarithmically: \(w_i = 10000^{2i/d}\). This is the same positional encoding used in the Transformer (which you already know) — here applied to <em>time</em> instead of position. The resulting vector has unit norm (\(\|\text{TimeEmb}(t)\|=1\)) and encodes both fine- and coarse-grained time structure.
+
+<h3>12.3.2 &nbsp; Text embedding — CLIP and T5</h3>
+
+<p>A raw text prompt \(y_\text{raw}\) is a sequence of discrete tokens. We need a continuous, fixed-size representation. Two common choices:</p>
+
+<table class="symbols">
+  <tr><th>Model</th><th>Output shape</th><th>What it captures</th></tr>
+  <tr><td>CLIP text encoder</td><td>\(\mathbb{R}^{d_\text{CLIP}}\) (single vector)</td><td>Global semantic alignment between text and image. Coarse but strong.</td></tr>
+  <tr><td>T5 / T5-XXL encoder</td><td>\(\mathbb{R}^{S \times d_\text{T5}}\) (sequence of \(S\) vectors)</td><td>Fine-grained token-level context. The model can attend to individual words.</td></tr>
+</table>
+
+<p>In practice, \(y\) is the result of one or more of these frozen pre-trained encoders. The weights of the text encoder are frozen — only the diffusion network trains. The prompt embedding is then injected into every transformer block via <strong>cross-attention</strong> (see §12.4).</p>
+
+
+<!-- ═══════════════════════════════════════════════════════ 4. ARCHITECTURES -->
+
+<h2>12.4 &nbsp; Architectures: DiT and U-Net (§6.1.2–6.1.3)</h2>
+
+<h3>12.4.1 &nbsp; Diffusion Transformer (DiT) — the modern backbone</h3>
+
+<div class="box intuition">
+<span class="label">Intuition — ViT applied to diffusion</span>
+You already know the Transformer. A DiT is simply: chop the latent image into patches, treat them as tokens, run a transformer on those tokens, then re-assemble. The only new ingredient is how time conditioning and text conditioning are injected.
+</div>
+
+<p>The full flow through a DiT, with tensor shapes:</p>
+
+<table class="symbols">
+  <tr><th>Operation</th><th>Input shape</th><th>Output shape</th><th>Note</th></tr>
+  <tr><td>Input latent</td><td>\(C \times H \times W\)</td><td>—</td><td>e.g. \(4\times64\times64\)</td></tr>
+  <tr><td>Patchify</td><td>\(C \times H \times W\)</td><td>\(N \times C'\)</td><td>\(N=(H/P)(W/P)\), \(C'=CP^2\); patch size \(P\)</td></tr>
+  <tr><td>Linear embed</td><td>\(N \times C'\)</td><td>\(N \times d\)</td><td>Learnable projection to hidden dim \(d\)</td></tr>
+  <tr><td>Time embed</td><td>scalar \(t\)</td><td>\(1 \times d\)</td><td>Sinusoidal, then MLP</td></tr>
+  <tr><td>Text embed</td><td>token sequence</td><td>\(S \times d\)</td><td>Frozen CLIP/T5 + linear projection</td></tr>
+  <tr><td>DiT blocks × \(L\)</td><td>\(N \times d\)</td><td>\(N \times d\)</td><td>Self-attn + cross-attn + AdaLN + MLP</td></tr>
+  <tr><td>Depatchify</td><td>\(N \times d\)</td><td>\(C \times H \times W\)</td><td>Inverse of patchify; outputs the velocity \(u^\theta_t\)</td></tr>
+</table>
+
+<p><strong>Inside a DiT block (Remark 29)</strong> — three sub-operations update the patch tokens \(x \in \mathbb{R}^{N \times d}\):</p>
+
+<p><strong>(1) Self-attention among patches.</strong> Standard multi-head attention where queries, keys, and values all come from the patch tokens. Lets patches communicate with each other.</p>
+
+\[
+\text{Attn}(Q, K, V) = \text{softmax}\!\left(\frac{QK^\top}{\sqrt{d_h}}\right) V
+\]
+
+<p><strong>(2) Cross-attention to the prompt.</strong> Queries come from the patch tokens; keys and values come from the text embeddings \(\tilde{y} \in \mathbb{R}^{S\times d}\). This is exactly how the Transformer decoder attends to the encoder in machine translation — here the "encoder output" is the text prompt.</p>
+
+<p><strong>(3) Adaptive Layer Norm (AdaLN) — time conditioning.</strong> The time embedding \(\tilde{t} \in \mathbb{R}^d\) is fed through a small MLP to produce per-channel scale and shift parameters:</p>
+
+\[
+(\gamma, \beta) = \text{MLP}(\tilde{t}) \in \mathbb{R}^d \times \mathbb{R}^d
+\]
+\[
+\text{AdaLN}(x, \tilde{t}) = \gamma \odot \text{LayerNorm}(x) + \beta
+\]
+
+<p>Instead of using a fixed LayerNorm, the network learns to modulate the normalisation based on the current timestep. This lets the same block behave differently at \(t=0\) (pure noise) versus \(t=1\) (clean image).</p>
+
+<h3>12.4.2 &nbsp; U-Net — the classic SD backbone (§6.1.3)</h3>
+
+<p>The U-Net predates transformers in diffusion. It is a convolutional encoder-decoder with skip connections:</p>
+
+<div class="box intuition">
+<span class="label">Intuition — why U-Net works</span>
+The downsampling path (encoders) captures high-level semantics at low resolution. The upsampling path (decoders) restores spatial detail. Skip connections (the horizontal bars of the "U") pass fine spatial detail from encoder to decoder, preventing information loss. The model sees the image at multiple resolutions simultaneously.
+</div>
+
+<p>A sketch of a U-Net applied to a \(3\times256\times256\) image:</p>
+<pre><code>
+  x_in:     3 x 256 x 256
+   E1:     64 x 128 x 128    <span class="code-comment"># downsample + conv</span>
+   E2:    128 x  64 x  64
+   E3:    256 x  32 x  32
+  mid:    512 x  16 x  16    <span class="code-comment"># bottleneck ("midcoder")</span>
+   D3:    256 x  32 x  32    <span class="code-comment"># upsample + skip from E3</span>
+   D2:    128 x  64 x  64    <span class="code-comment"># upsample + skip from E2</span>
+   D1:     64 x 128 x 128    <span class="code-comment"># upsample + skip from E1</span>
+  x_out:   3 x 256 x 256     <span class="code-comment"># same shape as input = velocity u_t</span>
+</code></pre>
+<p>Conditioning: time and text are injected at each block (typically via cross-attention or AdaGN). Modern implementations include attention layers at intermediate resolutions for global coherence.</p>
+
+
+<!-- ═══════════════════════════════════════════════════════ 5. CFG -->
+
+<h2>12.5 &nbsp; Classifier-Free Guidance — the most important practical trick (§5.1–5.2)</h2>
+
+<h3>12.5.1 &nbsp; The problem with vanilla guidance</h3>
+
+<p>In Part 10 / 11 you learned to train a <em>guided</em> flow model \(u^\theta_t(x \mid y)\) by simply providing the prompt \(y\) to the network. In principle this should generate images from \(p_\text{data}(\cdot \mid y)\). In practice, <strong>the images don't match the prompt well</strong> (see Figure 11 in the notes). Why?</p>
+
+<ul>
+  <li>The model may underfit — it never perfectly learns the true marginal vector field.</li>
+  <li>Training data (text-image pairs from the web) is noisy and imperfectly labelled.</li>
+  <li>The model must also learn the prompt-invariant structure of all images, which "dilutes" the prompt signal.</li>
+</ul>
+
+<p>We need a way to <em>amplify</em> the effect of the prompt without retraining the model.</p>
+
+<h3>12.5.2 &nbsp; The key identity — guided = unguided + log-likelihood gradient</h3>
+
+<p>For Gaussian probability paths (the standard case), the guided vector field can be decomposed as:</p>
+
+\[
+u^\text{target}_t(x \mid y) = \underbrace{u^\text{target}_t(x)}_{\text{unguided}} + \underbrace{\nabla_x \log p_t(y \mid x)}_{\text{gradient of classifier}}
+\]
+
+<p>This says: the guided velocity = the velocity toward any plausible image + a nudge toward images that explain the prompt. If the prompt adherence is weak, we can simply <em>scale up</em> the second term by a weight \(w &gt; 1\):</p>
+
+\[
+\tilde{u}_t(x \mid y) = u^\text{target}_t(x) + w \cdot \nabla_x \log p_t(y \mid x)
+\]
+
+<p>This is <strong>classifier guidance</strong>: train a classifier \(p_t(y \mid x)\) on noisy images and use its gradient. The problem: we'd need a second network, and for free-form text prompts the classifier is very hard to train.</p>
+
+<h3>12.5.3 &nbsp; Classifier-free guidance (CFG) — one network, no classifier</h3>
+
+<p>The key trick: rewrite the identity using Bayes' rule in the other direction.</p>
+
+\[
+\nabla_x \log p_t(y \mid x) = \nabla_x \log p_t(x \mid y) - \nabla_x \log p_t(x)
+\propto u^\text{target}_t(x \mid y) - u^\text{target}_t(x)
+\]
+
+<p>So the scaled guided velocity becomes:</p>
+
+<div class="box mathblock">
+<span class="label">Formal — Classifier-Free Guided velocity (Summary 27)</span>
+\[
+\boxed{
+\tilde{u}^\theta_t(x \mid y)
+= u^\theta_t(x \mid \varnothing) + w\,\bigl(u^\theta_t(x \mid y) - u^\theta_t(x \mid \varnothing)\bigr)
+}
+\]
+<table class="symbols" style="margin-top:0.8em;">
+  <tr><th>Symbol</th><th>Meaning</th></tr>
+  <tr><td>\(u^\theta_t(x \mid \varnothing)\)</td><td><strong>Unconditional velocity</strong> — what the velocity looks like with no prompt. Points toward "any plausible image".</td></tr>
+  <tr><td>\(u^\theta_t(x \mid y)\)</td><td><strong>Conditional velocity</strong> — conditioned on the specific prompt \(y\). Points toward "images matching this prompt".</td></tr>
+  <tr><td>\(w\)</td><td><strong>Guidance weight</strong> — a scalar \(&gt;1\). \(w=1\) recovers vanilla guidance; \(w=4\) is a typical value.</td></tr>
+  <tr><td>\(\tilde{u}^\theta_t(x \mid y)\)</td><td><strong>CFG velocity</strong> — used at sampling time instead of \(u^\theta_t\). Extrapolates beyond the conditional velocity in the direction of the prompt.</td></tr>
+</table>
+</div>
+
+<div class="box intuition">
+<span class="label">Intuition — push away from "any image", toward "this prompt"</span>
+<p>Rewrite CFG as:</p>
+\[
+\tilde{u} = u_\text{cond} + (w-1)(u_\text{cond} - u_\text{uncond})
+\]
+<p>The term \((u_\text{cond} - u_\text{uncond})\) is the direction that distinguishes "images matching the prompt" from "images in general". Multiplying by \((w-1)&gt;0\) amplifies that distinction. At \(w=1\) you just follow the conditional velocity. At \(w=4\) you aggressively move toward the prompt, at the cost of some diversity.</p>
+</div>
+
+<h3>12.5.4 &nbsp; Training with CFG — the null-prompt trick</h3>
+
+<p>We need both \(u^\theta_t(x \mid y)\) and \(u^\theta_t(x \mid \varnothing)\) at inference, but we want to train <em>a single network</em>. The solution is elegant:</p>
+
+<ol>
+  <li>Add a special <strong>null prompt</strong> \(\varnothing\) to the label set.</li>
+  <li>During training, with probability \(\eta\) (a hyperparameter, typically \(\eta=0.1\text{–}0.2\)), replace the actual prompt \(y\) with \(\varnothing\).</li>
+  <li>Train with the standard CFG-CFM objective:</li>
+</ol>
+
+\[
+\mathcal{L}_\text{CFG-CFM}(\theta) = \mathbb{E}_{(z,y)\sim p_\text{data},\, t,\, x\sim p_t(\cdot \mid z)}\bigl[\|u^\theta_t(x \mid y') - u^\text{target}_t(x \mid z)\|^2\bigr]
+\]
+
+where \(y' = \varnothing\) with probability \(\eta\), else \(y' = y\). A single network learns <em>both</em> conditional and unconditional generation.
+
+<p>At inference time, <strong>two forward passes per ODE step</strong>: one with \(y\) and one with \(\varnothing\), then combine with the CFG formula above.</p>
+
+<div class="box warn">
+<span class="label">Warning — guidance weight too high causes artefacts</span>
+Large \(w\) (e.g., \(w&gt;15\)) saturates colours, introduces halos and over-sharpened edges, and can cause the sample to leave the support of the data distribution entirely. Most production systems use \(w \in [2, 7]\). The CFG extrapolation is a <em>heuristic</em> — at \(w&gt;1\), the sample distribution is no longer exactly \(p_\text{data}(\cdot \mid y)\), but empirically it gives far better prompt adherence.
+</div>
+
+<div class="box connect">
+<span class="label">Connection — CFG for diffusion models (Remark 28)</span>
+Everything above was stated for flow models (velocity \(u_t\)). For score-based / DDPM-style diffusion models, the same formula applies with \(\epsilon\) (the noise prediction) instead of \(u\):
+\[
+\tilde{\epsilon}^\theta_t(x \mid y) = \epsilon^\theta_t(x \mid \varnothing) + w\,\bigl(\epsilon^\theta_t(x \mid y) - \epsilon^\theta_t(x \mid \varnothing)\bigr)
+\]
+Same idea, same training trick, just a different parameterisation of the network output.
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════ 6. CASE STUDIES -->
+
+<h2>12.6 &nbsp; Case Studies: Stable Diffusion 3 and Meta Movie Gen (§6.3)</h2>
+
+<h3>12.6.1 &nbsp; Stable Diffusion 3 — the reference production image model</h3>
+
+<p>SD3 is the clearest direct application of every concept in this guide:</p>
+
+<table class="symbols">
+  <tr><th>Component</th><th>Choice in SD3</th><th>Where you learned it</th></tr>
+  <tr><td>Flow objective</td><td>Conditional flow matching with linear schedule \(\alpha_t=t, \sigma_t=1-t\) (rectified flow)</td><td>Part 11</td></tr>
+  <tr><td>Latent space</td><td>Pre-trained autoencoder, latents at \(4\times\frac{H}{8}\times\frac{W}{8}\)</td><td>§12.1–12.2</td></tr>
+  <tr><td>Architecture</td><td><strong>MM-DiT</strong> — multi-modal DiT that applies self-attention jointly over image patches <em>and</em> text tokens (not just cross-attention)</td><td>§12.4.1</td></tr>
+  <tr><td>Text conditioning</td><td>3 encoders: CLIP (two variants) + T5-XXL; their outputs are concatenated</td><td>§12.3.2</td></tr>
+  <tr><td>Guidance</td><td>CFG with \(w \in [2, 5]\) at sampling</td><td>§12.5</td></tr>
+  <tr><td>Sampler</td><td>Euler (first-order ODE solver), 50 steps</td><td>Part 9 / 11</td></tr>
+  <tr><td>Scale</td><td>8 billion parameters</td><td>—</td></tr>
+</table>
+
+<p>The key architectural innovation in SD3 is the <strong>MM-DiT</strong>: rather than treating text as external conditioning only through cross-attention, the text tokens and image tokens are concatenated and processed jointly through shared self-attention. This lets image patches and text tokens attend to each other symmetrically, enabling richer text-image alignment.</p>
+
+<h3>12.6.2 &nbsp; Meta Movie Gen Video — extending to video</h3>
+
+<p>Video = images with a temporal dimension. Data lives in \(\mathbb{R}^{T \times C \times H \times W}\). The core techniques adapt as follows:</p>
+
+<ul>
+  <li><strong>Temporal Autoencoder (TAE):</strong> extends the VAE to compress along time as well as space. A video with \(T'\) frames maps to a latent with \(T = T'/8\) frames (8× temporal compression), plus 8× spatial compression in each dimension.</li>
+  <li><strong>Flow matching objective:</strong> same linear schedule as SD3 (\(\alpha_t=t, \sigma_t=1-t\)), applied to the video latents.</li>
+  <li><strong>Architecture:</strong> DiT-like backbone where patchification happens in both space and time. Self-attention ranges over all spatio-temporal patches; cross-attention injects text (UL2 + ByT5 + MetaCLIP embeddings).</li>
+  <li><strong>Scale:</strong> 30 billion parameters. The temporal length is limited primarily by the autoencoder memory cost.</li>
+</ul>
+
+<div class="box connect">
+<span class="label">Connection — Parts 10 &amp; 11 appear directly</span>
+Both SD3 and Movie Gen use the rectified-flow objective from Part 11 (straight-line paths, constant velocity \(u^\text{target} = z - \varepsilon\)) — not classical DDPM. Flow matching won the empirical comparison. The continuous-time ODE formulation from Part 9 is the sampler. The CFG from §12.5 is the conditioning method.
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════ 7. PYTORCH CODE -->
+
+<h2>12.7 &nbsp; Minimal PyTorch — VAE encode/decode and CFG combine</h2>
+
+<div class="box prereq">
+<span class="label">Note</span>
+This is teaching code that illustrates the mathematical objects above. Shapes and values are printed inline. The comment "teaching code, not security-sensitive RNG" is intentional — the randomness here is for illustration only, not cryptographic use.
+</div>
+
+<h3>12.7.1 &nbsp; Tiny VAE: encode, reparameterise, decode, and the \(\beta\)-VAE loss</h3>
+
+<pre><code>import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+<span class="code-comment"># teaching code, not security-sensitive RNG</span>
+torch.manual_seed(0)
+
+<span class="code-comment"># ── Dimensions ────────────────────────────────────────────────────────────────
+# d = data dimension  (think: flattened 4x4 image = 16 for toy purposes)
+# k = latent dimension (compressed representation)
+# B = batch size</span>
+d, k, B = 16, 4, 8
+
+<span class="code-comment"># ── Toy encoder ───────────────────────────────────────────────────────────────
+# Real encoder: CNN or ViT + two linear heads.
+# Here: two separate linear layers, one for mu, one for log_var.
+# log_var = log(sigma^2); we predict log-variance for numerical stability.</span>
+
+class TinyEncoder(nn.Module):
+    def __init__(self, d_in, k_latent):
+        super().__init__()
+        self.fc_mu      = nn.Linear(d_in, k_latent)   <span class="code-comment"># outputs mean  mu_phi(x)</span>
+        self.fc_logvar  = nn.Linear(d_in, k_latent)   <span class="code-comment"># outputs log sigma^2_phi(x)</span>
+
+    def forward(self, x):
+        <span class="code-comment"># x: (B, d)  →  mu: (B, k),  log_var: (B, k)</span>
+        mu      = self.fc_mu(x)
+        log_var = self.fc_logvar(x)
+        return mu, log_var
+
+<span class="code-comment"># ── Reparameterisation ────────────────────────────────────────────────────────
+# z = mu + sigma * eps,  eps ~ N(0, I)
+# This is differentiable w.r.t. (mu, log_var) because eps has no parameters.</span>
+
+def reparameterise(mu, log_var):
+    <span class="code-comment"># mu, log_var: both (B, k)</span>
+    sigma = torch.exp(0.5 * log_var)   <span class="code-comment"># sigma = exp(log_var / 2) = sqrt(var)</span>
+    eps   = torch.randn_like(sigma)    <span class="code-comment"># eps ~ N(0, I_k), shape (B, k)</span>
+    z     = mu + sigma * eps           <span class="code-comment"># z: (B, k)  ← the latent sample</span>
+    return z
+
+<span class="code-comment"># ── Toy decoder ───────────────────────────────────────────────────────────────
+# Real decoder: CNN transpose or ViT decoder.
+# Here: single linear layer, outputs the mean of p_theta(x | z).</span>
+
+class TinyDecoder(nn.Module):
+    def __init__(self, k_latent, d_out):
+        super().__init__()
+        self.fc = nn.Linear(k_latent, d_out)   <span class="code-comment"># outputs mu_theta(z)</span>
+
+    def forward(self, z):
+        <span class="code-comment"># z: (B, k)  →  x_hat: (B, d)</span>
+        return self.fc(z)
+
+<span class="code-comment"># ── β-VAE loss ────────────────────────────────────────────────────────────────
+# L_VAE = L_recon + beta * L_KL
+#
+# L_recon = E[||mu_theta(z) - x||^2]    (pixel / feature MSE)
+#
+# L_KL    = (1/2) * sum_j ( mu_j^2 + sigma_j^2 - log(sigma_j^2) - 1 )
+#         = (1/2) * sum_j ( mu_j^2 + exp(log_var_j) - log_var_j - 1 )
+#
+# The KL is computed PER SAMPLE (sum over k), then averaged over the batch.</span>
+
+def beta_vae_loss(x, x_hat, mu, log_var, beta=0.001):
+    <span class="code-comment"># x, x_hat : (B, d)
+    # mu, log_var : (B, k)
+    # beta : scalar hyperparameter (very small in practice)</span>
+
+    <span class="code-comment"># --- Term 1: reconstruction loss (mean over batch AND dimensions) ---</span>
+    L_recon = F.mse_loss(x_hat, x, reduction='mean')
+    <span class="code-comment"># shape: scalar.  Expected value ≈ depends on init, ~0.8 for random weights</span>
+
+    <span class="code-comment"># --- Term 2: KL divergence KL( N(mu, sigma^2) || N(0,1) ) ---
+    # Per-element: mu^2 + exp(log_var) - log_var - 1
+    # Sum over latent dims k, mean over batch.</span>
+    kl_per_sample = 0.5 * (mu.pow(2) + log_var.exp() - log_var - 1).sum(dim=1)
+    <span class="code-comment"># kl_per_sample: (B,)</span>
+    L_kl = kl_per_sample.mean()
+    <span class="code-comment"># shape: scalar.  At init, typically ~0.5 * k = ~2.0 for k=4</span>
+
+    L_total = L_recon + beta * L_kl
+    return L_total, L_recon, L_kl
+
+<span class="code-comment"># ── Forward pass demo ─────────────────────────────────────────────────────────</span>
+encoder = TinyEncoder(d, k)
+decoder = TinyDecoder(k, d)
+
+x = torch.randn(B, d)
+<span class="code-comment"># x.shape: (8, 16)  ← batch of 8 toy "images" each of dimension 16</span>
+
+mu, log_var = encoder(x)
+<span class="code-comment"># mu.shape:      (8, 4)   ← mean of q_phi(z|x) for each sample
+# log_var.shape: (8, 4)   ← log-variance of q_phi(z|x)</span>
+
+z = reparameterise(mu, log_var)
+<span class="code-comment"># z.shape: (8, 4)   ← sampled latents; gradients flow through mu and log_var</span>
+
+x_hat = decoder(z)
+<span class="code-comment"># x_hat.shape: (8, 16)  ← reconstructed "images"</span>
+
+L_total, L_recon, L_kl = beta_vae_loss(x, x_hat, mu, log_var, beta=0.001)
+print(f"L_total : {L_total.item():.4f}")   <span class="code-comment"># e.g. ~0.85</span>
+print(f"L_recon : {L_recon.item():.4f}")   <span class="code-comment"># e.g. ~0.84  (dominates at small beta)</span>
+print(f"L_kl    : {L_kl.item():.4f}")      <span class="code-comment"># e.g. ~1.95  (expected ~k/2 at init)</span>
+</code></pre>
+
+<h3>12.7.2 &nbsp; Classifier-free guidance combine function</h3>
+
+<pre><code>import torch
+
+<span class="code-comment"># teaching code, not security-sensitive RNG</span>
+
+<span class="code-comment"># ── CFG formula ───────────────────────────────────────────────────────────────
+# At each ODE step we have two velocity (or eps) predictions:
+#   u_uncond = u_theta(x_t, t, y=null_prompt)
+#   u_cond   = u_theta(x_t, t, y=prompt)
+#
+# The CFG velocity is:
+#   u_cfg = u_uncond + w * (u_cond - u_uncond)
+#
+# Equivalently:
+#   u_cfg = (1 - w) * u_uncond + w * u_cond
+#
+# For w=1: u_cfg = u_cond    (vanilla guidance, no amplification)
+# For w&gt;1: extrapolate BEYOND u_cond in the direction away from u_uncond</span>
+
+def apply_cfg(u_uncond, u_cond, w):
+    """
+    Combine unconditional and conditional velocities using CFG.
+
+    Args:
+        u_uncond : Tensor (B, *latent_shape)  — velocity with null prompt
+        u_cond   : Tensor (B, *latent_shape)  — velocity with actual prompt
+        w        : float, guidance weight (&gt;= 1.0)
+
+    Returns:
+        u_cfg    : Tensor (B, *latent_shape)  — guided velocity
+    """
+    <span class="code-comment"># Both inputs have the same shape as the latent tensor at each ODE step.</span>
+    u_cfg = u_uncond + w * (u_cond - u_uncond)
+    <span class="code-comment"># Equivalent: u_cfg = (1 - w) * u_uncond + w * u_cond</span>
+    return u_cfg
+
+
+<span class="code-comment"># ── Demo ─────────────────────────────────────────────────────────────────────
+# Toy latent shape: batch=2, channels=4, height=8, width=8</span>
+B, C, H, W = 2, 4, 8, 8
+torch.manual_seed(42)
+
+u_uncond = torch.randn(B, C, H, W)   <span class="code-comment"># (2, 4, 8, 8) — unconditional velocity</span>
+u_cond   = torch.randn(B, C, H, W)   <span class="code-comment"># (2, 4, 8, 8) — conditional velocity</span>
+
+for w in [1.0, 2.0, 7.5]:
+    u_cfg = apply_cfg(u_uncond, u_cond, w)
+    diff  = (u_cfg - u_cond).norm().item()
+    print(f"w={w:4.1f}  |  u_cfg shape: {list(u_cfg.shape)}  "
+          f"|  ||u_cfg - u_cond||: {diff:.3f}")
+    <span class="code-comment"># w= 1.0  →  diff ≈ 0.000   (u_cfg = u_cond exactly)</span>
+    <span class="code-comment"># w= 2.0  →  diff grows    (extrapolated beyond u_cond)</span>
+    <span class="code-comment"># w= 7.5  →  diff large    (strong prompt enforcement; risk of artefacts)</span>
+
+<span class="code-comment"># ── How this fits into the ODE sampler ────────────────────────────────────────
+# In a real sampler (e.g., Euler), one step looks like:
+#
+#   x_next = x_t + dt * apply_cfg(
+#                model(x_t, t, y=null),   # one forward pass (null prompt)
+#                model(x_t, t, y=prompt), # one forward pass (real prompt)
+#                w=guidance_weight
+#            )
+#
+# Cost: 2x forward passes per ODE step vs. vanilla guidance's 1x.
+# This is the main computational overhead of CFG.</span>
+</code></pre>
+
+
+<!-- ═══════════════════════════════════════════════════════ 8. CHECKPOINT -->
+
+<h2>12.8 &nbsp; Checkpoint — what you should now understand</h2>
+
+<div class="box prereq">
+<span class="label">Checkpoint list</span>
+<ul>
+  <li><strong>Big picture:</strong> You can describe a production text-to-image model as four cooperating components: VAE encoder, latent denoiser/velocity net, CFG, VAE decoder.</li>
+  <li><strong>Standard AE vs. VAE:</strong> You can explain why a deterministic AE produces poorly-structured latents, and how adding a probabilistic encoder + KL regularisation fixes this.</li>
+  <li><strong>Reparameterisation trick:</strong> You can write \(z = \mu + \sigma \odot \varepsilon\) and explain why it makes the loss differentiable w.r.t. \(\phi\).</li>
+  <li><strong>\(\beta\)-VAE ELBO:</strong> You can write down both terms, explain what each penalises, and compute the closed-form KL for diagonal Gaussians: \(\frac{1}{2}\sum_j(\mu_j^2 + \sigma_j^2 - \log\sigma_j^2 - 1)\).</li>
+  <li><strong>Latent diffusion:</strong> You can explain why running diffusion in latent space gives ~48× cheaper compute, and what property of the VAE makes this valid (smooth, approximately Gaussian latents).</li>
+  <li><strong>Time and text embeddings:</strong> You can explain sinusoidal time embeddings and why CLIP vs. T5 serve different purposes (global semantic vs. token-level detail).</li>
+  <li><strong>DiT architecture:</strong> You can trace a latent tensor through patchify → linear embed → \(L\) DiT blocks (self-attn + cross-attn + AdaLN) → depatchify, with correct shapes at each step.</li>
+  <li><strong>U-Net architecture:</strong> You can describe the encoder–decoder–skip-connection structure and why it preserves spatial detail.</li>
+  <li><strong>CFG derivation:</strong> You can derive \(\tilde{u}_t = u_\text{uncond} + w(u_\text{cond} - u_\text{uncond})\) from the Bayesian decomposition. You can state the null-prompt training trick (drop label with probability \(\eta\)).</li>
+  <li><strong>CFG intuition:</strong> You can explain "push away from any image, toward this prompt" in one sentence and warn about artefacts at high \(w\).</li>
+  <li><strong>SD3 and Movie Gen:</strong> You can identify which technique from the guide each uses (flow matching / rectified flow, MM-DiT, latent diffusion, CFG), and the key difference (image vs. video, temporal autoencoder).</li>
+  <li><strong>PyTorch:</strong> You can write the \(\beta\)-VAE loss (reconstruction + KL closed form) and the CFG combine function from scratch.</li>
+</ul>
+</div>
+
+<nav class="pagenav">
+  <a class="prev" href="part11_rectified_flows.html"><span class="dir">&#x2039; Prev</span>Part 11 — Rectified Flows</a>
+  <a class="next" href="part13_reading_the_notes.html"><span class="dir">Next &#x203a;</span>Part 13 — Reading the MIT Notes</a>
+</nav>
+
+</article>
+</main>
+</div>
+<script defer src="assets/guide.js"></script>
+</body>
+</html>

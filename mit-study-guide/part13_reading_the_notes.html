@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Part 13 — Reading the MIT Notes · Diffusion Study Guide</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [["\\(", "\\)"]], displayMath: [["\\[", "\\]"]], tags: "none" },
+    options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle contents">☰</button>
+<div class="layout">
+<nav class="toc">
+  <a href="index.html"><strong>◆ Diffusion Study Guide</strong></a>
+  <h2>Foundations</h2>
+  <a href="part00_math_foundations.html"><span class="part-num">0</span>Mathematical Foundations</a>
+  <a href="part01_differential_equations.html"><span class="part-num">1</span>Differential Equations</a>
+  <a href="part02_probability_stochastic.html"><span class="part-num">2</span>Probability &amp; Stochastic Processes</a>
+  <a href="part03_score_functions.html"><span class="part-num">3</span>Score Functions</a>
+  <h2>Diffusion Core</h2>
+  <a href="part04_diffusion_models.html"><span class="part-num">4</span>Diffusion Models (big picture)</a>
+  <a href="part05_ddpm.html"><span class="part-num">5</span>DDPM</a>
+  <a href="part06_ddim.html"><span class="part-num">6</span>DDIM</a>
+  <a href="part07_continuous_time.html"><span class="part-num">7</span>Continuous-Time Diffusion</a>
+  <h2>Continuous Formulation</h2>
+  <a href="part08_sde_formulation.html"><span class="part-num">8</span>SDE Formulation</a>
+  <a href="part09_probability_flow_ode.html"><span class="part-num">9</span>Probability Flow ODE</a>
+  <a href="part10_flow_matching.html"><span class="part-num">10</span>Flow Matching</a>
+  <a href="part11_rectified_flows.html"><span class="part-num">11</span>Rectified Flows</a>
+  <h2>Systems &amp; Reading</h2>
+  <a href="part12_stable_diffusion.html"><span class="part-num">12</span>Stable Diffusion</a>
+  <a href="part13_reading_the_notes.html"><span class="part-num">13</span>Reading the MIT Notes</a>
+  <a href="part14_discrete_diffusion.html"><span class="part-num">14</span>Discrete Diffusion</a>
+</nav>
+<main>
+<article>
+
+<h1><span class="kicker">Part 13</span>Reading the MIT Notes, Line by Line</h1>
+
+<p>You have completed Parts 0–12. You understand ODEs, SDEs, score functions, DDPM/DDIM, flow matching, rectified flows, VAEs, DiT, U-Nets, and classifier-free guidance. You are ready to open <em>An Introduction to Flow Matching and Diffusion Models</em> by Peter Holderrieth &amp; Ezra Erives (MIT CSAIL, 2026) and read it straight through. This page is your map: for every section of the notes it tells you what to watch for, which part of this guide already gave you the tools, and how the notes' notation maps to the symbols you already know.</p>
+
+<div class="box prereq">
+<span class="label">Before you open the PDF</span>
+The notes live at <strong>diffusion.csail.mit.edu/2026</strong>. Keep this page open alongside. When you hit a symbol you don't recognise, jump to the Notation Rosetta Stone table below. When you hit a theorem and wonder why it matters, jump to the cross-reference map.
+</div>
+
+<!-- ============================================================
+     MASTER CROSS-REFERENCE TABLE
+     ============================================================ -->
+<h2>Master Cross-Reference Map</h2>
+
+<p>Every major section of the notes, which guide part unlocks it, and the one-sentence payoff.</p>
+
+<table class="symbols">
+<thead>
+<tr>
+  <th>Notes section</th>
+  <th>Guide part(s)</th>
+  <th>In one sentence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>§1 Introduction — Key Ideas 1–4, Summary 2</td>
+  <td>Part 4 (big picture), Part 0 (notation)</td>
+  <td>Objects are vectors, generation is sampling from \(p_\text{data}\), guided generation is sampling from \(p_\text{data}(\cdot|y)\).</td>
+</tr>
+<tr>
+  <td>§2.1 Flow Models — Thm 3, Ex 4, Alg 1</td>
+  <td>Part 1</td>
+  <td>A vector field \(u_t\) defines an ODE whose solution is a flow \(\psi_t\); Euler method simulates it.</td>
+</tr>
+<tr>
+  <td>§2.2 Diffusion Models — Thm 5, Ex 6 (OU), Alg 2, Summary 7</td>
+  <td>Parts 2 &amp; 7</td>
+  <td>Adding a Brownian noise term \(\sigma_t\,dW_t\) to the ODE yields an SDE; Euler–Maruyama simulates it.</td>
+</tr>
+<tr>
+  <td>§3.1 Conditional &amp; Marginal Probability Paths (Ex 8 Gaussian)</td>
+  <td>Part 10</td>
+  <td>A conditional path \(p_t(x|z)\) interpolates noise to a single data point; marginalising over \(z\sim p_\text{data}\) gives the marginal path \(p_t(x)\).</td>
+</tr>
+<tr>
+  <td>§3.2 Conditional &amp; Marginal Vector Fields — Thm 9, Ex 10, Thm 11</td>
+  <td>Part 10</td>
+  <td>The marginalization trick: a weighted average of conditional fields is the marginal field that transports noise to data (proved via the continuity equation).</td>
+</tr>
+<tr>
+  <td>§3.3 Learning the Marginal Vector Field — Thm 12, Alg 3, Ex 13, Summary 14</td>
+  <td>Parts 10 &amp; 11</td>
+  <td>The CFM loss (regression against the tractable conditional field) has the same gradients as the intractable marginal FM loss; CondOT path gives a clean closed form.</td>
+</tr>
+<tr>
+  <td>§4.1 Score Functions — Prop 1, Rmk 16</td>
+  <td>Parts 3 &amp; 8</td>
+  <td>For Gaussian paths the score and the vector field are linearly interconvertible; both are reparameterisations of the posterior mean (denoiser).</td>
+</tr>
+<tr>
+  <td>§4.2 Sampling with SDEs — Thm 17, Ex 18, Thm 19 (Fokker–Planck), Rmk 20 (Langevin)</td>
+  <td>Parts 8 &amp; 9</td>
+  <td>Any trained flow model becomes an SDE sampler for free by adding \(\sigma_t^2 \nabla\log p_t\) to the drift; the Fokker–Planck equation is the SDE analogue of the continuity equation.</td>
+</tr>
+<tr>
+  <td>§4.3 Score Matching — Thm 22, Alg 4</td>
+  <td>Parts 3 &amp; 7</td>
+  <td>Denoising score matching equals score matching up to a constant — the same algebraic argument as Theorem 12 but for scores instead of vector fields.</td>
+</tr>
+<tr>
+  <td>§5 Guidance — Rmk 25, §5.1, §5.2, CFG-CFM objective, Rmk 28</td>
+  <td>Part 12</td>
+  <td>Classifier-free guidance extrapolates beyond the guided field using the unguided field as a baseline, controlled by guidance scale \(w\).</td>
+</tr>
+<tr>
+  <td>§6.1 Architectures — time/text embeddings, Rmk 29 (DiT block), U-Net §6.1.3</td>
+  <td>Part 12</td>
+  <td>The vector field \(u_t^\theta(x|y)\) is a DiT or U-Net that takes patchified images, Fourier time embeddings, and CLIP/T5 text embeddings as input.</td>
+</tr>
+<tr>
+  <td>§6.2 VAEs — Rmk 30 (KL), Alg 6 (\(\beta\)-VAE), Rmk 32 (latent space)</td>
+  <td>Part 12</td>
+  <td>A VAE compresses images to a tractable latent space; the generative model is trained there, then the decoder maps back to pixels.</td>
+</tr>
+<tr>
+  <td>§6.3 Stable Diffusion 3 &amp; Meta Movie Gen</td>
+  <td>Parts 11 &amp; 12</td>
+  <td>SD3 uses CondOT rectified flow + MM-DiT + three text embeddings + a pre-trained VAE; Movie Gen extends the same recipe to temporal video latents.</td>
+</tr>
+<tr>
+  <td>§7 Discrete Diffusion — CTMCs, Thm 33, Ex 34, Thm 36, Prop 2 (KFE), Thm 38, Ex 39, Alg 8</td>
+  <td><em>New in §7</em> (see primer below)</td>
+  <td>Discrete data uses CTMCs instead of ODEs/SDEs; the rate matrix \(Q_t\) plays the role of the vector field, and the same marginalization-trick recipe applies.</td>
+</tr>
+<tr>
+  <td>Appendix A — Probability reminder</td>
+  <td>Parts 0 &amp; 2</td>
+  <td>Quick reference for PDFs, conditional expectations, Bayes' rule, and the tower property — all used in proofs throughout the notes.</td>
+</tr>
+<tr>
+  <td>Appendix B — Fokker–Planck proof</td>
+  <td>Part 8</td>
+  <td>Self-contained proof using test functions and integration by parts; read it after Part 8 if you want the mathematical derivation.</td>
+</tr>
+<tr>
+  <td>Appendix C — CTMC existence</td>
+  <td>§7 primer below</td>
+  <td>Theorem 33 follows from the uniqueness of linear ODEs (the KFE is an ODE over the transition matrix).</td>
+</tr>
+<tr>
+  <td>Appendix D — Additional VAE perspectives (Prop 3, Rmks 42–44, ELBO)</td>
+  <td>Part 12</td>
+  <td>The VAE loss equals a KL-divergence in joint \((x,z)\)-space; the ELBO is the standard variational lower bound to the log-likelihood.</td>
+</tr>
+<tr>
+  <td>Appendix E — Literature guide, Summary 45</td>
+  <td>All parts</td>
+  <td>Maps the zoo of formulations (discrete-time DDPM, forward-process SDE, stochastic interpolants, flow matching, rectified flow) to equivalent mathematical content.</td>
+</tr>
+</tbody>
+</table>
+
+<!-- ============================================================
+     NOTATION ROSETTA STONE
+     ============================================================ -->
+<h2>Notation Rosetta Stone</h2>
+
+<p>The notes and the guide sometimes use different letters for the same object. When you see a symbol in the notes that looks unfamiliar, find it here.</p>
+
+<table class="symbols">
+<thead>
+<tr>
+  <th>Notes symbol</th>
+  <th>Meaning</th>
+  <th>Guide equivalent / notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>\(u_t(x)\)</td>
+  <td>vector field / velocity</td>
+  <td>Guide uses \(v_t\), \(f_t\), or \(s_t\) depending on context; always "the drift the network predicts"</td>
+</tr>
+<tr>
+  <td>\(u_t^\theta(x)\)</td>
+  <td>neural-network vector field</td>
+  <td>\(v_\theta\) or \(f_\theta\) in guide</td>
+</tr>
+<tr>
+  <td>\(u_t^\text{target}(x)\)</td>
+  <td>ground-truth marginal vector field</td>
+  <td>"marginal velocity field" in guide Parts 10–11</td>
+</tr>
+<tr>
+  <td>\(u_t^\text{target}(x|z)\)</td>
+  <td>conditional vector field given clean data \(z\)</td>
+  <td>"conditional velocity field" in Part 10</td>
+</tr>
+<tr>
+  <td>\(p_t(x)\)</td>
+  <td>marginal probability path at time \(t\)</td>
+  <td>\(\rho_t\) in some guide parts; always "distribution of \(X_t\)"</td>
+</tr>
+<tr>
+  <td>\(p_t(x|z)\)</td>
+  <td>conditional probability path given clean \(z\)</td>
+  <td>Same notation in guide Part 10; \(q_t(\cdot|x_0)\) in DDPM context (Part 5)</td>
+</tr>
+<tr>
+  <td>\(\psi_t\)</td>
+  <td>flow map (ODE solution operator)</td>
+  <td>\(\phi_t\) in guide Part 1</td>
+</tr>
+<tr>
+  <td>\(\alpha_t,\,\beta_t\)</td>
+  <td>noise schedulers in Gaussian path \(p_t(\cdot|z)=\mathcal{N}(\alpha_t z,\beta_t^2 I)\)</td>
+  <td>Guide uses \(\bar\alpha_t\) (cumulative) in DDPM; Part 10 uses the same \(\alpha_t,\beta_t\) convention</td>
+</tr>
+<tr>
+  <td>\(\dot\alpha_t,\,\dot\beta_t\)</td>
+  <td>time derivatives of the schedulers</td>
+  <td>Appear in the closed-form conditional vector field \(u_t^\text{target}(x|z)\) in §3.2 / Ex 10</td>
+</tr>
+<tr>
+  <td>\(\sigma_t\)</td>
+  <td>diffusion coefficient in the SDE</td>
+  <td>Same in guide; controls how much Brownian noise is added at each step</td>
+</tr>
+<tr>
+  <td>\(W_t\)</td>
+  <td>Brownian motion (Wiener process)</td>
+  <td>Same in guide Part 2; the \(\sqrt{h}\,\varepsilon\) term in Euler–Maruyama</td>
+</tr>
+<tr>
+  <td>\(s_t^\theta\)</td>
+  <td>score network approximating \(\nabla\log p_t\)</td>
+  <td>\(s_\theta\) in guide Parts 3 &amp; 8</td>
+</tr>
+<tr>
+  <td>\(\varepsilon_t^\theta\)</td>
+  <td>noise-predictor network (DDPM reparameterisation)</td>
+  <td>\(\varepsilon_\theta\) in guide Parts 5 &amp; 7; predicts the added noise</td>
+</tr>
+<tr>
+  <td>\(D_t(x)\)</td>
+  <td>denoiser: \(\mathbb{E}[z|x]\) (posterior mean)</td>
+  <td>"denoiser" / \(\hat{x}_0\) in guide Part 5; Rmk 16 in notes</td>
+</tr>
+<tr>
+  <td>\(\tilde{u}_t(x|y)\)</td>
+  <td>CFG-scaled guided vector field</td>
+  <td>"CFG field" in guide Part 12; \(= (1+w)u_t^\theta(x|y) - w\,u_t^\theta(x|\emptyset)\)</td>
+</tr>
+<tr>
+  <td>\(Q_t(y|x)\)</td>
+  <td>CTMC rate matrix (§7)</td>
+  <td>Discrete analogue of \(u_t\); new in §7 (see primer)</td>
+</tr>
+<tr>
+  <td>\(L_\text{FM}\)</td>
+  <td>flow matching loss (marginal)</td>
+  <td>Same in guide Part 10; intractable in practice</td>
+</tr>
+<tr>
+  <td>\(L_\text{CFM}\)</td>
+  <td>conditional flow matching loss (tractable)</td>
+  <td>Same in guide Part 10; used in training</td>
+</tr>
+<tr>
+  <td>\(L_\text{CFG-CFM}\)</td>
+  <td>CFG training objective (§5.2 / Summary 27)</td>
+  <td>CFG loss in guide Part 12; drops label \(y\) with probability \(\eta\)</td>
+</tr>
+</tbody>
+</table>
+
+<!-- ============================================================
+     §1–2
+     ============================================================ -->
+<h2>Reading §1–2: Generative Modeling and the ODE/SDE Machinery</h2>
+
+<h3>§1 Introduction — Key Ideas 1–4 and Summary 2</h3>
+
+<div class="box connect">
+<span class="label">Unlocked by</span> Guide Part 4 (big picture of diffusion) and Part 0 (math notation).
+</div>
+
+<p><strong>What it says.</strong> Section 1 sets up the problem in four key ideas. Key Idea 1: data objects (images, videos, proteins) are vectors \(z\in\mathbb{R}^d\). Key Idea 2: generating means sampling from \(p_\text{data}\). Key Idea 3: a dataset is a finite set of i.i.d. samples from \(p_\text{data}\). Key Idea 4: <em>guided</em> generation means sampling from the conditional \(p_\text{data}(\cdot|y)\). Summary 2 restates these four points. §1.1 and §1.2 are the overview and roadmap — read them as a preview, not a source of new mathematics.</p>
+
+<p><strong>Symbol to watch.</strong> The notes use \(z\) (not \(x\)) for a clean data point throughout §1–3. This is the standard variable for a sample from the data set, while \(x\) will later denote an intermediate noisy point on a probability path.</p>
+
+<h3>§2.1 Flow Models — Theorem 3, Example 4, Algorithm 1</h3>
+
+<div class="box connect">
+<span class="label">Unlocked by</span> Guide Part 1 (differential equations and flows).
+</div>
+
+<p><strong>What it says.</strong> A vector field \(u_t:\mathbb{R}^d\times[0,1]\to\mathbb{R}^d\) defines an ODE \(\dot{X}_t = u_t(X_t)\). The solution is the <em>flow</em> \(\psi_t\), which maps initial conditions forward in time. <strong>Theorem 3</strong> guarantees existence and uniqueness of \(\psi_t\) when \(u_t\) is \(C^1\) with bounded derivative — always satisfied for neural networks. <strong>Example 4</strong> is the linear case \(u_t(x)=-\theta x\), whose exact flow is \(\psi_t(x_0)=e^{-\theta t}x_0\). <strong>Algorithm 1</strong> is the Euler method: \(X_{t+h}=X_t+h\,u_t^\theta(X_t)\).</p>
+
+<div class="box intuition">
+<span class="label">Orientation</span>
+You already built intuition for flows in Part 1. The notes' Definition/Theorem/Algorithm sequence is a compact formal restatement of exactly that content. Read Example 4 to check your algebra, then move on.
+</div>
+
+<h3>§2.2 Diffusion Models — Theorem 5, Example 6 (OU), Algorithm 2, Summary 7</h3>
+
+<div class="box connect">
+<span class="label">Unlocked by</span> Guide Parts 2 (Brownian motion, Itô calculus) and 7 (continuous-time diffusion).
+</div>
+
+<p><strong>What it says.</strong> The SDE \(dX_t = u_t(X_t)\,dt + \sigma_t\,dW_t\) extends the ODE by injecting Brownian noise at each step. <strong>Theorem 5</strong> gives existence/uniqueness (analogous to Theorem 3 but for SDEs). <strong>Example 6</strong> is the Ornstein–Uhlenbeck (OU) process: \(dX_t = -\theta X_t\,dt + \sigma\,dW_t\), which has a Gaussian stationary distribution \(\mathcal{N}(0,\sigma^2/(2\theta))\). <strong>Algorithm 2</strong> is Euler–Maruyama: add a \(\sigma_t\sqrt{h}\,\varepsilon\) noise term to the Euler step. <strong>Summary 7</strong> frames the full diffusion model: a neural network \(u_t^\theta\) paired with a fixed \(\sigma_t\), initialized from \(p_\text{init}\), run to \(t=1\) to produce \(p_\text{data}\). A flow model is the special case \(\sigma_t=0\).</p>
+
+<div class="box warn">
+<span class="label">Watch out</span>
+The notes never actually train the model in §2 — they only define how to <em>sample</em> once the network is trained. Training comes in §§3–4. Keep this separation clear.
+</div>
+
+<!-- ============================================================
+     §3
+     ============================================================ -->
+<h2>Reading §3: Flow Matching</h2>
+
+<h3>§3.1 Conditional and Marginal Probability Paths — Example 8 (Gaussian path)</h3>
+
+<div class="box connect">
+<span class="label">Unlocked by</span> Guide Part 10 (flow matching, conditional/marginal paths).
+</div>
+
+<p><strong>What it says.</strong> A <em>conditional probability path</em> \(p_t(x|z)\) is a family of distributions that start at \(p_\text{init}\) and end at \(\delta_z\) (a point mass at the data point). Marginalising over \(z\sim p_\text{data}\) gives the <em>marginal path</em> \(p_t(x)=\int p_t(x|z)\,p_\text{data}(z)\,dz\), which starts at \(p_\text{init}\) and ends at \(p_\text{data}\). <strong>Example 8</strong> is the Gaussian path \(p_t(\cdot|z)=\mathcal{N}(\alpha_t z,\beta_t^2 I)\) with noise schedulers \(\alpha_t,\beta_t\).</p>
+
+<p><strong>Symbol to watch.</strong> The integral in the marginal \(p_t(x)=\int\cdots\) is tractable for <em>sampling</em> (draw \(z\sim p_\text{data}\), then sample \(x\sim p_t(\cdot|z)\)) but intractable for <em>density evaluation</em>. This asymmetry drives the entire flow-matching design.</p>
+
+<h3>§3.2 Conditional and Marginal Vector Fields — Theorem 9, Example 10, Theorem 11</h3>
+
+<div class="box connect">
+<span class="label">Unlocked by</span> Guide Part 10 (marginalization trick, continuity equation).
+</div>
+
+<p><strong>What it says.</strong> A conditional vector field \(u_t^\text{target}(x|z)\) is any field whose ODE follows the conditional path \(p_t(\cdot|z)\). <strong>Theorem 9</strong> is the <em>marginalization trick</em>: the weighted average \(u_t^\text{target}(x) = \mathbb{E}_{z\sim p_\text{data}}[u_t^\text{target}(x|z)\,|\,x]\) is the marginal vector field and its ODE follows the marginal path, giving \(X_1\sim p_\text{data}\). <strong>Example 10</strong> derives the explicit conditional Gaussian field \(u_t^\text{target}(x|z)=\dot\alpha_t z + \dot\beta_t\,(x-\alpha_t z)/\beta_t\). <strong>Theorem 11</strong> is the <em>continuity equation</em> \(\partial_t p_t = -\text{div}(p_t u_t)\), the ODE analogue of conservation of probability mass.</p>
+
+<div class="box mathblock">
+<span class="label">Core algebra</span>
+The proof of Theorem 9 is a single chain of equalities: show that the marginal field satisfies the continuity equation by substituting the definition of \(p_t(x)\) and swapping the integral with the divergence operator. Guide Part 10 walked through this step-by-step. Re-read it there if the notes' proof feels rushed.
+</div>
+
+<h3>§3.3 Learning the Marginal Vector Field — Theorem 12, Algorithm 3, Example 13, Summary 14</h3>
+
+<div class="box connect">
+<span class="label">Unlocked by</span> Guide Part 10 (CFM loss) and Part 11 (CondOT / rectified flow as the \(\alpha_t=t\) special case).
+</div>
+
+<p><strong>What it says.</strong> <strong>Theorem 12</strong> is the central training result: the marginal FM loss \(L_\text{FM}(\theta)\) and the conditional FM loss \(L_\text{CFM}(\theta)\) differ only by a constant in \(\theta\), so minimising \(L_\text{CFM}\) is equivalent to minimising \(L_\text{FM}\). The proof expands the MSE and uses the same integral-swap trick as Theorem 9. <strong>Algorithm 3</strong> summarises the training loop for the CondOT Gaussian path (\(\alpha_t=t,\beta_t=1-t\)). <strong>Example 13</strong> instantiates the CFM loss for general Gaussian paths, giving \(L_\text{CFM}=\mathbb{E}[\|\,u_t^\theta(\alpha_t z+\beta_t\varepsilon)-(\dot\alpha_t z+\dot\beta_t\varepsilon)\,\|^2]\). <strong>Summary 14</strong> is the reference card for all of §3.</p>
+
+<div class="box intuition">
+<span class="label">Key insight</span>
+Algorithm 3 is <em>simulation-free</em>: you never unroll an ODE during training. You only sample \(t\), \(z\), \(\varepsilon\), form \(x=\alpha_t z+\beta_t\varepsilon\), and regress the network against the closed-form target. This is the practical reason flow matching dominates large-scale training.
+</div>
+
+<!-- ============================================================
+     §4
+     ============================================================ -->
+<h2>Reading §4: Score Functions and Score Matching</h2>
+
+<h3>§4.1 Conditional and Marginal Score Functions — Proposition 1, Remark 16</h3>
+
+<div class="box connect">
+<span class="label">Unlocked by</span> Guide Parts 3 (score functions) and 8 (SDE formulation).
+</div>
+
+<p><strong>What it says.</strong> The score is \(\nabla\log p_t(x)\). For Gaussian paths the conditional score is \(\nabla\log p_t(x|z)=({\alpha_t z - x})/{\beta_t^2}\), linear in both \(x\) and \(z\). <strong>Proposition 1</strong> (the <em>conversion formula</em>) shows that for Gaussian paths the conditional vector field and the conditional score satisfy \(u_t^\text{target}(x|z) = a_t x + b_t s_t^\theta(x)\) (and equivalently for marginals), so learning one gives the other for free. <strong>Remark 16</strong> generalises: any parameterisation that recovers the posterior mean \(\mathbb{E}[z|x]\) — the vector field, the score, or the denoiser \(D_t(x)\) — is equivalent. DDPM originally learned the noise \(\varepsilon_t^\theta\), which is a rescaled version of the score.</p>
+
+<h3>§4.2 Sampling with SDEs — Theorem 17, Example 18, Theorem 19, Remark 20</h3>
+
+<div class="box connect">
+<span class="label">Unlocked by</span> Guide Parts 8 (reverse SDE, Fokker–Planck) and 9 (probability-flow ODE).
+</div>
+
+<p><strong>What it says.</strong> <strong>Theorem 17</strong> is the <em>SDE extension trick</em>: given a trained flow model (ODE with drift \(u_t^\text{target}\)), you can add <em>any</em> diffusion coefficient \(\sigma_t\ge 0\) by augmenting the drift with the score — \(u_t^\text{SDE}=u_t^\text{target}+\tfrac{\sigma_t^2}{2}\nabla\log p_t\) — without retraining. The resulting SDE still follows the marginal path \(p_t\). <strong>Example 18</strong> instantiates this for Gaussian paths using Proposition 1. <strong>Theorem 19</strong> is the Fokker–Planck equation \(\partial_t p_t=-\text{div}(p_t u_t)+\tfrac{\sigma_t^2}{2}\Delta p_t\), the SDE analogue of the continuity equation; it is the technical workhorse of Theorem 17's proof. <strong>Remark 20</strong> is Langevin dynamics: the special case \(u_t=0\), which drives any initial distribution towards the stationary distribution \(p\).</p>
+
+<div class="box warn">
+<span class="label">Important nuance</span>
+Theorem 17 says you can pick \(\sigma_t\) <em>after</em> training. In theory any \(\sigma_t\ge 0\) preserves the marginals. In practice, large \(\sigma_t\) requires smaller step sizes (Algorithm 2), so there is an empirical optimum. The probability-flow ODE (\(\sigma_t=0\)) has fewer NFEs; stochastic sampling (\(\sigma_t>0\)) can escape local errors but is slower.
+</div>
+
+<h3>§4.3 Score Matching — Theorem 22, Algorithm 4</h3>
+
+<div class="box connect">
+<span class="label">Unlocked by</span> Guide Parts 3 (score matching) and 7 (DDPM's noise-prediction loss).
+</div>
+
+<p><strong>What it says.</strong> <strong>Theorem 22</strong> is the score-matching analogue of Theorem 12: the score matching loss equals the <em>denoising</em> score matching loss up to a constant. The proof is word-for-word the same — replace \(u_t^\text{target}\) with \(\nabla\log p_t\). <strong>Algorithm 4</strong> summarises DDPM training: for Gaussian paths the score network predicts \(-\varepsilon/\beta_t\) (or equivalently the noise \(\varepsilon\) after DDPM's reparameterisation).</p>
+
+<div class="box intuition">
+<span class="label">Unification moment</span>
+After reading §3.3 and §4.3 together you see that <em>flow matching and score matching solve the same optimisation problem</em>: both regress a neural network against a tractable conditional target. They differ only in what that target represents (velocity vs. score), but Proposition 1 shows they are the same for Gaussian paths.
+</div>
+
+<!-- ============================================================
+     §5
+     ============================================================ -->
+<h2>Reading §5: Guidance</h2>
+
+<h3>§5 Guidance — Remark 25, §5.1 Vanilla, §5.2 Classifier-Free, Remark 28</h3>
+
+<div class="box connect">
+<span class="label">Unlocked by</span> Guide Part 12 (classifier-free guidance, CFG-CFM loss).
+</div>
+
+<p><strong>What it says.</strong> <strong>Remark 25</strong> clarifies terminology: "conditional" in the notes always means conditioning on a data point \(z\), while "guided" means conditioning on a prompt \(y\). This avoids overloading the word "conditional". <strong>§5.1 Vanilla guidance</strong> feeds \(y\) into the network alongside \(x\) and trains with the guided CFM objective Eq. (58); straightforward but empirically under-conditions on \(y\). <strong>§5.2 Classifier-free guidance</strong> derives CFG from Bayes' rule: the guided score decomposes into the unguided score plus \(\nabla\log p_t(y|x)\) (a classifier gradient). Scaling that classifier gradient by \(w>1\) amplifies adherence to \(y\). Rather than training a separate classifier, a single network is trained with both \(u_t^\theta(x|y)\) and \(u_t^\theta(x|\emptyset)\) using label-dropout probability \(\eta\). At inference, \(\tilde{u}_t=(1+w)u_t^\theta(x|y)-w\,u_t^\theta(x|\emptyset)\). The <strong>CFG-CFM objective</strong> (Summary 27) is the production-ready training loss. <strong>Remark 28</strong> notes that everything extends trivially to diffusion models by replacing \(u\) with \(\tilde{u}\) in Algorithm 2.</p>
+
+<div class="box warn">
+<span class="label">Watch out</span>
+For \(w>1\) the generated distribution is no longer \(p_\text{data}(\cdot|y)\) — it is a biased distribution that over-emphasises \(y\). CFG is an empirical heuristic, not a probabilistically grounded operation. The notes are careful to say this.
+</div>
+
+<!-- ============================================================
+     §6
+     ============================================================ -->
+<h2>Reading §6: Building Large-Scale Generators</h2>
+
+<h3>§6.1 Neural Network Architectures — Embeddings, Remark 29 (DiT block), §6.1.3 U-Net</h3>
+
+<div class="box connect">
+<span class="label">Unlocked by</span> Guide Part 12 (DiT, U-Net, embeddings).
+</div>
+
+<p><strong>What it says.</strong> The neural network \(u_t^\theta(x|y)\) must accept three inputs: an image-shaped \(x\in\mathbb{R}^{C\times H\times W}\), a conditioning variable \(y\), and a scalar time \(t\in[0,1]\). Time is embedded via Fourier features (Eq. 65); class labels via a learned look-up; text via frozen CLIP or T5 models. A <strong>Diffusion Transformer (DiT)</strong> patchifies the image, runs multi-head self-attention over patch tokens and cross-attention to text tokens, and uses adaptive LayerNorm (AdaLN) for time conditioning. <strong>Remark 29</strong> spells out the DiT block math: scaled dot-product attention, multi-head projection, AdaLN modulation. A <strong>U-Net</strong> uses an encoder–midcoder–decoder stack with residual skip connections; it is the backbone of early DDPM/DDIM papers. For modern large-scale models the DiT dominates; the U-Net is still used in some labs and ablation studies.</p>
+
+<h3>§6.2 Working in Latent Space — Remark 30 (KL), Algorithm 6 (\(\beta\)-VAE), Remark 32</h3>
+
+<div class="box connect">
+<span class="label">Unlocked by</span> Guide Part 12 (VAE, latent diffusion).
+</div>
+
+<p><strong>What it says.</strong> Raw pixel space at 1024×1024 is \(d\approx 3\times10^6\); training a flow model there is prohibitive. A VAE compresses to a tractable latent \(z\in\mathbb{R}^k\) with \(k\ll d\). The encoder \(q_\phi(z|x)\) and decoder \(p_\theta(x|z)\) are Gaussian; training minimises the reconstruction loss plus a KL penalty that keeps the latent distribution close to \(\mathcal{N}(0,I_k)\). <strong>Remark 30</strong> is a self-contained KL-divergence primer. <strong>Algorithm 6</strong> is the \(\beta\)-VAE training loop with the reparameterisation trick. <strong>Remark 32</strong> states the latent-diffusion recipe: train the VAE first, then train the flow/diffusion model on the latent distribution; at inference, decode with \(\mu_\theta(z)\) (not a stochastic sample) to avoid noise artifacts.</p>
+
+<h3>§6.3 Case Study: Stable Diffusion 3 and Meta Movie Gen</h3>
+
+<div class="box connect">
+<span class="label">Unlocked by</span> Guide Parts 11 (rectified flow / CondOT) and 12 (full system architecture).
+</div>
+
+<p><strong>What it says.</strong> <strong>Stable Diffusion 3</strong> uses the CondOT path (\(\alpha_t=t,\beta_t=1-t\) — i.e. rectified flow), a pre-trained VAE latent space, three text embeddings (two CLIP variants + T5-XXL), and an MM-DiT that attends jointly to image patches and text tokens. Their largest model has 8B parameters; sampling uses 50 Euler steps with CFG weight 2–5. <strong>Meta Movie Gen</strong> extends the same recipe to video: a temporal VAE compresses \(T\times H\times W\) video frames; the DiT attends along both spatial and temporal patch dimensions; three text encoders (UL2 + ByT5 + MetaCLIP). Largest model: 30B parameters.</p>
+
+<div class="box intuition">
+<span class="label">Big picture</span>
+SD3 and Movie Gen are not new algorithms — they are careful engineering combinations of everything in §§3–5: CondOT flow matching + CFG + latent VAE + DiT backbone. The main novel contributions are architectural (MM-DiT) and scale.
+</div>
+
+<!-- ============================================================
+     §7 — DISCRETE DIFFUSION PRIMER
+     ============================================================ -->
+<h2>Reading §7: Discrete Diffusion Models</h2>
+
+<div class="box warn">
+<span class="label">New territory</span>
+This is the one chapter not covered in depth in the guide. Read the short primer here first, then return to the notes.
+</div>
+
+<h3>§7 Primer — What is a CTMC and why does it look familiar?</h3>
+
+<p>So far every model lived in \(\mathbb{R}^d\). Language is a sequence of discrete tokens \(x\in\mathcal{V}^d\) where \(\mathcal{V}\) is a vocabulary. SDEs do not exist on discrete spaces — there is no "infinitesimal step in a direction". Instead, we use a <strong>Continuous-Time Markov Chain (CTMC)</strong>, the discrete analogue of an SDE.</p>
+
+<p><strong>The analogy table:</strong></p>
+
+<table class="symbols">
+<thead>
+<tr><th>Continuous (SDE)</th><th>Discrete (CTMC)</th></tr>
+</thead>
+<tbody>
+<tr><td>State space \(\mathbb{R}^d\)</td><td>State space \(\mathcal{S}=\mathcal{V}^d\) (finite/countable)</td></tr>
+<tr><td>Drift \(u_t(x)\in\mathbb{R}^d\)</td><td>Rate matrix \(Q_t(y|x)\ge 0\) for \(y\ne x\)</td></tr>
+<tr><td>ODE continuity equation</td><td>Kolmogorov Forward Equation (KFE, Prop 2)</td></tr>
+<tr><td>Flow existence (Thm 3)</td><td>CTMC existence (Thm 33; proved via KFE as a linear ODE)</td></tr>
+<tr><td>Conditional vector field \(u_t^\text{target}(x|z)\)</td><td>Conditional rate matrix \(Q_t^z(y|x)\)</td></tr>
+<tr><td>Marginalization trick (Thm 9)</td><td>Discrete marginalization trick (Thm 36)</td></tr>
+<tr><td>CFM loss: MSE against \(u_t^\text{target}(x|z)\)</td><td>DFM loss: cross-entropy against \(p_{1|t}(z_j|x)\) (Alg 8)</td></tr>
+<tr><td>Euler method (Alg 1)</td><td>Euler-like categorical sampler (Alg 7)</td></tr>
+</tbody>
+</table>
+
+<p>The key intuition: instead of asking "in which <em>direction</em> should I move \(x\)?", the CTMC asks "at which <em>rate</em> should I <em>jump</em> from token \(x\) to token \(y\)?". The rate matrix \(Q_t(y|x)\) is non-negative for \(y\ne x\) and has diagonal entries chosen so each column sums to zero (a consistency condition analogous to divergence-free probability flux).</p>
+
+<h3>§7.1 CTMC Models — Theorem 33, Example 34</h3>
+
+<p><strong>What it says.</strong> <strong>Theorem 33</strong> is the discrete analogue of Theorem 3: given any valid rate matrix \(Q_t\), there exists a unique CTMC. The proof uses the fact that the KFE (Kolmogorov Forward Equation) is a linear ODE over the transition matrix, so uniqueness of ODEs (Theorem 3 again!) applies directly. <strong>Example 34</strong> is a two-state chain \(\mathcal{S}=\{a,b\}\) with constant jump rate \(\lambda\): the transition probability decays as \(e^{-2\lambda h}\) and the chain forgets its initial state as \(h\to\infty\). Think of this as the discrete analogue of the OU process (Example 6) converging to a Gaussian.</p>
+
+<p>In practice, the CTMC is <strong>factorized</strong>: the rate \(Q_t(y|x)=0\) unless \(x\) and \(y\) differ by exactly one token. This sparsity constraint (Figure 18 in the notes) makes the output shape \(d\times|\mathcal{V}|\) — linear in sequence length — instead of exponential.</p>
+
+<h3>§7.2 Training CTMC Models — Theorem 36, Proposition 2 (KFE), Theorem 38, Example 39 (MDLM), Algorithm 8</h3>
+
+<p><strong>What it says.</strong> The training recipe mirrors §3 exactly in three steps.</p>
+
+<ol>
+<li><strong>Conditional &amp; marginal probability paths</strong> (§7.2.1): The <em>factorized mixture path</em> (Example 35) independently masks or noises each token with probability \(1-\kappa_t\), where \(\kappa_t\) is a scheduler with \(\kappa_0=0,\kappa_1=1\). This is the discrete analogue of the Gaussian path — not a smooth interpolation in space, but a smooth mixture of "data token" and "noise token".</li>
+<li><strong>Conditional &amp; marginal rate matrices</strong> (§7.2.2): <strong>Theorem 36</strong> (discrete marginalization trick) mirrors Theorem 9: the marginal rate matrix \(Q_t(y|x)=\mathbb{E}[Q_t^z(y|x)|x]\) generates a CTMC that follows the marginal path. <strong>Proposition 2</strong> (Kolmogorov Forward Equation) is the discrete analogue of the continuity equation and is used to prove Theorem 36 exactly as Theorem 11 was used to prove Theorem 9.</li>
+<li><strong>Learning the marginal rate matrix</strong> (§7.2.3): <strong>Theorem 38</strong> shows that for the factorized mixture path the marginal rate reduces to predicting \(p_{1|t}(z_j=v_i|x)\) — the probability that token \(j\) of the clean sequence is \(v_i\), given the noisy sequence \(x\). This is just a <strong>per-position classifier</strong>. <strong>Algorithm 8</strong> trains a transformer on a cross-entropy loss against the clean tokens. <strong>Example 39</strong> is the masked diffusion language model (MDLM): add a \([\text{mask}]\) token to \(\mathcal{V}\), start from a fully masked sequence, and iteratively unmask tokens during inference — the discrete analogue of denoising.</li>
+</ol>
+
+<div class="box intuition">
+<span class="label">The surprising simplicity</span>
+Just as continuous flow matching reduces to simple velocity regression (Algorithm 3), discrete flow matching reduces to simple per-token classification (Algorithm 8). The mathematical machinery is heavier but the training objective is no more exotic than a standard language model cross-entropy loss. Current state-of-the-art discrete diffusion models (e.g. LLaDA) follow exactly this recipe.
+</div>
+
+<!-- ============================================================
+     APPENDICES
+     ============================================================ -->
+<h2>Reading the Appendices</h2>
+
+<h3>Appendix A — Probability Reminder</h3>
+
+<div class="box connect">
+<span class="label">Unlocked by</span> Guide Parts 0 and 2.
+</div>
+
+<p>A concise reference for the notation used throughout the notes: random vectors, PDFs, Gaussians, expectations, conditional densities, Bayes' rule, and the tower property. If you find yourself confused by \(\mathbb{E}[X|Y=y]\) versus \(\mathbb{E}[X|Y]\) (a function vs. a random variable), this appendix has the clean definitions. Most useful to have open while reading §§3–4.</p>
+
+<h3>Appendix B — Proof of the Fokker–Planck Equation</h3>
+
+<div class="box connect">
+<span class="label">Unlocked by</span> Guide Part 8 (SDE formulation and Fokker–Planck).
+</div>
+
+<p>A self-contained, test-function proof using integration by parts. The key steps: (1) write the SDE update as a 2nd-order Taylor expansion of a test function; (2) take expectations; (3) identify divergence and Laplacian terms via integration by parts. Sufficiency follows from the uniqueness of parabolic PDEs. This is mathematically the most demanding appendix; treat it as optional unless you want the derivation rigour.</p>
+
+<h3>Appendix C — Existence and Uniqueness of CTMCs</h3>
+
+<div class="box connect">
+<span class="label">Unlocked by</span> §7 primer above.
+</div>
+
+<p>Proves Theorem 33 by casting the KFE as a linear ODE over the space of transition matrices, then invoking the ODE uniqueness theorem (Theorem 3). Existence follows from the fact that linear ODEs always have solutions. Read this if you want to understand why CTMCs are well-defined.</p>
+
+<h3>Appendix D — Additional Perspectives on VAEs</h3>
+
+<div class="box connect">
+<span class="label">Unlocked by</span> Guide Part 12 (VAEs, latent diffusion).
+</div>
+
+<p>Three supplementary viewpoints: (1) <strong>Proposition 3</strong> (chain rule for KL divergences) underpins the data-processing inequality and shows why the VAE loss is an upper bound on the data-distribution KL. (2) <strong>Remarks 42–44</strong> analyse what happens at perfect training and connect to the ELBO (evidence lower bound). (3) <strong>The division-of-labour discussion</strong> (Intuition 44) explains the rate–distortion tradeoff: the VAE must balance compression (easy latents for the generative model) against reconstruction fidelity. This tradeoff is why modern latent diffusion models use a small KL weight \(\beta\ll 1\).</p>
+
+<h3>Appendix E — A Guide to the Diffusion Model Literature (Summary 45)</h3>
+
+<div class="box connect">
+<span class="label">Unlocked by</span> All guide parts together.
+</div>
+
+<p>An invaluable Rosetta Stone for the broader literature. <strong>Summary 45</strong> catalogues the most common notational differences: (1) discrete-time DDPM vs. continuous-time SDE; (2) inverted time convention (\(t=0\) means data, \(t=1\) means noise — the reverse of the notes' convention); (3) "forward process" as a concrete way to construct a Gaussian probability path; (4) time-reversal SDEs (Anderson 1982) versus the Fokker–Planck approach used in this class. After this appendix you should be able to map any paper from the DDPM/DDIM/Song et al./Lipman et al./Liu et al. family back to the unified notation of the notes.</p>
+
+<!-- ============================================================
+     WHERE TO GO NEXT
+     ============================================================ -->
+<h2>Where to Go Next</h2>
+
+<div class="box intuition">
+<span class="label">Original papers (read in this order)</span>
+<ol>
+<li><strong>DDPM</strong> — Ho, Jain, Abbeel (NeurIPS 2020). The original denoising diffusion paper; uses discrete time and noise-prediction parameterisation.</li>
+<li><strong>DDIM</strong> — Song, Meng, Ermon (ICLR 2021). Derives deterministic sampling from the DDPM objective; connects to the probability-flow ODE.</li>
+<li><strong>Score SDE</strong> — Song et al. (ICLR 2021, arXiv 2011.13456). The continuous-time unification; introduces the reverse SDE and the probability-flow ODE as a single framework.</li>
+<li><strong>Flow Matching</strong> — Lipman et al. (ICLR 2023, arXiv 2210.02747). The first flow-matching paper; introduces conditional probability paths and the CFM loss.</li>
+<li><strong>Rectified Flow</strong> — Liu, Gong, Liu (arXiv 2022.03003). Straight-line paths, reflow, and fast one-step sampling; backbone of SD3.</li>
+<li><strong>Stable Diffusion 3</strong> — Esser et al. (arXiv 2403.03206). MM-DiT + CondOT flow + latent space; 8B parameter image model.</li>
+<li><strong>Flow Matching Guide and Code</strong> — Lipman et al. (arXiv 2412.06264). The comprehensive companion; covers geometry, discrete spaces, and code examples.</li>
+</ol>
+</div>
+
+<div class="box connect">
+<span class="label">Your own repo</span>
+Check the <code>assignments/</code> folder in this repository for your KAIST assignment writeups. Re-reading your own derivations of the score-matching loss, DDPM's closed-form sampling, and the flow-matching training loop alongside the corresponding sections of the MIT notes is the most efficient way to consolidate both views. Your implementations are the ground truth — if a notation in the notes confuses you, trace it back to your own code.
+</div>
+
+<nav class="pagenav">
+  <a class="prev" href="part12_stable_diffusion.html"><span class="dir">‹ Prev</span>Part 12 — Stable Diffusion</a>
+  <a class="next" href="part14_discrete_diffusion.html"><span class="dir">Next ›</span>Part 14 — Discrete Diffusion</a>
+</nav>
+
+</article>
+</main>
+</div>
+<script defer src="assets/guide.js"></script>
+</body>
+</html>

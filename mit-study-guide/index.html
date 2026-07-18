@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diffusion Study Guide · First-Principles Companion to the MIT Notes</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [["\\(", "\\)"]], displayMath: [["\\[", "\\]"]], tags: "none" },
+    options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle contents">☰</button>
+<div class="layout">
+<nav class="toc">
+  <a href="index.html"><strong>◆ Diffusion Study Guide</strong></a>
+  <h2>Foundations</h2>
+  <a href="part00_math_foundations.html"><span class="part-num">0</span>Mathematical Foundations</a>
+  <a href="part01_differential_equations.html"><span class="part-num">1</span>Differential Equations</a>
+  <a href="part02_probability_stochastic.html"><span class="part-num">2</span>Probability &amp; Stochastic Processes</a>
+  <a href="part03_score_functions.html"><span class="part-num">3</span>Score Functions</a>
+  <h2>Diffusion Core</h2>
+  <a href="part04_diffusion_models.html"><span class="part-num">4</span>Diffusion Models (big picture)</a>
+  <a href="part05_ddpm.html"><span class="part-num">5</span>DDPM</a>
+  <a href="part06_ddim.html"><span class="part-num">6</span>DDIM</a>
+  <a href="part07_continuous_time.html"><span class="part-num">7</span>Continuous-Time Diffusion</a>
+  <h2>Continuous Formulation</h2>
+  <a href="part08_sde_formulation.html"><span class="part-num">8</span>SDE Formulation</a>
+  <a href="part09_probability_flow_ode.html"><span class="part-num">9</span>Probability Flow ODE</a>
+  <a href="part10_flow_matching.html"><span class="part-num">10</span>Flow Matching</a>
+  <a href="part11_rectified_flows.html"><span class="part-num">11</span>Rectified Flows</a>
+  <h2>Systems &amp; Reading</h2>
+  <a href="part12_stable_diffusion.html"><span class="part-num">12</span>Stable Diffusion</a>
+  <a href="part13_reading_the_notes.html"><span class="part-num">13</span>Reading the MIT Notes</a>
+  <a href="part14_discrete_diffusion.html"><span class="part-num">14</span>Discrete Diffusion</a>
+</nav>
+<main>
+<article>
+
+<div class="cover">
+<h1><span class="kicker">First-Principles Companion</span>An Introduction to Flow Matching &amp; Diffusion Models</h1>
+<p class="muted">A from-zero study guide for the MIT 6.S183 / 2026 lecture notes by
+Peter Holderrieth &amp; Ezra Erives. Built to teach you <em>everything required to
+truly understand the notes</em> — not to summarize them.</p>
+<div class="badge-row">
+<span class="badge">intuition first</span>
+<span class="badge">every symbol explained</span>
+<span class="badge">runnable PyTorch</span>
+<span class="badge">recursive prerequisites</span>
+<span class="badge">MathJax</span>
+</div>
+</div>
+
+<div class="box intuition">
+<span class="label">Who this is for</span>
+You know basic linear algebra, basic probability, and a little PyTorch. You have
+<em>no</em> background in differential equations, ODEs/SDEs, measure theory,
+stochastic processes, score matching, or variational inference. This guide assumes
+exactly that and builds every missing piece before it is used.
+</div>
+
+<h2>How to use this guide</h2>
+<ul>
+<li><strong>Read in order.</strong> Each part assumes only the parts before it. Part 0
+is pure prerequisites; by Part 13 you are reading the original notes line by line.</li>
+<li><strong>Colored boxes have fixed meanings.</strong>
+<span style="color:#2f6fb0;font-weight:600">Intuition</span> (the mental picture),
+<span style="color:#8a6d2f;font-weight:600">Math</span> (the formal object + equation
+breakdown), <span style="color:#9a6b00;font-weight:600">Watch out</span> (a common
+confusion), <span style="color:#7d54b3;font-weight:600">Connection</span> (where this
+returns later), and <span style="color:#2e7d4f;font-weight:600">Prerequisite</span>
+(a concept we pause to teach from scratch).</li>
+<li><strong>Run the code.</strong> Every major idea ends with the smallest possible
+PyTorch snippet, heavily commented, with the expected output written inline.</li>
+<li><strong>Equations are never dropped on you.</strong> Each one gets an
+<em>Equation Breakdown</em>: what every symbol means, its shape, and a geometric or
+probabilistic reading, derived step by step.</li>
+</ul>
+
+<h2>The learning path</h2>
+<div class="toc-grid">
+<a class="toc-card" href="part00_math_foundations.html"><span class="pn">PART 0</span><div class="pt">Mathematical Foundations</div><div class="pd">Vectors, functions of time, derivatives &amp; gradients, integrals, densities, expectation, the Gaussian, KL teaser.</div></a>
+<a class="toc-card" href="part01_differential_equations.html"><span class="pn">PART 1</span><div class="pt">Differential Equations</div><div class="pd">What an ODE is, vector fields &amp; flows, existence/uniqueness, Euler's method. Maps to notes §2.1.</div></a>
+<a class="toc-card" href="part02_probability_stochastic.html"><span class="pn">PART 2</span><div class="pt">Probability &amp; Stochastic Processes</div><div class="pd">Random vectors, Brownian motion, Wiener process, SDEs, Euler–Maruyama, the OU process. Notes §2.2 &amp; App. A.</div></a>
+<a class="toc-card" href="part03_score_functions.html"><span class="pn">PART 3</span><div class="pt">Score Functions</div><div class="pd">∇ₓ log pₜ(x) from scratch, the conversion formula, score reparameterization. Notes §4.1.</div></a>
+<a class="toc-card" href="part04_diffusion_models.html"><span class="pn">PART 4</span><div class="pt">Diffusion Models — big picture</div><div class="pd">Generation as sampling; the forward/reverse idea; how all the pieces fit. Notes §1.</div></a>
+<a class="toc-card" href="part05_ddpm.html"><span class="pn">PART 5</span><div class="pt">DDPM</div><div class="pd">The discrete forward chain, closed-form qₜ, the ELBO, the simple ε-prediction loss, training &amp; sampling.</div></a>
+<a class="toc-card" href="part06_ddim.html"><span class="pn">PART 6</span><div class="pt">DDIM</div><div class="pd">Non-Markovian forward, deterministic sampling, the η knob, fewer steps. Bridge to the ODE view.</div></a>
+<a class="toc-card" href="part07_continuous_time.html"><span class="pn">PART 7</span><div class="pt">Continuous-Time Diffusion</div><div class="pd">Taking the step size to zero; from chains to SDEs; the OU forward SDE. Notes §2.2 &amp; §4.2.</div></a>
+<a class="toc-card" href="part08_sde_formulation.html"><span class="pn">PART 8</span><div class="pt">SDE Formulation</div><div class="pd">Forward &amp; reverse SDEs, the SDE extension trick, Fokker–Planck. Notes §4.2 &amp; App. B.</div></a>
+<a class="toc-card" href="part09_probability_flow_ode.html"><span class="pn">PART 9</span><div class="pt">Probability Flow ODE</div><div class="pd">The deterministic ODE with the same marginals as the SDE; score → velocity. Notes §4.2.</div></a>
+<a class="toc-card" href="part10_flow_matching.html"><span class="pn">PART 10</span><div class="pt">Flow Matching</div><div class="pd">Conditional/marginal paths &amp; vector fields, the marginalization trick, continuity equation, CFM loss. Notes §3.</div></a>
+<a class="toc-card" href="part11_rectified_flows.html"><span class="pn">PART 11</span><div class="pt">Rectified Flows</div><div class="pd">Straight-line paths, reflow, why straightening enables one-step sampling.</div></a>
+<a class="toc-card" href="part12_stable_diffusion.html"><span class="pn">PART 12</span><div class="pt">Stable Diffusion</div><div class="pd">VAEs &amp; latent space, DiT/U-Net, conditioning, classifier-free guidance, SD3 &amp; Movie Gen. Notes §5 &amp; §6.</div></a>
+<a class="toc-card" href="part13_reading_the_notes.html"><span class="pn">PART 13</span><div class="pt">Reading the MIT Notes</div><div class="pd">A section-by-section reading companion: where each theorem/algorithm sits and which part of this guide unlocks it.</div></a>
+<a class="toc-card" href="part14_discrete_diffusion.html"><span class="pn">PART 14</span><div class="pt">Discrete Diffusion</div><div class="pd">Continuous-time Markov chains, rate matrices, the discrete marginalization trick, masked diffusion language models. Notes §7.</div></a>
+</div>
+
+<div class="box warn">
+<span class="label">One thing to know before you start: ordering</span>
+The MIT notes are <strong>flow-matching-first</strong>: they treat vector fields,
+ODEs, and flows as the primary object and <em>derive</em> diffusion and scores from
+them. This guide instead walks the historically intuitive <strong>DDPM-first</strong>
+road (Parts 4–9) and then arrives at flow matching (Part 10) as the clean
+generalization. Both reach the same destination. Throughout, each part flags the
+exact notes section it grounds in, so you can read the two side by side.
+</div>
+
+<div class="box connect">
+<span class="label">Source</span>
+Grounded in the official notes: <em>An Introduction to Flow Matching and Diffusion
+Models</em>, diffusion.csail.mit.edu/2026. Equations and theorem numbers referenced
+throughout match that PDF.
+</div>
+
+<nav class="pagenav">
+  <a class="prev" href="index.html"><span class="dir">You are here</span>Guide overview</a>
+  <a class="next" href="part00_math_foundations.html"><span class="dir">Start ›</span>Part 0 — Mathematical Foundations</a>
+</nav>
+
+</article>
+</main>
+</div>
+<script defer src="assets/guide.js"></script>
+</body>
+</html>

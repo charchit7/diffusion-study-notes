@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Part 9 — Probability Flow ODE · Diffusion Study Guide</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [["\\(", "\\)"]], displayMath: [["\\[", "\\]"]], tags: "none" },
+    options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle contents">☰</button>
+<div class="layout">
+<nav class="toc">
+  <a href="index.html"><strong>◆ Diffusion Study Guide</strong></a>
+  <h2>Foundations</h2>
+  <a href="part00_math_foundations.html"><span class="part-num">0</span>Mathematical Foundations</a>
+  <a href="part01_differential_equations.html"><span class="part-num">1</span>Differential Equations</a>
+  <a href="part02_probability_stochastic.html"><span class="part-num">2</span>Probability &amp; Stochastic Processes</a>
+  <a href="part03_score_functions.html"><span class="part-num">3</span>Score Functions</a>
+  <h2>Diffusion Core</h2>
+  <a href="part04_diffusion_models.html"><span class="part-num">4</span>Diffusion Models (big picture)</a>
+  <a href="part05_ddpm.html"><span class="part-num">5</span>DDPM</a>
+  <a href="part06_ddim.html"><span class="part-num">6</span>DDIM</a>
+  <a href="part07_continuous_time.html"><span class="part-num">7</span>Continuous-Time Diffusion</a>
+  <h2>Continuous Formulation</h2>
+  <a href="part08_sde_formulation.html"><span class="part-num">8</span>SDE Formulation</a>
+  <a href="part09_probability_flow_ode.html"><span class="part-num">9</span>Probability Flow ODE</a>
+  <a href="part10_flow_matching.html"><span class="part-num">10</span>Flow Matching</a>
+  <a href="part11_rectified_flows.html"><span class="part-num">11</span>Rectified Flows</a>
+  <h2>Systems &amp; Reading</h2>
+  <a href="part12_stable_diffusion.html"><span class="part-num">12</span>Stable Diffusion</a>
+  <a href="part13_reading_the_notes.html"><span class="part-num">13</span>Reading the MIT Notes</a>
+  <a href="part14_discrete_diffusion.html"><span class="part-num">14</span>Discrete Diffusion</a>
+</nav>
+<main>
+<article>
+
+<h1><span class="kicker">Part 9</span>The Probability Flow ODE</h1>
+
+<div class="box prereq">
+  <span class="label">Prerequisites</span>
+  You need Parts 1–8: ODEs and Euler integration, SDEs and Brownian motion, score functions, DDPM, DDIM, continuous-time forward SDE, and the reverse-time SDE plus the SDE Extension Trick (Theorem 17 in the MIT notes: a family of SDEs all sharing the same marginals \(p_t\)).
+</div>
+
+<!-- ============================================================ -->
+<h2>9.1 The Core Intuition: Two Ways to Carry a Crowd</h2>
+
+<p>Imagine you have a huge crowd of particles, each evolving under an SDE.  Every particle jitters randomly — nudged left, nudged right — but the <em>crowd density</em> \(p_t(x)\) moves in a predictable way.  From Part 8 you know that many different SDEs (different noise levels \(\sigma_t\)) can produce the exact same sequence of densities \(p_0, p_1, \ldots\)</p>
+
+<p>Now push the noise to zero: \(\sigma_t \to 0\).  The jitter disappears.  What is left?  A <em>pure drift</em> — a vector field that pushes particles smoothly, like streamlines in a river, and yet still reproduces every \(p_t\).  That smooth, deterministic flow is the <strong>Probability Flow ODE (PF-ODE)</strong>.</p>
+
+<div class="box intuition">
+  <span class="label">Intuition</span>
+  <strong>SDE sampling</strong>: a swarm of molecules jittering randomly; the cloud shape evolves correctly because drift + noise conspire.<br>
+  <strong>PF-ODE sampling</strong>: fluid streamlines — no jitter at all; each particle follows a deterministic path; the density field is identical to the SDE's at every time \(t\).
+</div>
+
+<p>Why does this matter?  Because <em>deterministic</em> flows are invertible, differentiable, and compatible with high-order numerical solvers.  Random trajectories are not.  The PF-ODE unlocks: exact likelihoods, latent-space interpolation, and fast few-step sampling — all from the same trained score network.</p>
+
+<!-- ============================================================ -->
+<h2>9.2 The PF-ODE: Full Equation and Symbol Table</h2>
+
+<p>Start from the general forward SDE used throughout the MIT notes:</p>
+\[
+dx = f(x,t)\,dt + g(t)\,dW_t
+\]
+
+<table class="symbols">
+  <thead><tr><th>Symbol</th><th>Shape / Type</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td>\(x \in \mathbb{R}^d\)</td><td>vector</td><td>particle position (pixel values, latent, …)</td></tr>
+    <tr><td>\(t \in [0,1]\)</td><td>scalar</td><td>time; \(t=0\) is data, \(t=1\) is noise</td></tr>
+    <tr><td>\(f(x,t)\)</td><td>\(\mathbb{R}^d\)</td><td>drift of the forward SDE (e.g. \(-x/2\) for VP)</td></tr>
+    <tr><td>\(g(t)\)</td><td>scalar \(\geq 0\)</td><td>diffusion coefficient of the forward SDE</td></tr>
+    <tr><td>\(dW_t\)</td><td>\(\mathbb{R}^d\)</td><td>Brownian motion increment (infinitesimal Gaussian noise)</td></tr>
+    <tr><td>\(p_t(x)\)</td><td>scalar density</td><td>marginal density of \(x\) at time \(t\) under the forward SDE</td></tr>
+    <tr><td>\(\nabla_x \log p_t(x)\)</td><td>\(\mathbb{R}^d\)</td><td>score function — points toward higher density</td></tr>
+  </tbody>
+</table>
+
+<div class="box mathblock">
+  <span class="label">Theorem (Probability Flow ODE)</span>
+  Given the forward SDE above with marginals \(p_t\), the ODE
+  \[
+  \frac{dx}{dt} = \underbrace{f(x,t)}_{\text{forward drift}} - \underbrace{\tfrac{1}{2}g(t)^2\,\nabla_x \log p_t(x)}_{\text{score correction}}
+  \]
+  has <strong>exactly the same time-marginals</strong> \(p_t\) for all \(t \in [0,1]\).
+</div>
+
+<p>Read the equation term by term:</p>
+<ul>
+  <li><strong>\(f(x,t)\)</strong> — the same drift the forward SDE uses to push data toward noise.  When we run the ODE <em>backward</em> (\(t: 1 \to 0\)) this drift works in reverse, pulling noise back toward data.</li>
+  <li><strong>\(-\tfrac{1}{2}g(t)^2 \nabla_x \log p_t(x)\)</strong> — a correction that steers particles toward high-density regions.  The coefficient is <em>exactly half</em> the score term in the reverse-time SDE.</li>
+</ul>
+
+<div class="box warn">
+  <span class="label">Contrast with the Reverse SDE (Part 8)</span>
+  The reverse-time SDE is:
+  \[
+  dx = \bigl[f(x,t) - g(t)^2\,\nabla_x \log p_t(x)\bigr]dt + g(t)\,d\bar{W}_t
+  \]
+  The PF-ODE has the <strong>same functional form</strong> but with <strong>half the score coefficient</strong> (\(\tfrac{1}{2}\) vs \(1\)) and <strong>no noise term</strong>.  Same density evolution; totally different trajectory statistics.
+</div>
+
+<!-- ============================================================ -->
+<h2>9.3 Why Exactly Half? The Fokker–Planck Derivation</h2>
+
+<p>This is the key algebraic insight.  We will trace it carefully.</p>
+
+<p><strong>Step 1 — Fokker–Planck for the forward SDE.</strong>  From Part 8 (Theorem 19 in the notes), the marginal density \(p_t\) satisfies the Fokker–Planck equation:</p>
+\[
+\partial_t p_t = -\nabla \cdot (f\, p_t) + \tfrac{1}{2}g^2 \Delta p_t
+\]
+
+<table class="symbols">
+  <thead><tr><th>Symbol</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td>\(\nabla \cdot v\)</td><td>divergence of vector field \(v\): \(\sum_i \partial_{x_i} v_i\)</td></tr>
+    <tr><td>\(\Delta p\)</td><td>Laplacian: \(\sum_i \partial^2_{x_i} p\)</td></tr>
+  </tbody>
+</table>
+
+<p><strong>Step 2 — The key identity: rewrite the Laplacian as a divergence.</strong>  For any smooth density \(p\):</p>
+\[
+\Delta p = \nabla \cdot (\nabla p) = \nabla \cdot \bigl(p \,\nabla \log p\bigr)
+\]
+<p>The second equality uses \(\nabla \log p = \nabla p / p\), so \(p \nabla \log p = \nabla p\).  This is the crucial step: it converts the second-order Laplacian term into a first-order divergence involving the score.</p>
+
+<p><strong>Step 3 — Substitute back into Fokker–Planck:</strong></p>
+\[
+\partial_t p_t = -\nabla \cdot (f\, p_t) + \tfrac{1}{2}g^2\,\nabla \cdot (p_t\,\nabla \log p_t)
+\]
+\[
+= -\nabla \cdot \Bigl(f\, p_t - \tfrac{1}{2}g^2\, p_t\,\nabla \log p_t\Bigr)
+\]
+\[
+= -\nabla \cdot \Bigl(\underbrace{(f - \tfrac{1}{2}g^2\,\nabla \log p_t)}_{v_{\text{PF}}} \cdot p_t\Bigr)
+\]
+
+<p><strong>Step 4 — Recognize the Continuity Equation.</strong>  The result is:</p>
+\[
+\partial_t p_t = -\nabla \cdot (v_{\text{PF}}\, p_t)
+\]
+
+<div class="box mathblock">
+  <span class="label">Theorem 11 (Continuity Equation — MIT Notes)</span>
+  A vector field \(v_t(x)\) generates the density evolution \(p_t\) if and only if
+  \[
+  \partial_t p_t(x) = -\nabla \cdot \bigl(v_t(x)\,p_t(x)\bigr)
+  \]
+  This is a <em>pure transport equation</em>: no second-order terms, no noise.  It describes a deterministic ODE \(\dot x = v_t(x)\) whose particles carry density \(p_t\).
+</div>
+
+<p>So \(v_{\text{PF}} = f - \tfrac{1}{2}g^2\,\nabla \log p_t\) satisfies the continuity equation — hence the ODE \(\dot x = v_{\text{PF}}\) has marginals \(p_t\).  The half comes from splitting the Fokker–Planck Laplacian term evenly into the drift, leaving a pure divergence form.  One full copy of the score would over-correct and break the density match.</p>
+
+<div class="box intuition">
+  <span class="label">Why half, one more way to see it</span>
+  The reverse SDE uses a full \(g^2\nabla\log p_t\) score to <em>both</em> reverse the drift <em>and</em> cancel the diffusion.  The PF-ODE only needs to reverse the drift; it adds no diffusion, so it only needs half the score to account for what the forward SDE's diffusion would have contributed.
+</div>
+
+<!-- ============================================================ -->
+<h2>9.4 Consequences and Why Each Matters</h2>
+
+<div class="box mathblock">
+  <span class="label">Consequence 1 — Exact Likelihoods via CNF</span>
+  Because the PF-ODE is a deterministic, invertible map \(x_1 \leftrightarrow x_0\), it is a <strong>Continuous Normalizing Flow (CNF)</strong>.  The log-likelihood of a data point \(x_0\) is:
+  \[
+  \log p_0(x_0) = \log p_1(x_1) + \int_0^1 \nabla \cdot v_{\text{PF}}(x_t, t)\,dt
+  \]
+  (continuous change-of-variables / instantaneous change of variables formula).  Practical use: model evaluation, anomaly detection, latent-space editing (encode \(x_0 \to x_1\), perturb in latent space, decode \(x_1 \to x_0\)).
+</div>
+
+<div class="box mathblock">
+  <span class="label">Consequence 2 — High-Order / Adaptive Solvers</span>
+  Because there is no noise, high-order Runge–Kutta methods and adaptive step-size solvers work without modification.  In practice this means 10–20 function evaluations instead of 1000 DDPM steps.  <strong>DPM-Solver</strong> exploits the specific exponential-integrator structure of the PF-ODE to get even higher accuracy.  (This connects back to Part 1: higher-order ODE methods.)
+</div>
+
+<div class="box connect">
+  <span class="label">Consequence 3 — DDIM is the PF-ODE (the unifying punchline)</span>
+  From Part 6: DDIM with \(\eta=0\) is deterministic.  It turns out DDIM (\(\eta=0\)) is <em>exactly</em> a first-order Euler discretization of the PF-ODE.  Recall from Part 5 (DDPM) that the discrete reverse step has a noise term scaled by \(\eta\); setting \(\eta=0\) kills that noise, leaving only the drift correction — precisely the PF-ODE velocity evaluated with the network prediction.  So Parts 5–9 converge to one picture: <em>DDPM adds noise (SDE), DDIM removes it (ODE), and the continuous limit of DDIM is the PF-ODE.</em>
+</div>
+
+<!-- ============================================================ -->
+<h2>9.5 Plugging in the Neural Network</h2>
+
+<p>The score \(\nabla_x \log p_t(x)\) is the only quantity we cannot compute analytically at test time.  From Part 3, you learned the three equivalent parameterizations of the learned denoiser (the "score-epsilon-x0 triangle"):</p>
+
+<table class="symbols">
+  <thead><tr><th>Parameterization</th><th>Network output</th><th>Score via network</th></tr></thead>
+  <tbody>
+    <tr><td>Score network \(s_\theta(x,t)\)</td><td>\(\approx \nabla_x \log p_t(x)\)</td><td>directly \(s_\theta(x,t)\)</td></tr>
+    <tr>
+      <td>Noise network \(\epsilon_\theta(x,t)\)</td>
+      <td>\(\approx \epsilon\) (noise added)</td>
+      <td>\(-\epsilon_\theta(x,t)/\sigma_t\) where \(\sigma_t = \beta_t\) (std of forward noise)</td>
+    </tr>
+    <tr>
+      <td>Denoiser \(D_\theta(x,t)\)</td>
+      <td>\(\approx \mathbb{E}[x_0 \mid x_t]\)</td>
+      <td>\((D_\theta(x,t) - x/\alpha_t) / \beta_t^2 \cdot \alpha_t\) (per Tweedie)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Substituting the noise-network parameterization (most common in practice) into the PF-ODE drift:</p>
+\[
+\frac{dx}{dt} = f(x,t) + \frac{g(t)^2}{2\,\sigma_t}\,\epsilon_\theta(x,t)
+\]
+<p>For the VP-SDE / DDPM noise schedule (\(f(x,t) = -\tfrac{1}{2}\beta_t x\), \(g(t) = \sqrt{\beta_t}\), \(\sigma_t = \beta_t\) in the convention of the notes) this further simplifies, and discretizing with Euler gives exactly the DDIM (\(\eta=0\)) update — closing the loop.</p>
+
+<!-- ============================================================ -->
+<h2>9.6 Toy 1-D Example: What the PF-ODE Looks Like</h2>
+
+<p>Before the code, let us trace through a one-dimensional Gaussian example by hand.</p>
+
+<p><strong>Setup.</strong>  Let the data distribution be \(p_0 = \mathcal{N}(2, 0.5^2)\).  Use the simple VP-like forward process \(x_t = \alpha_t x_0 + \beta_t \epsilon\) with \(\alpha_t = 1-t\), \(\beta_t = t\), so \(p_t(\cdot) = \mathcal{N}((1-t)\mu_0,\; (1-t)^2\sigma_0^2 + t^2)\).  The forward SDE has \(f(x,t) = -x/(1-t)\) and \(g(t) = \sqrt{2t/(1-t)}\) (approximately; for the toy we just use the analytic score directly).</p>
+
+<p><strong>Analytic score.</strong>  Since \(p_t = \mathcal{N}(\mu_t, \sigma_t^2)\):</p>
+\[
+\nabla_x \log p_t(x) = -\frac{x - \mu_t}{\sigma_t^2}
+\]
+
+<p><strong>PF-ODE velocity at time \(t\).</strong>  Plug into \(v_{\text{PF}} = f - \tfrac{1}{2}g^2\nabla\log p_t\).  Because we have the analytic score we can integrate this ODE exactly from \(t=1\) (pure noise \(\mathcal{N}(0,1)\)) to \(t=0\) (approximate data \(\approx \mathcal{N}(2,0.25)\)).</p>
+
+<!-- ============================================================ -->
+<h2>9.7 Runnable PyTorch: PF-ODE on a 1-D Gaussian</h2>
+
+<pre><code><span class="code-comment"># teaching code, not security-sensitive RNG</span>
+<span class="code-comment"># Part 9 — Probability Flow ODE demo (1-D Gaussian, analytic score)</span>
+<span class="code-comment"># Run: python part09_demo.py</span>
+
+import torch
+
+torch.manual_seed(0)   <span class="code-comment"># deterministic throughout</span>
+
+<span class="code-comment"># ── Data distribution: p_0 = N(mu0, sigma0^2) ──────────────────────────</span>
+mu0    = 2.0
+sigma0 = 0.5
+N      = 2000          <span class="code-comment"># number of particles</span>
+
+<span class="code-comment"># ── Noise schedule: alpha_t = 1-t, beta_t = t  ─────────────────────────</span>
+<span class="code-comment">#   Marginal at time t:  p_t = N( (1-t)*mu0,  (1-t)^2*sigma0^2 + t^2 )</span>
+def marginal_params(t):
+    alpha_t = 1.0 - t
+    mu_t    = alpha_t * mu0
+    var_t   = (alpha_t ** 2) * (sigma0 ** 2) + t ** 2
+    return mu_t, var_t
+
+<span class="code-comment"># ── Analytic score:  ∇_x log p_t(x) = -(x - mu_t) / var_t ─────────────</span>
+def score(x, t):
+    mu_t, var_t = marginal_params(t)
+    return -(x - mu_t) / var_t   <span class="code-comment"># shape: (N,)</span>
+
+<span class="code-comment"># ── PF-ODE velocity: v_PF = f(x,t) - 0.5 * g(t)^2 * score(x,t) ────────</span>
+<span class="code-comment">#   For our schedule: f(x,t) = -x/(1-t+1e-6),  g(t)^2 = 2*t/(1-t+1e-6)</span>
+def pf_ode_velocity(x, t):
+    eps    = 1e-6                 <span class="code-comment"># numerical safety near t=1</span>
+    denom  = 1.0 - t + eps
+    f_xt   = -x / denom           <span class="code-comment"># forward SDE drift</span>
+    g2_t   = 2.0 * t / denom      <span class="code-comment"># g(t)^2</span>
+    s      = score(x, t)          <span class="code-comment"># analytic score</span>
+    return f_xt - 0.5 * g2_t * s  <span class="code-comment"># PF-ODE velocity (eq. in §9.2)</span>
+
+<span class="code-comment"># ── Euler integration from t=1 (noise) to t=0 (data) ───────────────────</span>
+<span class="code-comment">#   We reverse time: run t from 1 → 0 with step dt = -1/T</span>
+T      = 500
+dt     = -1.0 / T                 <span class="code-comment"># negative because we go backward</span>
+t_grid = torch.linspace(1.0, 0.0, T + 1)
+
+<span class="code-comment"># Start from noise at t=1: x_1 ~ N(0, 1)  [p_1 ≈ N(0,1) for our schedule]</span>
+x = torch.randn(N)               <span class="code-comment"># shape: (N,)</span>
+x1_stored = x.clone()            <span class="code-comment"># save to prove determinism</span>
+
+for i in range(T):
+    t_val = t_grid[i].item()
+    v     = pf_ode_velocity(x, t_val)
+    x     = x + v * dt            <span class="code-comment"># Euler step (Part 1)</span>
+                                   <span class="code-comment"># dt is negative → moves backward in time</span>
+
+<span class="code-comment"># ── Results ─────────────────────────────────────────────────────────────</span>
+print(f"Target  mu0={mu0:.3f}  sigma0={sigma0:.3f}")
+print(f"PF-ODE  mean={x.mean():.3f}  std={x.std():.3f}")
+<span class="code-comment"># Expected output (approx):
+#   Target  mu0=2.000  sigma0=0.500
+#   PF-ODE  mean=1.998  std=0.501</span>
+
+<span class="code-comment"># ── Determinism check: same x_1 → same x_0 every time ──────────────────</span>
+x_run2 = x1_stored.clone()
+for i in range(T):
+    t_val   = t_grid[i].item()
+    v       = pf_ode_velocity(x_run2, t_val)
+    x_run2  = x_run2 + v * dt
+
+print(f"Max diff between two runs: {(x - x_run2).abs().max():.2e}")
+<span class="code-comment"># Expected output:
+#   Max diff between two runs: 0.00e+00   ← perfectly deterministic</span>
+
+<span class="code-comment"># ── Compare to reverse-SDE (stochastic) from the same x_1 ──────────────</span>
+torch.manual_seed(0)
+x_sde = x1_stored.clone()
+sigma_noise = 0.1                  <span class="code-comment"># free σ_t parameter (SDE Extension Trick)</span>
+for i in range(T):
+    t_val  = t_grid[i].item()
+    eps2   = 1e-6
+    denom  = 1.0 - t_val + eps2
+    g2_t   = 2.0 * t_val / denom
+    f_xt   = -x_sde / denom
+    s      = score(x_sde, t_val)
+    <span class="code-comment"># Reverse-SDE drift: f - g^2 * score  (full coefficient, Part 8)</span>
+    drift  = f_xt - g2_t * s
+    noise  = sigma_noise * torch.randn(N) * abs(dt) ** 0.5
+    x_sde  = x_sde + drift * dt + noise
+
+print(f"Rev-SDE mean={x_sde.mean():.3f}  std={x_sde.std():.3f}")
+<span class="code-comment"># Expected output (approximate — stochastic):
+#   Rev-SDE mean=1.997  std=0.503   ← same density, different trajectories</span>
+
+<span class="code-comment"># Key takeaway: PF-ODE and reverse-SDE reach the same p_0 but</span>
+<span class="code-comment"># PF-ODE is deterministic (same x_1 → same x_0 every run).</span>
+</code></pre>
+
+<!-- ============================================================ -->
+<h2>9.8 The PF-ODE and the Score-\(\epsilon\)-\(x_0\) Triangle</h2>
+
+<p>In practice we never have the analytic score.  The trained network \(\epsilon_\theta\) provides it.  Recall from Part 3 that for a Gaussian forward process with \(x_t = \alpha_t x_0 + \beta_t \epsilon\):</p>
+\[
+\nabla_x \log p_t(x) \approx -\frac{\epsilon_\theta(x,t)}{\beta_t}
+\]
+
+<p>Substitute into the PF-ODE:</p>
+\[
+\frac{dx}{dt} = f(x,t) + \frac{g(t)^2}{2\beta_t}\,\epsilon_\theta(x,t)
+\]
+
+<p>This is the form actually used during inference.  The entire reverse generative process is now a single deterministic ODE whose velocity field is parameterized by the noise-prediction network — the very same network trained by the DDPM objective.</p>
+
+<div class="box connect">
+  <span class="label">Where the MIT Notes Cover This</span>
+  <ul>
+    <li><strong>Theorem 17 (SDE Extension Trick, §4.2)</strong> — the full family of SDEs with equal marginals; the PF-ODE is the \(\sigma_t = 0\) member.</li>
+    <li><strong>Theorem 19 (Fokker–Planck, §4.2)</strong> — the Laplacian identity \(\Delta p = \nabla\cdot(p\nabla\log p)\) is used in the proof, lines 699–723.</li>
+    <li><strong>Theorem 11 (Continuity Equation, §3.2)</strong> — the pure-transport equation that the PF-ODE drift satisfies.</li>
+    <li><strong>Proposition 1 (Conversion formula, §4.1)</strong> — the score ↔ vector field ↔ denoiser triangle for Gaussian paths.</li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>9.9 Foreshadow: Flow Matching Is the Direct Route</h2>
+
+<div class="box connect">
+  <span class="label">Bridge to Part 10 — Flow Matching</span>
+  <p>The PF-ODE shows that diffusion models <em>implicitly</em> define a vector field \(v_{\text{PF}} = f - \tfrac{1}{2}g^2\nabla\log p_t\) via the score.  To sample, we integrate this vector field.</p>
+  <p><strong>Flow Matching</strong> (Part 10) asks: why take the long route through scores and SDEs?  Just construct the target vector field directly and train a network to match it.  The PF-ODE velocity is exactly what flow matching calls the <em>marginal vector field</em> \(u_t^{\text{target}}(x)\) — defined by the continuity equation (Theorem 11) and learned by regressing against conditional velocities.</p>
+  <p>In other words: <em>diffusion gives a vector field as a byproduct of learning a score; flow matching makes learning that vector field the primary objective.</em>  The math is the same; the training recipe is simpler and more stable.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>9.10 Checkpoint</h2>
+
+<p>Work through these before moving to Part 10.  If any answer feels shaky, re-read the relevant section above.</p>
+
+<ol>
+  <li>Write the PF-ODE from memory.  Identify every symbol without looking at the table.</li>
+  <li>Why is the score coefficient \(\tfrac{1}{2}g^2\) rather than \(g^2\)?  Reproduce the three-step Fokker–Planck derivation in your own notation.</li>
+  <li>State Theorem 11 (Continuity Equation).  Why is it a necessary and sufficient condition for the ODE to transport density \(p_t\)?</li>
+  <li>What is the key algebraic identity that lets us rewrite the Laplacian \(\Delta p\) as a divergence involving the score?</li>
+  <li>In what sense is DDIM (\(\eta=0\)) a discretization of the PF-ODE?  Which Part taught DDIM?</li>
+  <li>List three practical advantages of the PF-ODE over the reverse SDE.</li>
+  <li>If you double the diffusion coefficient \(g(t) \to 2g(t)\) in the forward SDE, how does the PF-ODE change?</li>
+  <li>In the toy PyTorch example, why does running the PF-ODE twice from the same \(x_1\) produce bit-identical results while the reverse SDE does not?</li>
+  <li>What does the SDE Extension Trick (Theorem 17) say, and how does the PF-ODE fit into it?</li>
+  <li>How does Flow Matching relate to the PF-ODE?  What does it skip?</li>
+</ol>
+
+<nav class="pagenav">
+  <a class="prev" href="part08_sde_formulation.html"><span class="dir">‹ Prev</span>Part 8 — SDE Formulation</a>
+  <a class="next" href="part10_flow_matching.html"><span class="dir">Next ›</span>Part 10 — Flow Matching</a>
+</nav>
+
+</article>
+</main>
+</div>
+<script defer src="assets/guide.js"></script>
+</body>
+</html>

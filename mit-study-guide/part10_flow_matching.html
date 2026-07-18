@@ -129,7 +129,7 @@ p_1(x) = \int \delta_z(x)\, p_{\text{data}}(z)\, dz = p_{\text{data}}(x)
 <p>So the marginal path automatically interpolates from noise to data — exactly what we need.</p>
 </div>
 
-<h3>The Gaussian CondOT Path (Example 13 / Algorithm 3)</h3>
+<h3>The Gaussian CondOT Path (Example 8 / Algorithm 3)</h3>
 
 <div class="box intuition">
 <span class="label">Mental picture</span>
@@ -416,7 +416,7 @@ u_t^{\text{target}}(x) \;=\; \int u_t^{\text{target}}(x|z)\, \frac{p_t(x|z)\, p_
 \[
 u_t^{\text{FM}}(x) = \dot\alpha_t \hat{z}_\theta(x,t) + \dot\sigma_t \hat\varepsilon_\theta(x,t)
 \]
-<p>where \(\hat z_\theta\) is the denoised data prediction and \(\hat\varepsilon_\theta\) is the noise prediction. For the CondOT path this becomes \(u_t^{\text{FM}} = \hat z_\theta - \hat\varepsilon_\theta = \hat z_\theta - \hat\varepsilon_\theta\), a constant-velocity straight line.</p>
+<p>where \(\hat z_\theta\) is the denoised data prediction and \(\hat\varepsilon_\theta\) is the noise prediction. For the CondOT path this becomes \(u_t^{\text{FM}} = \hat z_\theta - \hat\varepsilon_\theta\), a constant-velocity straight line.</p>
 <p><strong>The key insight:</strong> The PF-ODE from Part 9 and the FM ODE are the same mathematical object when trained correctly. Flow matching is simply the cleanest, most direct way to <em>train</em> a PF-ODE velocity field — no SDE, no Tweedie's formula, no reverse process derivation needed. The CFM loss is a direct regression, the target is analytically known, and the training is simulation-free.</p>
 <p><strong>Why FM is preferred in practice:</strong></p>
 <ul>

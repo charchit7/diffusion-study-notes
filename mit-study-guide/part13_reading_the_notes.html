@@ -104,7 +104,7 @@ The notes live at <strong>diffusion.csail.mit.edu/2026</strong>. Keep this page 
 <tr>
   <td>§4.2 Sampling with SDEs — Thm 17, Ex 18, Thm 19 (Fokker–Planck), Rmk 20 (Langevin)</td>
   <td>Parts 8 &amp; 9</td>
-  <td>Any trained flow model becomes an SDE sampler for free by adding \(\sigma_t^2 \nabla\log p_t\) to the drift; the Fokker–Planck equation is the SDE analogue of the continuity equation.</td>
+  <td>Any trained flow model becomes an SDE sampler for free by adding \(\tfrac{\sigma_t^2}{2} \nabla\log p_t\) to the drift; the Fokker–Planck equation is the SDE analogue of the continuity equation.</td>
 </tr>
 <tr>
   <td>§4.3 Score Matching — Thm 22, Alg 4</td>
@@ -253,7 +253,7 @@ The notes live at <strong>diffusion.csail.mit.edu/2026</strong>. Keep this page 
 <tr>
   <td>\(\tilde{u}_t(x|y)\)</td>
   <td>CFG-scaled guided vector field</td>
-  <td>"CFG field" in guide Part 12; \(= (1+w)u_t^\theta(x|y) - w\,u_t^\theta(x|\emptyset)\)</td>
+  <td>"CFG field" in guide Part 12; \(= (1-w)\,u_t^\theta(x|\emptyset) + w\,u_t^\theta(x|y) = u_t^\theta(x|\emptyset) + w\,(u_t^\theta(x|y) - u_t^\theta(x|\emptyset))\); \(w=1\) is the plain conditional field. (Some papers use the other convention \((1+w)u_{\text{cond}} - w\,u_{\text{uncond}}\), i.e. \(w \mapsto 1+w\).)</td>
 </tr>
 <tr>
   <td>\(Q_t(y|x)\)</td>
@@ -410,7 +410,7 @@ After reading §3.3 and §4.3 together you see that <em>flow matching and score 
 <span class="label">Unlocked by</span> Guide Part 12 (classifier-free guidance, CFG-CFM loss).
 </div>
 
-<p><strong>What it says.</strong> <strong>Remark 25</strong> clarifies terminology: "conditional" in the notes always means conditioning on a data point \(z\), while "guided" means conditioning on a prompt \(y\). This avoids overloading the word "conditional". <strong>§5.1 Vanilla guidance</strong> feeds \(y\) into the network alongside \(x\) and trains with the guided CFM objective Eq. (58); straightforward but empirically under-conditions on \(y\). <strong>§5.2 Classifier-free guidance</strong> derives CFG from Bayes' rule: the guided score decomposes into the unguided score plus \(\nabla\log p_t(y|x)\) (a classifier gradient). Scaling that classifier gradient by \(w>1\) amplifies adherence to \(y\). Rather than training a separate classifier, a single network is trained with both \(u_t^\theta(x|y)\) and \(u_t^\theta(x|\emptyset)\) using label-dropout probability \(\eta\). At inference, \(\tilde{u}_t=(1+w)u_t^\theta(x|y)-w\,u_t^\theta(x|\emptyset)\). The <strong>CFG-CFM objective</strong> (Summary 27) is the production-ready training loss. <strong>Remark 28</strong> notes that everything extends trivially to diffusion models by replacing \(u\) with \(\tilde{u}\) in Algorithm 2.</p>
+<p><strong>What it says.</strong> <strong>Remark 25</strong> clarifies terminology: "conditional" in the notes always means conditioning on a data point \(z\), while "guided" means conditioning on a prompt \(y\). This avoids overloading the word "conditional". <strong>§5.1 Vanilla guidance</strong> feeds \(y\) into the network alongside \(x\) and trains with the guided CFM objective Eq. (58); straightforward but empirically under-conditions on \(y\). <strong>§5.2 Classifier-free guidance</strong> derives CFG from Bayes' rule: the guided score decomposes into the unguided score plus \(\nabla\log p_t(y|x)\) (a classifier gradient). Scaling that classifier gradient by \(w>1\) amplifies adherence to \(y\). Rather than training a separate classifier, a single network is trained with both \(u_t^\theta(x|y)\) and \(u_t^\theta(x|\emptyset)\) using label-dropout probability \(\eta\). At inference, \(\tilde{u}_t=(1-w)\,u_t^\theta(x|\emptyset)+w\,u_t^\theta(x|y) = u_t^\theta(x|\emptyset)+w\,(u_t^\theta(x|y)-u_t^\theta(x|\emptyset))\), so \(w=1\) recovers the vanilla conditional field and \(w&gt;1\) extrapolates. The <strong>CFG-CFM objective</strong> (Summary 27) is the production-ready training loss. <strong>Remark 28</strong> notes that everything extends trivially to diffusion models by replacing \(u\) with \(\tilde{u}\) in Algorithm 2.</p>
 
 <div class="box warn">
 <span class="label">Watch out</span>
@@ -563,7 +563,7 @@ Just as continuous flow matching reduces to simple velocity regression (Algorith
 <li><strong>DDIM</strong> — Song, Meng, Ermon (ICLR 2021). Derives deterministic sampling from the DDPM objective; connects to the probability-flow ODE.</li>
 <li><strong>Score SDE</strong> — Song et al. (ICLR 2021, arXiv 2011.13456). The continuous-time unification; introduces the reverse SDE and the probability-flow ODE as a single framework.</li>
 <li><strong>Flow Matching</strong> — Lipman et al. (ICLR 2023, arXiv 2210.02747). The first flow-matching paper; introduces conditional probability paths and the CFM loss.</li>
-<li><strong>Rectified Flow</strong> — Liu, Gong, Liu (arXiv 2022.03003). Straight-line paths, reflow, and fast one-step sampling; backbone of SD3.</li>
+<li><strong>Rectified Flow</strong> — Liu, Gong, Liu (arXiv 2209.03003). Straight-line paths, reflow, and fast one-step sampling; backbone of SD3.</li>
 <li><strong>Stable Diffusion 3</strong> — Esser et al. (arXiv 2403.03206). MM-DiT + CondOT flow + latent space; 8B parameter image model.</li>
 <li><strong>Flow Matching Guide and Code</strong> — Lipman et al. (arXiv 2412.06264). The comprehensive companion; covers geometry, discrete spaces, and code examples.</li>
 </ol>

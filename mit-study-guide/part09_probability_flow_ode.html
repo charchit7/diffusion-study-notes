@@ -183,7 +183,7 @@ dx = f(x,t)\,dt + g(t)\,dW_t
 
 <div class="box connect">
   <span class="label">Consequence 3 — DDIM is the PF-ODE (the unifying punchline)</span>
-  From Part 6: DDIM with \(\eta=0\) is deterministic.  It turns out DDIM (\(\eta=0\)) is <em>exactly</em> a first-order Euler discretization of the PF-ODE.  Recall from Part 5 (DDPM) that the discrete reverse step has a noise term scaled by \(\eta\); setting \(\eta=0\) kills that noise, leaving only the drift correction — precisely the PF-ODE velocity evaluated with the network prediction.  So Parts 5–9 converge to one picture: <em>DDPM adds noise (SDE), DDIM removes it (ODE), and the continuous limit of DDIM is the PF-ODE.</em>
+  From Part 6: DDIM with \(\eta=0\) is deterministic.  It turns out DDIM (\(\eta=0\)) is <em>exactly</em> a first-order Euler discretization of the PF-ODE.  Recall from Part 6 (DDIM) that the discrete reverse step has a noise term scaled by \(\eta\); setting \(\eta=0\) kills that noise, leaving only the drift correction — precisely the PF-ODE velocity evaluated with the network prediction.  So Parts 5–9 converge to one picture: <em>DDPM adds noise (SDE), DDIM removes it (ODE), and the continuous limit of DDIM is the PF-ODE.</em>
 </div>
 
 <!-- ============================================================ -->
@@ -198,7 +198,7 @@ dx = f(x,t)\,dt + g(t)\,dW_t
     <tr>
       <td>Noise network \(\epsilon_\theta(x,t)\)</td>
       <td>\(\approx \epsilon\) (noise added)</td>
-      <td>\(-\epsilon_\theta(x,t)/\sigma_t\) where \(\sigma_t = \beta_t\) (std of forward noise)</td>
+      <td>\(-\epsilon_\theta(x,t)/\sigma_t\) where \(\sigma_t = \sqrt{1-\bar\alpha(t)}\) is the <em>marginal</em> noise std (the quantity the MIT notes call \(\beta_t\))</td>
     </tr>
     <tr>
       <td>Denoiser \(D_\theta(x,t)\)</td>
@@ -212,7 +212,11 @@ dx = f(x,t)\,dt + g(t)\,dW_t
 \[
 \frac{dx}{dt} = f(x,t) + \frac{g(t)^2}{2\,\sigma_t}\,\epsilon_\theta(x,t)
 \]
-<p>For the VP-SDE / DDPM noise schedule (\(f(x,t) = -\tfrac{1}{2}\beta_t x\), \(g(t) = \sqrt{\beta_t}\), \(\sigma_t = \beta_t\) in the convention of the notes) this further simplifies, and discretizing with Euler gives exactly the DDIM (\(\eta=0\)) update — closing the loop.</p>
+<p>For the VP-SDE / DDPM noise schedule (\(f(x,t) = -\tfrac{1}{2}\beta(t) x\), \(g(t) = \sqrt{\beta(t)}\)) the marginal noise std is \(\sigma_t = \sqrt{1-\bar\alpha(t)}\) — note this is <em>not</em> the schedule rate \(\beta(t)\) — so the PF-ODE reads
+\[
+\frac{dx}{dt} = -\tfrac{1}{2}\beta(t)\,x + \frac{\beta(t)}{2\sqrt{1-\bar\alpha(t)}}\,\epsilon_\theta(x,t),
+\]
+and discretizing with Euler gives exactly the DDIM (\(\eta=0\)) update — closing the loop.</p>
 
 <!-- ============================================================ -->
 <h2>9.6 Toy 1-D Example: What the PF-ODE Looks Like</h2>
@@ -312,14 +316,18 @@ for i in range(T):
     g2_t   = 2.0 * t_val / denom
     f_xt   = -x_sde / denom
     s      = score(x_sde, t_val)
-    <span class="code-comment"># Reverse-SDE drift: f - g^2 * score  (full coefficient, Part 8)</span>
-    drift  = f_xt - g2_t * s
+    <span class="code-comment"># Marginal-preserving drift for injected noise level sigma_noise:</span>
+    <span class="code-comment">#   f - 0.5*(g^2 + sigma_noise^2) * score   (Theorem 17 / η-family).</span>
+    <span class="code-comment"># sigma_noise = g(t) recovers Anderson's reverse SDE (drift f - g^2*score);</span>
+    <span class="code-comment"># sigma_noise = 0 recovers the PF-ODE. The full-coefficient drift f - g^2*score</span>
+    <span class="code-comment"># is ONLY marginal-preserving with noise g(t)·dW — not with a free sigma!</span>
+    drift  = f_xt - 0.5 * (g2_t + sigma_noise**2) * s
     noise  = sigma_noise * torch.randn(N) * abs(dt) ** 0.5
     x_sde  = x_sde + drift * dt + noise
 
 print(f"Rev-SDE mean={x_sde.mean():.3f}  std={x_sde.std():.3f}")
-<span class="code-comment"># Expected output (approximate — stochastic):
-#   Rev-SDE mean=1.997  std=0.503   ← same density, different trajectories</span>
+<span class="code-comment"># Expected output (seed=0):
+#   Rev-SDE mean=2.003  std=0.513   ← same density, different trajectories</span>
 
 <span class="code-comment"># Key takeaway: PF-ODE and reverse-SDE reach the same p_0 but</span>
 <span class="code-comment"># PF-ODE is deterministic (same x_1 → same x_0 every run).</span>
@@ -344,7 +352,7 @@ print(f"Rev-SDE mean={x_sde.mean():.3f}  std={x_sde.std():.3f}")
   <span class="label">Where the MIT Notes Cover This</span>
   <ul>
     <li><strong>Theorem 17 (SDE Extension Trick, §4.2)</strong> — the full family of SDEs with equal marginals; the PF-ODE is the \(\sigma_t = 0\) member.</li>
-    <li><strong>Theorem 19 (Fokker–Planck, §4.2)</strong> — the Laplacian identity \(\Delta p = \nabla\cdot(p\nabla\log p)\) is used in the proof, lines 699–723.</li>
+    <li><strong>Theorem 19 (Fokker–Planck, §4.2)</strong> — the Laplacian identity \(\Delta p = \nabla\cdot(p\nabla\log p)\) is used in the proof.</li>
     <li><strong>Theorem 11 (Continuity Equation, §3.2)</strong> — the pure-transport equation that the PF-ODE drift satisfies.</li>
     <li><strong>Proposition 1 (Conversion formula, §4.1)</strong> — the score ↔ vector field ↔ denoiser triangle for Gaussian paths.</li>
   </ul>

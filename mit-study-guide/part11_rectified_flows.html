@@ -196,15 +196,21 @@ far fewer crossings</em>. Fewer crossings → straighter marginal field → fewe
 steps needed. This procedure is called <strong>reflow</strong>.</p>
 
 <div class="box mathblock">
-<span class="label">Why Deterministic Coupling Reduces Crossings</span>
-<p>Suppose two pairs \((x_0^a, x_1^a)\) and \((x_0^b, x_1^b)\) are drawn from a
-<em>deterministic</em> transport (each noise point maps to exactly one data point, like
-an optimal transport map). Then for two line segments to cross at time \(t\), we
-would need:</p>
-\[(1-t)x_0^a + t x_1^a = (1-t)x_0^b + t x_1^b\]
-<p>for some \(t \in (0,1)\). This is a measure-zero event for non-degenerate distributions.
-Therefore, a deterministic coupling is essentially <em>crossing-free</em>, making the
-marginal velocity field match the individual line directions everywhere.</p>
+<span class="label">Why Reflow Reduces — But Does Not Eliminate — Crossings</span>
+<p>A tempting argument goes: "the reflow map is deterministic, so two segments crossing,
+\[(1-t)x_0^a + t x_1^a = (1-t)x_0^b + t x_1^b,\]
+is a measure-zero event — hence crossing-free." This argument is <strong>wrong</strong>:
+in \(d \ge 2\), <em>exact</em> segment crossings are measure-zero even for the
+independent coupling, and in \(d = 1\) a deterministic map (e.g. \(x_1 = -x_0\))
+produces massive crossings. Determinism by itself proves nothing.</p>
+<p>The correct statement (Liu et al. 2022): what genuinely cannot cross are the
+<em>ODE trajectories</em> of the trained flow \(v^{(1)}\), by uniqueness of ODE
+solutions. Rectification therefore never increases — and typically strictly
+decreases — every convex transport cost of the coupling, and increases the
+straightness of the flow. But the <em>straight interpolants</em> of the new pairs
+\((x_0, x_1')\) can and do still cross; the marginal field only becomes perfectly
+straight in the limit of <em>repeated</em> rectification — which is exactly why the
+algorithm below iterates (step 4).</p>
 </div>
 
 <h3>The Reflow Algorithm</h3>
@@ -223,7 +229,9 @@ marginal velocity field match the individual line directions everywhere.</p>
         x_0 + \sum_{k} h\,v^{(1)}_\theta(x_{t_k}, t_k).\]
       Store the pair \((x_0, x_1^{(1)})\). Crucially this is a
       <em>deterministic</em> map: the same \(x_0\) always produces the same
-      \(x_1^{(1)}\), so no two pairs can cross (measure-theoretically).</li>
+      \(x_1^{(1)}\). The ODE trajectories that produced these pairs cannot cross
+      one another, and the resulting coupling has lower transport cost — though
+      the straight interpolants of the new pairs may still cross.</li>
 
   <li><strong>Train \(v^{(2)}_\theta\)</strong> on the new coupling \(\pi^{(2)}\)
       (the stored pairs) with the same loss:
@@ -254,17 +262,20 @@ every strand is fully straight.</p>
 <!-- ============================================================ -->
 <h2>11.5 Distillation to One Step</h2>
 
-<p>After one or two reflow iterations the trajectories are nearly straight. At that point
-you can distill the model into a one-step generator: simply evaluate the (near-straight)
-velocity at \(t=0\) and take a single Euler step of size 1:</p>
+<p>After one or two reflow iterations the trajectories are nearly straight. If they were
+<em>exactly</em> straight, the velocity would be constant along each path and a single
+Euler step of size 1 would already be exact:</p>
 
 \[x_1 \approx x_0 + v_\theta(x_0,\, 0).\]
 
-<p>This works because a perfectly straight trajectory has constant velocity, so the first
-derivative at \(t=0\) already tells you the full displacement. In practice, one or two
-rounds of reflow followed by distillation achieves generation quality competitive with
-many-step methods using a single network evaluation — the core claim of "Flow Straight
-and Fast".</p>
+<p>Because in practice they are only <em>nearly</em> straight, Liu et al. add an explicit
+<strong>distillation</strong> training phase: fit the (student) model on reflow pairs
+\((x_0, x_1')\) with the single-step objective
+\(\bigl\|x_1' - x_0 - v_\theta(x_0, 0)\bigr\|\) (or a perceptual loss), so that one
+Euler step reproduces the full integration. One-step sampling without this phase is
+only exact for exactly-straight trajectories. In practice, one or two rounds of reflow
+followed by distillation achieves generation quality competitive with many-step methods
+using a single network evaluation — the core claim of "Flow Straight and Fast".</p>
 
 <!-- ============================================================ -->
 <h2>11.6 Connections</h2>
@@ -393,7 +404,8 @@ def reflow_generate_pairs(model, n=512, n_steps=50):
     <span class="code-comment">"""
     Integrate model from t=0 to t=1 (Euler, n_steps steps).
     Returns (x0, x1_prime): shape (n, 2) each.
-    These are the new NON-CROSSING pairs for the next reflow round.
+    These rectified pairs (lower transport cost, fewer crossings)
+    feed the next reflow round.
     """</span>
     model.eval()
     x0 = sample_noise(n)                 <span class="code-comment"># (n, 2) — fixed noise samples</span>
@@ -437,8 +449,8 @@ for t_val in [0.0, 0.25, 0.5, 0.75, 1.0]:
 <span class="code-comment">#</span>
 <span class="code-comment"># This confirms: the per-pair straight-line target is constant in t.</span>
 <span class="code-comment"># The NETWORK output v_theta(x_t, t) won't be constant (it's averaging over</span>
-<span class="code-comment"># many crossing pairs), but the TARGET is. Reflow makes the coupling</span>
-<span class="code-comment"># deterministic so that the average IS the individual target.</span>
+<span class="code-comment"># many crossing pairs), but the TARGET is. Each reflow round reduces that</span>
+<span class="code-comment"># crossing ambiguity, moving the average closer to the individual targets.</span>
 </code></pre>
 
 <!-- ============================================================ -->
@@ -447,10 +459,11 @@ for t_val in [0.0, 0.25, 0.5, 0.75, 1.0]:
 <p>Here is the full arc of Part 11 in one paragraph. Rectified flow is flow matching with
 linear interpolation but with a deliberate procedure — reflow — that replaces the naive
 independent coupling with a deterministic one obtained by following the current model.
-Because deterministic couplings have no crossing lines, the marginal velocity field
-matches the individual target velocities exactly, making trajectories straight and
-enabling one-step generation via distillation. Stable Diffusion 3 applies this idea at
-scale.</p>
+Each rectification round lowers the coupling's transport costs and reduces the crossing
+ambiguity, so the marginal velocity field moves closer to the individual target
+velocities and trajectories become straighter — perfectly straight only in the limit of
+repeated reflow — enabling one-step generation via a final distillation phase.
+Stable Diffusion 3 applies this idea at scale.</p>
 
 <div class="box mathblock">
 <span class="label">Checkpoint — Can You Answer These?</span>

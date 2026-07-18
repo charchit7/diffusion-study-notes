@@ -116,7 +116,7 @@
 
 <p>Imagine particles distributed according to \(p_t\). The forward SDE pushes them outward with drift \(f\) and random kicks \(g\,dW\). To reverse, we need to undo both effects. The random kicks cannot literally be reversed (randomness has no memory), but we can <em>compensate</em> on average by adding a drift that pushes particles toward high-density regions.</p>
 
-<p>How strong should that compensating drift be? It turns out the answer is \(g(t)^2 \nabla_x \log p_t(x)\). The factor \(g^2\) comes from matching the variance of the noise (&ldquo;twice the noise variance&rdquo; in the stochastic calculus sense &mdash; this is the It&#244;&ndash;Stratonovich correction). Anderson&rsquo;s 1982 theorem proves this rigorously using time-reversal of Markov processes; we accept it here and will see further justification via Fokker&ndash;Planck in Section 8.3.</p>
+<p>How strong should that compensating drift be? It turns out the answer is \(g(t)^2 \nabla_x \log p_t(x)\). The factor \(g^2\) is fixed by the Fokker&ndash;Planck computation of Section 8.3: one half, \(\tfrac{1}{2}g^2\nabla\log p_t\), deterministically accounts for the spreading caused by the forward diffusion, and the other half cancels the noise that the reverse SDE re-injects (cf. Part 9, &sect;9.3). Anderson&rsquo;s 1982 theorem proves this rigorously using time-reversal of Markov processes; we accept it here and will see further justification via Fokker&ndash;Planck in Section 8.3.</p>
 
 <div class="box intuition"><span class="label">Toy Mental Model: 1D Gaussian</span>
   Suppose \(p_t = \mathcal{N}(\mu_t, \sigma_t^2)\). Then the score is
@@ -186,7 +186,7 @@
     \]
   </li>
   <li>Use the identity \(\nabla_x \log p_t = \nabla_x p_t / p_t\), so \(\nabla_x \log p_t \cdot p_t = \nabla_x p_t\). Thus the second term becomes \(g^2 \nabla \cdot \nabla_x p_t = g^2 \Delta p_t\).</li>
-  <li>The transport term \(-\nabla \cdot (f\,p_t)\) is exactly what the forward process contributes (via the continuity equation). The diffusion term \(\tfrac{1}{2}g^2 \Delta p_t\) from the forward noise and the \(g^2 \Delta p_t\) now combine: altogether the Fokker&ndash;Planck equation for \(p_t\) is satisfied.</li>
+  <li>Because the reverse SDE runs <em>backward</em> in time, its Fokker&ndash;Planck equation carries a sign flip: \(-\partial_t p_t = \nabla \cdot (u^\text{rev}_t\,p_t) + \tfrac{1}{2}g^2\,\Delta p_t\). Substituting steps 2&ndash;3 gives \(\nabla \cdot (f\,p_t) - g^2 \Delta p_t + \tfrac{1}{2}g^2 \Delta p_t = \nabla \cdot (f\,p_t) - \tfrac{1}{2}g^2 \Delta p_t\), and this equals \(-\partial_t p_t\) by the <em>forward</em> Fokker&ndash;Planck equation rearranged &mdash; so the reverse SDE transports exactly the same marginals \(p_t\).</li>
 </ol>
 <p>The integration-by-parts step underlies step 3: the divergence of a gradient is the Laplacian, \(\nabla \cdot \nabla w = \Delta w\). This is the sole non-obvious algebraic fact; everything else is symbolic manipulation.</p>
 
@@ -200,11 +200,11 @@
 <p>For Gaussian probability paths \(p_t(\cdot | z) = \mathcal{N}(\alpha_t z,\, \beta_t^2 I)\), the family is:</p>
 
 \[
-  dX_t = \underbrace{\Bigl[u_t^\text{target}(X_t) - \tfrac{\sigma_t^2}{2}\,\nabla_x \log p_t(X_t)\Bigr]}_{\text{corrected drift}}\,dt
+  dX_t = \underbrace{\Bigl[u_t^\text{target}(X_t) + \tfrac{\sigma_t^2}{2}\,\nabla_x \log p_t(X_t)\Bigr]}_{\text{corrected drift}}\,dt
          + \underbrace{\sigma_t\,dW_t}_{\text{free noise}}
 \]
 
-<p>where \(u_t^\text{target}\) is the marginal vector field learned by the flow network. The score term with coefficient \(\sigma_t^2/2\) corrects for the noise injection so that marginals remain \(p_t\).</p>
+<p>where \(u_t^\text{target}\) is the marginal vector field learned by the flow network. The score term with coefficient \(+\sigma_t^2/2\) corrects for the noise injection so that marginals remain \(p_t\): plugging the drift into the Fokker&ndash;Planck equation, the \(+\tfrac{\sigma_t^2}{2}\nabla\cdot(p_t\nabla\log p_t) = +\tfrac{\sigma_t^2}{2}\Delta p_t\) transport contribution exactly cancels the \(\tfrac{\sigma_t^2}{2}\Delta p_t\) diffusion term, leaving the continuity equation of \(u_t^\text{target}\). <em>Convention note:</em> this section follows the MIT notes&rsquo; time convention, in which integration runs from noise toward data &mdash; opposite to the \(1 \to 0\) reverse-time convention of &sect;8.1&ndash;8.2.</p>
 
 <table class="symbols">
   <tr><th>Symbol</th><th>Meaning</th></tr>
@@ -218,8 +218,8 @@
 <div class="box mathblock"><span class="label">Spectrum of SDEs</span>
 <ul>
   <li><strong>\(\sigma_t = 0\) (no noise)</strong>: the SDE collapses to the <em>probability-flow ODE</em> (Part 9). Trajectories are deterministic: same initial point always gives same final sample. This is exactly DDIM with \(\eta = 0\).</li>
-  <li><strong>\(\sigma_t > 0\) (maximum noise)</strong>: fully stochastic reverse SDE (Anderson 1982). Different runs from the same initial noise give different samples. Corresponds to DDPM / DDIM with \(\eta = 1\).</li>
-  <li><strong>Any \(\sigma_t \in [0, \sigma_\text{max}]\)</strong>: a valid sampler. In practice, an intermediate \(\sigma_t\) may give the best sample quality because it balances exploration (stochasticity) against stability (low step-size requirements).</li>
+  <li><strong>\(\sigma_t = g(t)\) (matching the forward diffusion)</strong>: Anderson&rsquo;s (1982) fully stochastic reverse SDE. Different runs from the same initial noise give different samples. Corresponds to DDPM / DDIM with \(\eta = 1\).</li>
+  <li><strong>Any \(0 < \sigma_t < g(t)\) (partial stochasticity)</strong>: also a valid sampler &mdash; this is the DDIM \(\eta \in (0,1)\) family. In practice, an intermediate \(\sigma_t\) may give the best sample quality because it balances exploration (stochasticity) against stability (low step-size requirements).</li>
 </ul>
 </div>
 
@@ -256,7 +256,7 @@
 <div class="box connect"><span class="label">Everything Connects Through the Score</span>
   <ul>
     <li><strong>Part 3</strong>: defined \(s(x) = \nabla_x \log p(x)\); showed it points toward high-density regions.</li>
-    <li><strong>Part 5 (DDPM)</strong>: the noise predictor \(\epsilon_\theta\) <em>is</em> the score up to a sign and scale factor: \(\nabla_x \log p_t(x) \approx -\epsilon_\theta(x,t)/\beta_t\).</li>
+    <li><strong>Part 5 (DDPM)</strong>: the noise predictor \(\epsilon_\theta\) <em>is</em> the score up to a sign and scale factor: \(\nabla_x \log p_t(x) \approx -\epsilon_\theta(x,t)/\sqrt{1-\bar\alpha_t}\).</li>
     <li><strong>Part 7</strong>: for Gaussian paths, the score can be derived from the marginal vector field \(u_t^\text{target}\).</li>
     <li><strong>Part 8 (now)</strong>: the reverse-time SDE and the entire SDE extension family require only one ingredient: \(\nabla_x \log p_t\). A single trained network (score network or noise predictor) enables <em>all</em> samplers in the family.</li>
     <li><strong>Part 9</strong>: the probability-flow ODE also uses only the score.</li>
@@ -267,9 +267,9 @@
 <!-- ============================================================ -->
 <h2>8.7 PyTorch: Reverse-Time SDE on a 1D Gaussian</h2>
 
-<p>The following self-contained example simulates the reverse-time SDE on a 1D Gaussian. The forward process is a variance-preserving (VP) style schedule: \(p_t = \mathcal{N}(\mu_t, \sigma_t^2)\) with \(\mu_t = e^{-t}\cdot\mu_0\) decaying to 0 and \(\sigma_t^2 = 1 - e^{-2t}\) growing from 0 to 1. The analytic score is \(\nabla_x \log p_t(x) = -(x - \mu_t)/\sigma_t^2\).</p>
+<p>The following self-contained example simulates the reverse-time SDE on a 1D Gaussian. The forward process is a variance-preserving (VP) style schedule: \(p_t = \mathcal{N}(\mu_t, \sigma_t^2)\) with \(\mu_t = e^{-t}\cdot\mu_0\) decaying to 0 and \(\sigma_t^2 = 1 - e^{-2t}\) growing from 0 to 1. This family is generated by the OU SDE with \(f(x,t) = -x\) and \(g(t) = \sqrt{2}\) (the variance ODE \(dV/dt = -2V + g^2\) gives \(V(t) = 1 - e^{-2t}\) exactly when \(g = \sqrt2\)). The analytic score is \(\nabla_x \log p_t(x) = -(x - \mu_t)/\sigma_t^2\). Note that \(\sigma_0^2 = 0\): the &ldquo;data distribution&rdquo; of this toy is a <em>point mass</em> at \(\mu_0\).</p>
 
-<p>We run Euler&ndash;Maruyama from \(t=1\) down to \(t=0\) and check that the final samples concentrate near \(\mu_0\).</p>
+<p>We run Euler&ndash;Maruyama from \(t=1\) down to \(t=0\) and check that the final samples collapse onto \(\mu_0\).</p>
 
 <pre><code><span class="code-comment"># teaching code, not security-sensitive RNG</span>
 <span class="code-comment"># Part 8 — Reverse-time SDE via Euler–Maruyama, 1D Gaussian</span>
@@ -281,7 +281,7 @@ import torch
 torch.manual_seed(0)
 
 <span class="code-comment"># ── Problem setup ────────────────────────────────────────────────</span>
-<span class="code-comment"># Data distribution: N(mu0, sigma_data^2)  (1D)</span>
+<span class="code-comment"># Data distribution: a point mass at mu0 (this marginal family has beta_0^2 = 0)</span>
 mu0       = 3.0          <span class="code-comment"># true data mean</span>
 N_samples = 4000         <span class="code-comment"># number of reverse-SDE particles</span>
 T_steps   = 500          <span class="code-comment"># Euler–Maruyama discretisation steps</span>
@@ -305,9 +305,11 @@ def score(x, t_scalar):
     return -(x - mu_t) / var_t               <span class="code-comment"># shape: (N_samples,)</span>
 
 <span class="code-comment"># ── Forward SDE drift: f(x,t) = -x  (OU-like; keeps variance bounded)</span>
-<span class="code-comment"># Diffusion coefficient: g(t) = sqrt(2) * exp(-t)  (chosen to match VP)</span>
-<span class="code-comment"># For simplicity we use g(t) = 1.0 (scalar constant) in this toy.</span>
-g_const = 1.0            <span class="code-comment"># diffusion coefficient g(t) — constant for simplicity</span>
+<span class="code-comment"># Diffusion coefficient: g(t) = sqrt(2). This is forced by the marginals:</span>
+<span class="code-comment"># the variance ODE dV/dt = -2V + g^2 gives V(t) = (g^2/2)(1 - e^{-2t}),</span>
+<span class="code-comment"># which equals the assumed 1 - e^{-2t} only for g = sqrt(2). (With any</span>
+<span class="code-comment"># other g the reverse SDE would NOT invert the assumed path.)</span>
+g_const = 2 ** 0.5       <span class="code-comment"># diffusion coefficient g(t) = √2, matching the marginal family</span>
 
 def drift_forward(x, t_scalar):
     return -x                                 <span class="code-comment"># f(x,t) = -x</span>
@@ -348,16 +350,19 @@ for step in range(T_steps):
 
 <span class="code-comment"># ── Check final samples ───────────────────────────────────────────</span>
 print(f"Final     mean={X.mean():.3f}, std={X.std():.3f}")
-print(f"Target    mean={mu0:.3f},      std=1.000")
-<span class="code-comment"># Expected: Final     mean≈3.00, std≈1.00</span>
-<span class="code-comment"># Particles should concentrate near the data mean mu0=3.0.</span>
-<span class="code-comment"># The std ≈ 1.0 reflects the data-distribution spread (N(3, 1^2) in this toy).</span>
+print(f"Target    mean={mu0:.3f},      std=0.000 (point mass)")
+<span class="code-comment"># Expected (seed=0): Final     mean=2.999, std=0.062</span>
+<span class="code-comment"># Particles collapse onto the data mean mu0=3.0.</span>
+<span class="code-comment"># The small std reflects beta_0^2 = 0: the "data" of this marginal family</span>
+<span class="code-comment"># is a point mass at 3, so std → 0 as t → 0 (the residual 0.06 comes from</span>
+<span class="code-comment"># the finite step size and the 1e-5 clamp on the variance).</span>
 
 <span class="code-comment"># ── What just happened? ────────────────────────────────────────────</span>
 <span class="code-comment"># 1. We sampled from p_1 ≈ N(1.1, 0.93^2) at t=1.</span>
 <span class="code-comment"># 2. At each Euler–Maruyama step we computed the analytic score,</span>
 <span class="code-comment">#    used it to build the reverse-SDE drift, and added Gaussian noise.</span>
-<span class="code-comment"># 3. After 500 steps ending at t≈0, samples follow p_0 ≈ N(mu0, 1).</span>
+<span class="code-comment"># 3. After 500 steps ending at t≈0, samples collapse onto p_0, which for</span>
+<span class="code-comment">#    this marginal family is a point mass at mu0 (beta_0^2 = 0).</span>
 <span class="code-comment"># In a real model, score() is replaced by a neural network s_theta(x, t).</span>
 </code></pre>
 
@@ -373,7 +378,7 @@ print(f"Target    mean={mu0:.3f},      std=1.000")
 <table class="symbols">
   <tr><th>Part 8 Concept</th><th>MIT Notes Location</th></tr>
   <tr><td>Reverse-time SDE (Anderson 1982)</td><td>Sec. 4.2, Anderson (1982) cited; the reverse SDE is derived as part of Theorem 17&rsquo;s setup</td></tr>
-  <tr><td>SDE Extension Trick (family of SDEs)</td><td>Theorem 17, Sec. 4.2 (pp. 673&ndash;685 in the notes)</td></tr>
+  <tr><td>SDE Extension Trick (family of SDEs)</td><td>Theorem 17, Sec. 4.2</td></tr>
   <tr><td>Gaussian SDE Extension</td><td>Example 18, Sec. 4.2</td></tr>
   <tr><td>Fokker&ndash;Planck Equation</td><td>Theorem 19, Sec. 4.2; full proof in Appendix B</td></tr>
   <tr><td>Laplacian definition</td><td>Eq. (48), Sec. 4.2 (just before Theorem 19)</td></tr>

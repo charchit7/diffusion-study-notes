@@ -165,8 +165,11 @@ data \(x_0\) and noise \(\varepsilon\):
 At \(t=0\): \(x_0 = x_0\) (pure data).
 At \(t=1\): \(x_1 = \varepsilon \sim \mathcal{N}(0,I)\) (pure noise).
 At intermediate \(t\): a blend of signal and noise.
-The coefficients \(\sqrt{1-t}\) and \(\sqrt{t}\) are chosen so that the variance
-of \(x_t\) stays at 1 throughout — a <em>variance-preserving</em> schedule.
+The coefficients \(\sqrt{1-t}\) and \(\sqrt{t}\) are chosen so that if
+\(\mathrm{Var}[x_0]=1\) the variance of \(x_t\) stays at 1 for all \(t\) — a
+<em>variance-preserving</em> schedule. (In general
+\(\mathrm{Var}[x_t] = (1-t)\,\mathrm{Var}[x_0] + t\), which interpolates from
+\(\mathrm{Var}[x_0]\) to 1.)
 This is the object the PyTorch illustration in §4.6 demonstrates.</p>
 
 <div class="box mathblock">
@@ -496,9 +499,9 @@ for t in [0.0, 0.5, 1.0]:
     print(f"t={t:.1f} | mean={xt.mean().item():.4f}  std={xt.std().item():.4f}")
 
 <span class="code-comment"># Expected output:
-#   t=0.0 | mean= 0.0000  std=2.0063   ← two clusters; std reflects ±2 offsets
-#   t=0.5 | mean=-0.0023  std=1.4313   ← signal half-attenuated; clusters blurring
-#   t=1.0 | mean= 0.0102  std=1.0051   ← pure noise; mean≈0, std≈1 (standard Gaussian)
+#   t=0.0 | mean=-0.0069  std=2.0499   ← two clusters; std reflects ±2 offsets
+#   t=0.5 | mean= 0.0130  std=1.6039   ← signal half-attenuated; clusters blurring
+#   t=1.0 | mean=-0.0066  std=0.9852   ← pure noise; mean≈0, std≈1 (standard Gaussian)
 #
 #   The std drops from ~2 toward 1, and the mean collapses toward 0.
 #   At t=1 the cloud is indistinguishable from N(0, I) — the two
@@ -509,14 +512,14 @@ for t in [0.0, 0.5, 1.0]:
 #    For any x0, E[x_t] = sqrt(1-t) * x0  and  Var[x_t] = t * I
 #    So if x0 has std sigma_0, then x_t has std sqrt((1-t)*sigma_0^2 + t).
 #    At t=1: std = sqrt(0 + 1) = 1.  Check:</span>
-sigma0 = x0.std().item()                   <span class="code-comment"># ≈ 2.006</span>
+sigma0 = x0.std().item()                   <span class="code-comment"># ≈ 2.050</span>
 for t in [0.0, 0.5, 1.0]:
     expected_std = ((1 - t) * sigma0 ** 2 + t) ** 0.5
     print(f"t={t:.1f} | theoretical std = {expected_std:.4f}")
 
 <span class="code-comment"># Expected output:
-#   t=0.0 | theoretical std = 2.0063
-#   t=0.5 | theoretical std = 1.4331
+#   t=0.0 | theoretical std = 2.0499
+#   t=0.5 | theoretical std = 1.6128
 #   t=1.0 | theoretical std = 1.0000</span></code></pre>
 
 <div class="box intuition">

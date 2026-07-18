@@ -241,11 +241,7 @@ alpha_bar_t = torch.tensor(0.36)   <span class="code-comment"># sqrt(alpha_bar_t
 x_t      = torch.randn(d)          <span class="code-comment"># shape (4,)  — the noisy sample</span>
 eps_pred = torch.randn(d)          <span class="code-comment"># shape (4,)  — eps_theta(x_t, t)</span>
 
-<span class="code-comment"># The x̂_0 formula, one line</span>
-x0_hat = (x_t - alpha_bar_t.sqrt().rsqrt() * 0.0  <span class="code-comment"># placeholder — see below</span>
-    )  <span class="code-comment"># expanded form in the next snippet</span>
-
-<span class="code-comment"># Proper implementation:</span>
+<span class="code-comment"># The x̂_0 formula:</span>
 sqrt_ab   = alpha_bar_t.sqrt()           <span class="code-comment"># √ᾱ_t,  scalar</span>
 sqrt_1mab = (1 - alpha_bar_t).sqrt()     <span class="code-comment"># √(1-ᾱ_t), scalar</span>
 
@@ -255,8 +251,8 @@ print("eps    :", eps_pred)
 print("x̂_0   :", x0_hat)
 <span class="code-comment"># Expected (values depend on seed=0):</span>
 <span class="code-comment"># x_t    : tensor([ 1.5410, -0.2934, -2.1788,  0.5684])</span>
-<span class="code-comment"># eps    : tensor([-0.1234, -0.1995, -0.8140,  0.2944])</span>
-<span class="code-comment"># x̂_0   : tensor([ 2.6581, -0.3555, -2.2902,  0.6544])</span></code></pre>
+<span class="code-comment"># eps    : tensor([-1.0845, -1.3986,  0.4033,  0.8380])</span>
+<span class="code-comment"># x̂_0   : tensor([ 4.0144,  1.3757, -4.1691, -0.1700])</span></code></pre>
 
 <!-- ============================================================ -->
 <h2>6.5 The DDIM Update Equation</h2>
@@ -360,8 +356,10 @@ DDIM gives you a knob.
 
 <div class="box mathblock">
 <span class="label">\(\eta = 1\): recover DDPM</span>
-When \(\eta = 1\), the formula for \(\sigma_t\) equals the DDPM posterior
-variance \(\tilde\beta_t\) (up to a sign convention in the square root).
+When \(\eta = 1\), the formula gives exactly the DDPM posterior standard
+deviation: \(\sigma_t^2 = \tilde\beta_t = \frac{1-\bar\alpha_{t-1}}{1-\bar\alpha_t}\,\beta_t\),
+i.e. \(\sigma_t = \sqrt{\tilde\beta_t}\)
+(using \(1 - \bar\alpha_t/\bar\alpha_{t-1} = \beta_t\)).
 The DDIM update becomes exactly DDPM ancestral sampling.
 Term (3) is non-zero; each run from the same \(x_T\) gives a different \(x_0\).
 </div>
@@ -424,7 +422,10 @@ so it can still evaluate at the strided positions without any retraining.
 \]
 
 <p>For \(T=1000\), \(S=50\): stride \(= 20\), so
-\(\tau = \{1000, 980, 960, \ldots, 20\}\) — 50 evaluations instead of 1000.</p>
+\(\tau = \{1000, 980, 960, \ldots, 20, 0\}\) — the schedule must terminate at
+\(t = 0\) (where \(\bar\alpha_0 = 1\)), otherwise the returned sample still
+carries the residual noise of level \(t=20\). That is 50 update steps instead
+of 1000.</p>
 
 <p>The DDIM update formula is unchanged; you simply replace the pair
 \((t, t-1)\) with the pair \((\tau_i, \tau_{i-1})\) for consecutive elements
@@ -437,11 +438,11 @@ T = 1000
 S = 50
 stride = T // S  <span class="code-comment"># = 20</span>
 
-<span class="code-comment"># Build the strided schedule: from T down to stride, step of stride</span>
-tau = list(range(T, 0, -stride))  <span class="code-comment"># [1000, 980, 960, ..., 20]</span>
+<span class="code-comment"># Build the strided schedule: from T down to stride, then a final step to 0</span>
+tau = list(range(T, 0, -stride)) + [0]  <span class="code-comment"># [1000, 980, 960, ..., 20, 0]</span>
 print(f"First 5 steps: {tau[:5]}")  <span class="code-comment"># [1000, 980, 960, 940, 920]</span>
-print(f"Last 5 steps : {tau[-5:]}")  <span class="code-comment"># [100, 80, 60, 40, 20]</span>
-print(f"Total steps  : {len(tau)}")  <span class="code-comment"># 50</span>
+print(f"Last 5 steps : {tau[-5:]}")  <span class="code-comment"># [80, 60, 40, 20, 0]</span>
+print(f"Total levels : {len(tau)}")  <span class="code-comment"># 51 levels → 50 update steps</span>
 
 <span class="code-comment"># At sampling time, iterate:</span>
 <span class="code-comment"># for i in range(len(tau) - 1):</span>
@@ -479,7 +480,9 @@ with stochastic samplers:</p>
       given \(x_{t-1}\)) to find the noise vector \(x_T\) that
       the deterministic decoder would map back to (approximately) \(x_0\).
       This "DDIM inversion" is used heavily in image editing pipelines
-      (e.g. prompt-to-prompt, SDEdit).</li>
+      (e.g. prompt-to-prompt, null-text inversion). By contrast, SDEdit does
+      <em>not</em> invert: it stochastically adds forward noise up to a partial
+      level and re-denoises.</li>
 </ol>
 </div>
 
@@ -497,23 +500,28 @@ with stochastic samplers:</p>
   \sqrt{1-\bar\alpha_{t-1}}\;\varepsilon_\theta(x_t,t),
   \qquad \hat x_0 = \frac{x_t - \sqrt{1-\bar\alpha_t}\,\varepsilon_\theta(x_t,t)}{\sqrt{\bar\alpha_t}}.
 \]
-<p>Substituting \(\hat x_0\) and re-arranging in terms of the variable
-\(\tilde x_t = x_t / \sqrt{\bar\alpha_t}\) (the "scaled" latent), one can
+<p>Substituting \(\hat x_0\) and re-arranging, one can
 show that this update is exactly an <strong>Euler step</strong> of the
 <em>probability-flow ODE</em> derived by Song et al. (2020):</p>
 \[
-  d\tilde x
+  dx
   \;=\;
   \Bigl[
-    f_t(\tilde x)
+    f_t(x)
     \;-\;
-    \tfrac{1}{2}g_t^2\,\nabla_{\tilde x}\log p_t(\tilde x)
+    \tfrac{1}{2}g_t^2\,\nabla_{x}\log p_t(x)
   \Bigr]\,dt,
 \]
 <p>where \(f_t\) and \(g_t\) come from the VP-SDE (variance-preserving SDE)
 that corresponds to the DDPM noise schedule, and the score
-\(\nabla_{\tilde x}\log p_t(\tilde x)\) is approximated by
-\(-\varepsilon_\theta / \sqrt{1-\bar\alpha_t}\).</p>
+\(\nabla_{x}\log p_t(x)\) is approximated by
+\(-\varepsilon_\theta / \sqrt{1-\bar\alpha_t}\).
+To be precise, the Euler step is taken after the change of variables
+\(\tilde x = x / \sqrt{\bar\alpha_t}\) with the noise clock
+\(\bar\sigma_t = \sqrt{1-\bar\alpha_t}/\sqrt{\bar\alpha_t}\): in those
+coordinates the linear drift vanishes and the ODE becomes simply
+\(d\tilde x / d\bar\sigma = \hat\varepsilon\), and DDIM is its Euler step —
+not a plain \(t\)-Euler step of the equation above.</p>
 
 <p><strong>What this means in plain language:</strong></p>
 <ul>
@@ -562,7 +570,7 @@ alpha_bar = cosine_alpha_bar(T)
 <span class="code-comment"># alpha_bar[1000] ≈ 0.0  (pure noise)</span>
 
 print(f"alpha_bar[0]    = {alpha_bar[0].item():.4f}")   <span class="code-comment"># 1.0000</span>
-print(f"alpha_bar[500]  = {alpha_bar[500].item():.4f}")  <span class="code-comment"># ~0.1254 (depends on schedule)</span>
+print(f"alpha_bar[500]  = {alpha_bar[500].item():.4f}")  <span class="code-comment"># ~0.4938 (depends on schedule)</span>
 print(f"alpha_bar[1000] = {alpha_bar[1000].item():.4f}") <span class="code-comment"># ~0.0001</span>
 
 <span class="code-comment"># ─────────────────────────────────────────────</span>
@@ -641,8 +649,8 @@ print(f"x_sto shape : {x_sto.shape}")   <span class="code-comment"># torch.Size(
 print("\nx_det (eta=0):", x_det.round(decimals=4))
 print("x_sto (eta=1):", x_sto.round(decimals=4))
 <span class="code-comment"># Expected (seed=42, d=8, t=500→480):</span>
-<span class="code-comment"># x_det (eta=0): tensor([ 0.2031,  0.1342, -0.3256, -0.0721,  0.4019,  0.1584, -0.2103,  0.0891])</span>
-<span class="code-comment"># x_sto (eta=1): tensor([ 0.2031,  0.1342, -0.3256, -0.0721,  0.4019,  0.1584, -0.2103,  0.0891])  ← different last digits due to z</span>
+<span class="code-comment"># x_det (eta=0): tensor([ 0.3267,  0.1210,  0.2180,  0.2016, -1.2070, -0.1172,  2.3207, -0.7003])</span>
+<span class="code-comment"># x_sto (eta=1): tensor([ 0.6195,  0.3027,  0.0150, -0.0093, -0.9340,  0.1152,  2.2845, -0.5526])  ← every entry differs: σ_t·z is a substantial perturbation at a stride-20 step</span>
 <span class="code-comment">#  Notice: both share terms 1+2 identically; they differ ONLY in term 3 (the z injection)</span>
 
 <span class="code-comment"># ── Verify: terms 1+2 are identical ─────────────</span>
@@ -675,14 +683,14 @@ alongside the math:</p>
 <span class="code-comment"># Inputs: trained eps_theta, noise schedule alpha_bar[0..T]</span>
 <span class="code-comment">#         number of steps S, stochasticity eta in [0, 1]</span>
 
-<span class="code-comment"># 1. Build strided schedule</span>
-tau = [T, T-T//S, T-2*(T//S), ..., T//S]   <span class="code-comment"># S elements, decreasing</span>
+<span class="code-comment"># 1. Build strided schedule (must end at t = 0, where alpha_bar = 1)</span>
+tau = [T, T-T//S, T-2*(T//S), ..., T//S, 0]   <span class="code-comment"># S+1 levels, decreasing, ends at 0</span>
 
 <span class="code-comment"># 2. Sample initial noise</span>
 x = sample_from_N(0, I)                     <span class="code-comment"># shape (d,)  — the only randomness (if eta=0)</span>
 
-<span class="code-comment"># 3. Reverse loop</span>
-for i in range(S - 1):
+<span class="code-comment"># 3. Reverse loop (len(tau)-1 = S transitions, the last one landing on t = 0)</span>
+for i in range(len(tau) - 1):
     t      = tau[i]                          <span class="code-comment"># current coarse timestep</span>
     t_prev = tau[i + 1]                      <span class="code-comment"># previous coarse timestep</span>
 

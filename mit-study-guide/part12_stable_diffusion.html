@@ -236,7 +236,7 @@ Everything in Parts 8–11 (SDEs, probability flow ODEs, flow matching, rectifie
 \text{TimeEmb}(t) = \left[\sin(w_1 t),\, \cos(w_1 t),\, \sin(w_2 t),\, \cos(w_2 t),\, \ldots\right] \in \mathbb{R}^d
 \]
 
-where the frequencies are spaced logarithmically: \(w_i = 10000^{2i/d}\). This is the same positional encoding used in the Transformer (which you already know) — here applied to <em>time</em> instead of position. The resulting vector has unit norm (\(\|\text{TimeEmb}(t)\|=1\)) and encodes both fine- and coarse-grained time structure.
+where the frequencies are spaced logarithmically: \(w_i = 10000^{-2i/d}\) (decreasing with \(i\)). This is the same positional encoding used in the Transformer (which you already know) — here applied to <em>time</em> instead of position. The resulting vector has constant norm \(\|\text{TimeEmb}(t)\| = \sqrt{d/2}\) — each \(\sin/\cos\) pair contributes \(\sin^2 + \cos^2 = 1\), so the norm is independent of \(t\) (unit norm only after scaling by \(\sqrt{2/d}\)) — and encodes both fine- and coarse-grained time structure.
 
 <h3>12.3.2 &nbsp; Text embedding — CLIP and T5</h3>
 
@@ -341,13 +341,14 @@ The downsampling path (encoders) captures high-level semantics at low resolution
 <p>For Gaussian probability paths (the standard case), the guided vector field can be decomposed as:</p>
 
 \[
-u^\text{target}_t(x \mid y) = \underbrace{u^\text{target}_t(x)}_{\text{unguided}} + \underbrace{\nabla_x \log p_t(y \mid x)}_{\text{gradient of classifier}}
+u^\text{target}_t(x \mid y) = \underbrace{u^\text{target}_t(x)}_{\text{unguided}} + b_t\,\underbrace{\nabla_x \log p_t(y \mid x)}_{\text{gradient of classifier}},
+\qquad b_t = \frac{\dot\alpha_t\,\beta_t^2}{\alpha_t} - \dot\beta_t\,\beta_t
 \]
 
-<p>This says: the guided velocity = the velocity toward any plausible image + a nudge toward images that explain the prompt. If the prompt adherence is weak, we can simply <em>scale up</em> the second term by a weight \(w &gt; 1\):</p>
+<p>The schedule-dependent coefficient \(b_t\) comes from the score-to-velocity conversion \(u_t(x \mid y) = a_t x + b_t \nabla_x \log p_t(x \mid y)\) for Gaussian paths — a score never enters a velocity field with coefficient 1. This says: the guided velocity = the velocity toward any plausible image + a (rescaled) nudge toward images that explain the prompt. If the prompt adherence is weak, we can simply <em>scale up</em> the second term by a weight \(w &gt; 1\):</p>
 
 \[
-\tilde{u}_t(x \mid y) = u^\text{target}_t(x) + w \cdot \nabla_x \log p_t(y \mid x)
+\tilde{u}_t(x \mid y) = u^\text{target}_t(x) + w \cdot b_t\,\nabla_x \log p_t(y \mid x)
 \]
 
 <p>This is <strong>classifier guidance</strong>: train a classifier \(p_t(y \mid x)\) on noisy images and use its gradient. The problem: we'd need a second network, and for free-form text prompts the classifier is very hard to train.</p>
@@ -357,9 +358,11 @@ u^\text{target}_t(x \mid y) = \underbrace{u^\text{target}_t(x)}_{\text{unguided}
 <p>The key trick: rewrite the identity using Bayes' rule in the other direction.</p>
 
 \[
-\nabla_x \log p_t(y \mid x) = \nabla_x \log p_t(x \mid y) - \nabla_x \log p_t(x)
-\propto u^\text{target}_t(x \mid y) - u^\text{target}_t(x)
+b_t\,\nabla_x \log p_t(y \mid x) = b_t\bigl(\nabla_x \log p_t(x \mid y) - \nabla_x \log p_t(x)\bigr)
+= u^\text{target}_t(x \mid y) - u^\text{target}_t(x)
 \]
+
+<p>Note how \(b_t\) cancels out of the final formula — this is why the boxed CFG rule below contains no schedule-dependent factors.</p>
 
 <p>So the scaled guided velocity becomes:</p>
 
@@ -433,7 +436,7 @@ Same idea, same training trick, just a different parameterisation of the network
 <table class="symbols">
   <tr><th>Component</th><th>Choice in SD3</th><th>Where you learned it</th></tr>
   <tr><td>Flow objective</td><td>Conditional flow matching with linear schedule \(\alpha_t=t, \sigma_t=1-t\) (rectified flow)</td><td>Part 11</td></tr>
-  <tr><td>Latent space</td><td>Pre-trained autoencoder, latents at \(4\times\frac{H}{8}\times\frac{W}{8}\)</td><td>§12.1–12.2</td></tr>
+  <tr><td>Latent space</td><td>Pre-trained autoencoder, latents at \(16\times\frac{H}{8}\times\frac{W}{8}\) (SD3 ships a 16-channel autoencoder; 4 channels is SD1.x/2.x/SDXL)</td><td>§12.1–12.2</td></tr>
   <tr><td>Architecture</td><td><strong>MM-DiT</strong> — multi-modal DiT that applies self-attention jointly over image patches <em>and</em> text tokens (not just cross-attention)</td><td>§12.4.1</td></tr>
   <tr><td>Text conditioning</td><td>3 encoders: CLIP (two variants) + T5-XXL; their outputs are concatenated</td><td>§12.3.2</td></tr>
   <tr><td>Guidance</td><td>CFG with \(w \in [2, 5]\) at sampling</td><td>§12.5</td></tr>

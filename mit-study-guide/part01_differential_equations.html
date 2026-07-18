@@ -405,9 +405,10 @@
   <p>
     <em>Continuously differentiable with bounded derivative</em> means: (1) the vector field
     is smooth (no jumps), and (2) the rate at which it changes from point to point is bounded
-    (the Lipschitz condition). Neural networks always satisfy this in practice because their
-    weight matrices are finite and their activation functions (ReLU, GELU, SiLU) have bounded
-    derivatives on compact sets.
+    (the Lipschitz condition). Neural networks with smooth activations (GELU, SiLU) satisfy
+    the theorem as stated. ReLU networks are not continuously differentiable (the kink at 0),
+    but they are Lipschitz continuous, which is what uniqueness actually needs
+    (via Picard&ndash;Lindel&ouml;f).
   </p>
 </div>
 
@@ -834,11 +835,11 @@ print(f"  Start : {traj_rot[0].numpy()}")
 <span class="code-comment"># Expected start:  [1. 0.]</span>
 
 print(f"  t=0.25: {traj_rot[2].numpy()}")
-<span class="code-comment"># Expected approx: [0.5625  0.8906] (exact: [cos(0.25), sin(0.25)] ≈ [0.9689, 0.2474])
+<span class="code-comment"># Expected approx: [0.9844  0.2500] (exact: [cos(0.25), sin(0.25)] ≈ [0.9689, 0.2474])
 # Coarse Euler with n=8 is not very accurate for rotation — try n=100 for a tighter circle.</span>
 
 print(f"  End   : {traj_rot[-1].numpy()}")
-<span class="code-comment"># Expected approx: near [0.54,  0.84] (exact: [cos(1), sin(1)] ≈ [0.5403, 0.8415])
+<span class="code-comment"># Expected approx: near [0.579, 0.892] (exact: [cos(1), sin(1)] ≈ [0.5403, 0.8415])
 # With n=8 Euler drifts outward slightly — the particle spirals out.
 # With n=1000 it stays very close to the exact circle.</span>
 
@@ -853,14 +854,14 @@ print(f"  Start : {traj_pull[0].numpy()}")
 <span class="code-comment"># Expected: [ 3. -2.]</span>
 
 print(f"  t=0.5 : {traj_pull[4].numpy()}")
-<span class="code-comment"># Expected approx: ~ [0.406, -0.270]
+<span class="code-comment"># Expected approx: ~ [0.949, -0.633]
 # Exact: x0 * exp(-2*0.5) = [3,-2]*exp(-1) ≈ [1.104, -0.736]
-# Euler with n=8 overshoots slightly; closer with more steps.</span>
+# Euler with n=8 decays faster than the exact flow; closer with more steps.</span>
 
 print(f"  End   : {traj_pull[-1].numpy()}")
-<span class="code-comment"># Expected approx: near [0.03, -0.02]
+<span class="code-comment"># Expected approx: near [0.300, -0.200]
 # Exact: x0 * exp(-2*1.0) = [3,-2]*exp(-2) ≈ [0.406, -0.271]
-# Euler with n=8 converges faster than exact due to accumulation of over-steps.</span>
+# Euler with n=8 decays faster than the exact flow, so it lands closer to zero.</span>
 
 
 <span class="code-comment"># ── 5. Higher n → tighter approximation ──────────────────────────────────────</span>
@@ -876,7 +877,7 @@ print(f"  Exact flow end    : {exact_end.numpy()}")
 
 error = (traj_pull_fine[-1] - exact_end).norm().item()
 print(f"  L2 error (n=1000) : {error:.6f}")
-<span class="code-comment"># Expected: ~0.0003 — very small; halving n would roughly double this error.</span>
+<span class="code-comment"># Expected: ~0.001 — very small; halving n would roughly double this error.</span>
 
 
 <span class="code-comment"># ── 6. The flow model sampling loop (schematic) ───────────────────────────────

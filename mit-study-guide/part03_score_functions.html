@@ -100,7 +100,7 @@ uphill on the right.</p>
 <tr><th>Symbol</th><th>Type / Shape</th><th>Meaning</th></tr>
 <tr><td>\(x\)</td><td>vector \(\in \mathbb{R}^d\)</td><td>a data point (e.g. a noisy image flattened to \(d\) numbers)</td></tr>
 <tr><td>\(p(x)\)</td><td>scalar \(\geq 0\)</td><td>probability density evaluated at \(x\); integrates to 1 over \(\mathbb{R}^d\)</td></tr>
-<tr><td>\(\log p(x)\)</td><td>scalar \(\in (-\infty, 0]\)</td><td>log-likelihood; replaces multiplication with addition</td></tr>
+<tr><td>\(\log p(x)\)</td><td>scalar \(\in (-\infty, \infty)\) (a density can exceed 1)</td><td>log-likelihood; replaces multiplication with addition</td></tr>
 <tr><td>\(\nabla_x\)</td><td>operator \(\to \mathbb{R}^d\)</td><td>gradient w.r.t. \(x\): the \(i\)-th component is \(\partial / \partial x_i\)</td></tr>
 <tr><td>\(s(x)\)</td><td>vector \(\in \mathbb{R}^d\)</td><td>the score function \(\nabla_x \log p(x)\); same shape as \(x\)</td></tr>
 </table>
@@ -726,7 +726,7 @@ print("Score at mean:", score_at_mean)
 x_far = torch.tensor([3.0, 3.0])
 score_far = -(x_far - mu) / sigma2
 print("Score at (3,3):", score_far)
-<span class="code-comment"># Expected: tensor([-1.6667,  2.9167])  -- large magnitude pointing back to mu</span></code></pre>
+<span class="code-comment"># Expected: tensor([-1.6667, -2.9167])  -- large magnitude pointing back to mu</span></code></pre>
 
 <h3>Part B — Tiny 1-D denoising score matching with an MLP</h3>
 

@@ -614,13 +614,13 @@ for i in range(N_STEPS):
         var = x.var().item()
         print(f"t={t_display:.3f}  mean={mu:+.4f}  var={var:.4f}")
 
-<span class="code-comment"># ── Expected output (approximate, depends on RNG seed) ──────────
-# t=0.001  mean=+1.9989  var=0.0001    ← barely moved from x₀=2
-# t=0.100  mean=+1.6371  var=0.0930    ← signal decaying, noise growing
-# t=0.200  mean=+1.0879  var=0.3012
-# t=0.500  mean=+0.1553  var=0.8342    ← signal nearly gone
-# t=0.800  mean=+0.0053  var=0.9817    ← very close to N(0,1)
-# t=1.000  mean=+0.0011  var=0.9991    ← essentially N(0,1) ✓</span>
+<span class="code-comment"># ── Expected output (seed=0; matches the analytic marginal) ──────
+# t=0.001  mean=+1.9998  var=0.0001    ← barely moved from x₀=2
+# t=0.101  mean=+1.8929  var=0.1047    ← signal decaying, noise growing
+# t=0.201  mean=+1.6221  var=0.3450
+# t=0.501  mean=+0.5542  var=0.9257    ← signal mostly gone
+# t=0.801  mean=+0.0718  var=0.9945    ← very close to N(0,1)
+# t=1.000  mean=+0.0113  var=1.0078    ← essentially N(0,1) ✓</span>
 
 <span class="code-comment"># ── Verify against the closed-form marginal (7.3) ────────────────
 # ᾱ(t) = exp(-∫₀ᵗ β(s) ds)
@@ -633,8 +633,9 @@ alpha_bar = torch.exp(-integral)
 expected_mean = (alpha_bar ** 0.5 * 2.0).item()   <span class="code-comment"># √ᾱ(1) · x₀</span>
 expected_var  = (1.0 - alpha_bar).item()            <span class="code-comment"># 1 - ᾱ(1)</span>
 print(f"\nClosed-form at t=1:  mean={expected_mean:.6f}  var={expected_var:.6f}")
-<span class="code-comment"># Closed-form at t=1:  mean=0.000000  var=1.000000
-# (ᾱ(1) ≈ 0 for β_min=0.1, β_max=20.0 — signal is fully destroyed)</span>
+<span class="code-comment"># Closed-form at t=1:  mean=0.013143  var=0.999957
+# (ᾱ(1) ≈ e^{-10.05} ≈ 4.3e-5 for β_min=0.1, β_max=20.0 — the signal is
+#  essentially, but not exactly, destroyed: √ᾱ(1)·2 ≈ 0.013)</span>
 </code></pre>
 
 <div class="box intuition">

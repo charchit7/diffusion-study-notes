@@ -314,8 +314,8 @@ abar   = torch.cumprod(alpha, dim=0)     <span class="code-comment"># shape: (T,
 <span class="code-comment"># --- Pick a specific time step to test ---</span>
 t_idx  = 499        <span class="code-comment"># 0-indexed, so this is t = 500 in 1-indexed notation</span>
 ab_t   = abar[t_idx]
-print(f"abar at t=500:   {ab_t:.4f}")   <span class="code-comment"># expected: ~0.13 for linear schedule</span>
-print(f"1-abar at t=500: {1-ab_t:.4f}") <span class="code-comment"># expected: ~0.87</span>
+print(f"abar at t=500:   {ab_t:.4f}")   <span class="code-comment"># expected: ~0.079 for linear schedule</span>
+print(f"1-abar at t=500: {1-ab_t:.4f}") <span class="code-comment"># expected: ~0.92</span>
 
 <span class="code-comment"># --- Fixed clean data point (same for all samples) ---</span>
 x0 = torch.ones(d) * 3.0   <span class="code-comment"># x0 = [3, 3, 3, 3], shape: (d,)</span>
@@ -326,7 +326,7 @@ for s in range(t_idx + 1):
     noise    = torch.randn_like(x_chain)
     x_chain  = alpha[s].sqrt() * x_chain + beta[s].sqrt() * noise
 <span class="code-comment"># x_chain[:,0] should be N(sqrt(abar_t)*3, 1-abar_t)
-# Expected mean: sqrt(0.13)*3 ~ 1.08,  expected var: ~0.87</span>
+# Expected mean: sqrt(0.0786)*3 ~ 0.841,  expected var: ~0.921</span>
 
 <span class="code-comment"># --- Method 2: closed-form jump (instant) ---</span>
 eps      = torch.randn(N, d)                            <span class="code-comment"># shape: (N, d)</span>
@@ -341,11 +341,11 @@ print(f"Theory               — mean: {(ab_t.sqrt()*3.0):.3f}, "
       f"var: {(1-ab_t):.3f}")
 
 <span class="code-comment"># Expected output (approximate, varies with N and seed):
-# abar at t=500:   0.1307
-# 1-abar at t=500: 0.8693
-# Method 1 (full chain) — mean: 1.083,  var: 0.869
-# Method 2 (closed form) — mean: 1.081, var: 0.868
-# Theory               — mean: 1.083,  var: 0.869
+# abar at t=500:   0.0786
+# 1-abar at t=500: 0.9214
+# Method 1 (full chain) — mean: 0.847,  var: 0.923
+# Method 2 (closed form) — mean: 0.844, var: 0.916
+# Theory               — mean: 0.841,  var: 0.921
 # The two methods give near-identical statistics.</span>
 </code></pre>
 
@@ -490,10 +490,10 @@ standard KL-divergence algebra, the ELBO decomposes into three additive terms:</
 \[
   \mathcal{L}_{\mathrm{ELBO}}
   \;=\;
-  \underbrace{-D_{\mathrm{KL}}\bigl(q(x_T\mid x_0)\;\|\;p(x_T)\bigr)}_{L_T,\;\text{prior matching}}
-  +
+  -\underbrace{D_{\mathrm{KL}}\bigl(q(x_T\mid x_0)\;\|\;p(x_T)\bigr)}_{L_T,\;\text{prior matching}}
+  \;-\;
   \sum_{t=2}^{T}
-  \underbrace{-D_{\mathrm{KL}}\bigl(q(x_{t-1}\mid x_t, x_0)\;\|\;p_\theta(x_{t-1}\mid x_t)\bigr)}_{L_{t-1},\;\text{denoising terms}}
+  \underbrace{D_{\mathrm{KL}}\bigl(q(x_{t-1}\mid x_t, x_0)\;\|\;p_\theta(x_{t-1}\mid x_t)\bigr)}_{L_{t-1},\;\text{denoising terms}}
   +
   \underbrace{\mathbb{E}_q\!\left[\log p_\theta(x_0 \mid x_1)\right]}_{L_0,\;\text{reconstruction}}.
 \]
@@ -637,11 +637,13 @@ to guess what noise was added; (6) update toward making the guess more accurate.
 <p>
 The ELBO derivation gives each \(L_{t-1}\) a weight
 \(\propto \frac{\beta_t^2}{2\tilde{\beta}_t\alpha_t(1-\bar{\alpha}_t)}\).
-Ho et al. drop this weight, effectively upweighting steps where the schedule would
-have assigned low importance. This can be seen as a form of <em>loss re-balancing</em>
-that puts more gradient signal on steps the ELBO considers "easy" (low-\(t\)).
-In practice it improves perceptual quality (FID score), probably because
-those easy steps matter most for fine detail. <strong>However</strong>, if you care
+This weight is <em>huge at small \(t\)</em> (since \(1-\bar{\alpha}_{t-1} \to 0\)).
+Ho et al. drop it, setting all weights to 1 — which <em>down-weights</em> the low-\(t\)
+(nearly-clean) terms the ELBO weights enormously, and relatively <em>up-weights</em> the
+high-noise (large-\(t\)) steps. This loss re-balancing shifts gradient signal toward the
+harder denoising tasks at large \(t\).
+In practice it improves perceptual quality (FID score), because
+those high-noise steps are where the perceptually hard work happens. <strong>However</strong>, if you care
 about exact likelihood estimation (bits-per-dimension), use the full ELBO weighting —
 the simple loss is not a valid likelihood lower bound.
 </p>
@@ -656,16 +658,23 @@ the simple loss is not a valid likelihood lower bound.
 </p>
 
 <p>
-  The score function of the marginal \(q_t(x_t)\) satisfies (by the Tweedie formula
-  / Gaussian conditional score, as derived in Part 3):
+  The score function of the <em>conditional</em> \(q(x_t \mid x_0)\) satisfies (Gaussian
+  conditional score, as derived in Part 3):
 </p>
 
 \[
-  \nabla_{x_t} \log q_t(x_t)
+  \nabla_{x_t} \log q(x_t \mid x_0)
   \;=\;
   -\frac{1}{\sqrt{1 - \bar{\alpha}_t}}\,\varepsilon,
-  \quad\text{where } x_t = \sqrt{\bar{\alpha}_t}\,x_0 + \sqrt{1-\bar{\alpha}_t}\,\varepsilon.
+  \quad\text{where } x_t = \sqrt{\bar{\alpha}_t}\,x_0 + \sqrt{1-\bar{\alpha}_t}\,\varepsilon,
 \]
+
+<p>
+  and by the Tweedie formula the score of the <em>marginal</em> \(q_t(x_t)\) is the
+  posterior expectation of this:
+  \(\nabla_{x_t}\log q_t(x_t) = -\mathbb{E}[\varepsilon \mid x_t]/\sqrt{1-\bar{\alpha}_t}\),
+  which is exactly what \(\varepsilon_\theta\) approximates.
+</p>
 
 <p>Therefore the noise-predicting network \(\varepsilon_\theta\) is related to the score by:</p>
 
@@ -794,8 +803,8 @@ reduces this dramatically).
 <p><strong>Noise schedules.</strong>
 Ho et al. (2020) used a <em>linear schedule</em>: \(\beta_t\) grows linearly from
 \(10^{-4}\) to \(0.02\) over \(T=1000\) steps.
-Nichol &amp; Dhariwal (2021) found that at high resolutions the linear schedule
-causes \(\bar{\alpha}_t\) to decay too fast near \(t=T\), wasting compute on steps
+Nichol &amp; Dhariwal (2021) found that at low resolutions (64&times;64, 32&times;32)
+the linear schedule destroys information too quickly near \(t=T\), wasting compute on steps
 that are already pure noise. They introduced the <em>cosine schedule</em>:
 </p>
 
@@ -876,7 +885,7 @@ print("beta  range:", sched["beta"].min().item(), "to", sched["beta"].max().item
 print("abar  range:", sched["abar"].min().item(), "to", sched["abar"].max().item())
 <span class="code-comment"># expected: ~0.0 to ~0.9999  (abar_T close to 0, abar_1 close to 1)</span>
 print("abar at t=1  :", sched["abar"][0].item())    <span class="code-comment"># ~0.9999</span>
-print("abar at t=500:", sched["abar"][499].item())  <span class="code-comment"># ~0.13</span>
+print("abar at t=500:", sched["abar"][499].item())  <span class="code-comment"># ~0.079</span>
 print("abar at t=999:", sched["abar"][998].item())  <span class="code-comment"># ~0.00004  (almost 0)</span>
 </code></pre>
 
@@ -1050,10 +1059,12 @@ model  = StubEpsNet(d=d, T=1000)
 x_gen  = ddpm_sample(model, sched, shape=(B, d))
 print(f"Generated shape: {x_gen.shape}")               <span class="code-comment"># expected: torch.Size([4, 8])</span>
 print(f"Mean: {x_gen.mean():.3f},  Std: {x_gen.std():.3f}")
-<span class="code-comment"># With an untrained model the output will NOT look like data —
-# it will be roughly N(0,1)-shaped since the model outputs near-zero noise.
-# After training, x_gen.mean() and x_gen.std() should match the data distribution.
-# Expected for untrained: Mean ~ 0.0, Std ~ 1.0</span>
+<span class="code-comment"># With an untrained model the output will NOT look like data — it BLOWS UP.
+# If eps_hat ~ 0, each step computes x_{t-1} = x_t / sqrt(alpha_t) + sqrt(beta_t)*z,
+# and the 1/sqrt(alpha_t) factors compound to 1/sqrt(abar_T) ~ 157 over the chain,
+# so the std is amplified to ~10^2-10^3. Only a trained eps_theta cancels this
+# amplification; after training, x_gen's mean/std should match the data distribution.
+# Expected for untrained: Mean ~ O(10), Std ~ O(100-1000) (huge — this is normal!)</span>
 </code></pre>
 
 <!-- ============================================================ -->

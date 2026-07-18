@@ -194,7 +194,7 @@ In the limit \(h \to 0\), you get a <em>continuous path</em> that is infinitely 
 
 <h3>2.3.2 Formal definition of Brownian motion</h3>
 
-<p>The MIT notes (Section 2.2) define Brownian motion through three properties. Here is each property, its formal statement, and its plain meaning:</p>
+<p>The MIT notes (Section 2.2) define Brownian motion through four properties. Here is each property, its formal statement, and its plain meaning:</p>
 
 <div class="box mathblock">
 <span class="label">Definition: Brownian motion (Wiener process)</span>
@@ -304,7 +304,7 @@ An ODE is \(dX_t = f(X_t, t)\,dt\) — no noise term. Setting \(\sigma(t) = 0\) 
 
 <h3>2.5.2 Why diffusion models need SDEs</h3>
 
-<p>In Part 1, a flow model used an ODE to transport samples from a simple distribution to the data distribution. This works, but a deterministic flow can only "deform" — it cannot "create" genuine diversity through randomness. An SDE with nonzero \(\sigma(t)\) injects fresh Gaussian noise at every time step. This noise:</p>
+<p>In Part 1, a flow model used an ODE to transport samples from a simple distribution to the data distribution. A flow already generates diverse samples — the diversity comes from the random draw of \(X_0\). What an SDE with nonzero \(\sigma(t)\) adds is fresh Gaussian noise <em>along the trajectory</em>, injected at every time step. This noise:</p>
 
 <ul>
 <li>Gives the model a richer family of dynamics to learn from.</li>
@@ -467,13 +467,13 @@ A diffusion model with \(\sigma(t) = 0\) is a <em>flow model</em> (Part 1 of thi
 
 <div class="box connect">
 <span class="label">How this connects to the rest of the guide</span>
-<strong>Forward process (Parts 4–7):</strong> The forward noising process is an SDE (often OU-like) that maps data \(X_1 \sim p_{\text{data}}\) to noise \(X_0 \sim p_{\text{init}}\). By choosing \(\sigma(t)\) and \(\theta\) carefully, the marginals \(p_t(x)\) have closed-form expressions, making training tractable.
+<strong>Forward process (Parts 4–7):</strong> A convention note: in these notes (as in Summary 7) \(t=0\) is noise \(X_0 \sim p_{\text{init}}\) and \(t=1\) is data \(X_1 \sim p_{\text{data}}\). The <em>noising</em> process is an SDE (often OU-like) that corresponds to running time from 1 down to 0 — i.e. the reverse-time direction. (Song et al. and the DDPM papers use the opposite convention, with data at the start.) By choosing \(\sigma(t)\) and \(\theta\) carefully, the marginals \(p_t(x)\) have closed-form expressions, making training tractable.
 <br><br>
 <strong>Reverse-time SDE (Part 8):</strong> There exists a remarkable result (the Anderson reverse-time SDE) that says: running an SDE backwards in time produces a new SDE driven by the <em>score function</em> \(\nabla_x \log p_t(x)\). This is the theoretical heart of score-based diffusion models — and it is why learning the score function (Part 3) is so important.
 <br><br>
 <strong>Probability Flow ODE (Part 9):</strong> Every SDE has an associated deterministic ODE that generates the same marginal distributions \(p_t\). This ODE, called the probability flow ODE, allows faster sampling (no noise needed) and enables exact likelihood computation.
 <br><br>
-<strong>In one sentence:</strong> The diffusion forward process is an SDE (often OU-like) that turns data into noise; the reverse-time SDE turns noise back into data.
+<strong>In one sentence:</strong> Noising is an SDE that turns data into noise (time running from 1 down to 0 in these notes); generation is the forward \(0 \to 1\) SDE of Summary 7 that turns noise back into data.
 </div>
 
 <!-- ============================================================ -->
@@ -499,7 +499,7 @@ stationary_std  = math.sqrt(stationary_var)  <span class="code-comment"># = 1.0<
 
 <span class="code-comment"># Simulation settings</span>
 n_trajectories = 10_000   <span class="code-comment"># many trajectories so the empirical distribution is smooth</span>
-T              = 5.0      <span class="code-comment"># total time to simulate (long enough to reach stationarity)</span>
+T              = 5.0      <span class="code-comment"># total time to simulate (most of the way to stationarity)</span>
 n_steps        = 500      <span class="code-comment"># number of Euler-Maruyama steps</span>
 h              = T / n_steps  <span class="code-comment"># step size h = 5.0 / 500 = 0.01</span>
 
@@ -530,16 +530,18 @@ for step in range(1, n_steps + 1):
               f"(target mean=0.000, target std={stationary_std:.3f})")
 
 <span class="code-comment"># Expected output (approximate — exact values depend on RNG seed):</span>
-<span class="code-comment"># t=0.50  | mean=3.894  std=0.441  (target mean=0.000, target std=1.000)</span>
-<span class="code-comment"># t=1.00  | mean=3.033  std=0.666  (target mean=0.000, target std=1.000)</span>
-<span class="code-comment"># t=2.00  | mean=1.839  std=0.897  (target mean=0.000, target std=1.000)</span>
-<span class="code-comment"># t=5.00  | mean=0.039  std=0.991  (target mean=0.000, target std=1.000)</span>
+<span class="code-comment"># t=0.50  | mean=3.886  std=0.631  (target mean=0.000, target std=1.000)</span>
+<span class="code-comment"># t=1.00  | mean=3.025  std=0.800  (target mean=0.000, target std=1.000)</span>
+<span class="code-comment"># t=2.00  | mean=1.831  std=0.936  (target mean=0.000, target std=1.000)</span>
+<span class="code-comment"># t=5.00  | mean=0.402  std=0.988  (target mean=0.000, target std=1.000)</span>
 
 <span class="code-comment"># Observations:</span>
 <span class="code-comment"># 1. The mean starts at 5.0 and decays toward 0 as x_0 * exp(-theta*t) = 5*exp(-0.5*t).</span>
 <span class="code-comment">#    At t=5.0: 5*exp(-2.5) ~ 5*0.082 ~ 0.41, but with noise the empirical mean fluctuates.</span>
 <span class="code-comment"># 2. The std starts at 0 (point mass) and grows toward the stationary value of 1.0.</span>
-<span class="code-comment"># 3. By t=5.0, the empirical distribution has converged: mean ~ 0, std ~ 1.</span>
+<span class="code-comment"># 3. By t=5.0 the std has essentially reached 1, but the mean is still ~0.41 and</span>
+<span class="code-comment">#    still decaying — with theta=0.5 the time constant is 2, so t=5 is only 2.5 time</span>
+<span class="code-comment">#    constants; near-full convergence of the mean needs t of roughly 5/theta = 10.</span>
 <span class="code-comment"># This is the OU forward process: it erases any initial distribution and replaces</span>
 <span class="code-comment"># it with N(0, sigma^2/(2*theta)) = N(0, 1) regardless of the starting point.</span>
 
@@ -556,7 +558,7 @@ for t_check in [0.5, 1.0, 2.0, 5.0]:
 
 <div class="box intuition">
 <span class="label">Reading the simulation output</span>
-Notice that by \(t = 5.0\) the empirical mean is near 0 and the standard deviation is near 1.0, matching the stationary distribution \(\mathcal{N}(0, 1)\). We started at a point mass at \(x = 5\) — very far from Gaussian. The OU process drove the distribution toward Gaussian regardless of where we started. That is the core property that makes OU useful for diffusion models: it is a universal "noise funnel" that maps any distribution toward a known Gaussian, step by step, in a way we can compute and invert.
+Notice that by \(t = 5.0\) the standard deviation is near 1.0, while the empirical mean is about 0.41 (\(5e^{-2.5}\)) and still decaying toward 0 — the process is close to, but has not yet reached, the stationary distribution \(\mathcal{N}(0, 1)\); near-full convergence of the mean needs \(t \gtrsim 5/\theta = 10\). We started at a point mass at \(x = 5\) — very far from Gaussian. The OU process drove the distribution toward Gaussian regardless of where we started. That is the core property that makes OU useful for diffusion models: it is a universal "noise funnel" that maps any distribution toward a known Gaussian, step by step, in a way we can compute and invert.
 </div>
 
 <!-- ============================================================ -->
@@ -566,7 +568,7 @@ Notice that by \(t = 5.0\) the empirical mean is near 0 and the standard deviati
 <li><strong>Random vectors:</strong> Given a joint density \(p_{X,Y}(x,y)\), write down the marginal \(p_X(x)\) as an integral. State Bayes' rule.</li>
 <li><strong>Conditional expectation:</strong> Distinguish \(\mathbb{E}[X \mid Y = y]\) (a function) from \(\mathbb{E}[X \mid Y]\) (a random variable). State the tower property.</li>
 <li><strong>Stochastic process:</strong> Explain why a stochastic process produces different paths on different runs, while an ODE trajectory is deterministic.</li>
-<li><strong>Brownian motion:</strong> State the three defining properties (starts at zero; Gaussian increments with variance = time elapsed; independent increments). Explain why variance grows linearly in time using the additivity of variances.</li>
+<li><strong>Brownian motion:</strong> State the four defining properties (starts at zero; Gaussian increments with variance = time elapsed; independent increments; continuous paths). Explain why variance grows linearly in time using the additivity of variances.</li>
 <li><strong>The differential \(dW_t\):</strong> State the scaling rule: \(\text{std}(dW_t) = \sqrt{dt}\). Explain why using \(dt\) instead of \(\sqrt{dt}\) in simulation is wrong.</li>
 <li><strong>SDE structure:</strong> Identify the drift term and the diffusion term in \(dX_t = f(X_t,t)\,dt + \sigma(t)\,dW_t\). Explain what each term does.</li>
 <li><strong>Theorem 5:</strong> State (in plain words) what it guarantees and why it matters.</li>

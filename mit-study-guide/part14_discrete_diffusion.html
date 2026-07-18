@@ -92,7 +92,7 @@
     <li><strong>Non-negative off-diagonal:</strong> \(Q_t(y \mid x) \geq 0\) for all \(y \neq x\). (You can't have a negative rate of jumping somewhere.)</li>
     <li><strong>Rows sum to zero:</strong> \(\sum_{y \in \mathcal{S}} Q_t(y \mid x) = 0\) for all \(x\). This forces \(Q_t(x \mid x) = -\sum_{y \neq x} Q_t(y \mid x) \leq 0\). (Total probability is conserved.)</li>
   </ol>
-  <p>Think of \(Q_t\) as a \(|\mathcal{S}| \times |\mathcal{S}|\) matrix where columns index "current state \(x\)" and rows index "destination state \(y\)".</p>
+  <p>Think of \(Q_t\) as a \(|\mathcal{S}| \times |\mathcal{S}|\) matrix with entry \([Q_t]_{x,y} = Q_t(y \mid x)\): <em>rows</em> index the current state \(x\) and <em>columns</em> index the destination state \(y\). With this layout the zero-sum condition above really is a <em>row</em> sum, and the row-vector updates \(\frac{d}{dt}p_t = p_t Q_t\) and \(p_{t+h} = p_t(I + hQ_t)\) below are consistent.</p>
 </div>
 
 <h3>Intuition: \(Q_t\) is an instantaneous jump rate</h3>
@@ -150,7 +150,7 @@
 
 \[Q = \begin{pmatrix} -\lambda &amp; \lambda \\ \lambda &amp; -\lambda \end{pmatrix}\]
 
-<p>Reading the columns: column \(a\) says "if you are at \(a\), you jump to \(b\) at rate \(\lambda\) and the diagonal \(-\lambda\) ensures the row sums to zero." Column \(b\) is symmetric.</p>
+<p>Reading the rows (row = current state): row \(a\) says "if you are at \(a\), you jump to \(b\) at rate \(\lambda\), and the diagonal \(-\lambda\) makes the row sum to zero." Row \(b\) is symmetric.</p>
 
 <p>The resulting <strong>transition probabilities</strong> over a time increment \(h\) are:</p>
 
@@ -175,7 +175,7 @@
 
 <h3>Why factorization is necessary</h3>
 
-<p>The state space \(\mathcal{S} = \mathcal{V}^d\) has size \(V^d\). For GPT-scale language (\(V \approx 50000\), \(d \approx 1024\)), storing even a single column of \(Q_t\) — which has \(V^d\) entries — is physically impossible. We need a sparsity constraint.</p>
+<p>The state space \(\mathcal{S} = \mathcal{V}^d\) has size \(V^d\). For GPT-scale language (\(V \approx 50000\), \(d \approx 1024\)), storing even a single row of \(Q_t\) (the outgoing rates of one state) — which has \(V^d\) entries — is physically impossible. We need a sparsity constraint.</p>
 
 <div class="box intuition">
   <span class="label">Intuition — factorization = one token jumps at a time</span>
@@ -226,11 +226,12 @@ import torch
 
 lambda_ = 2.0            <span class="code-comment"># jump rate</span>
 <span class="code-comment"># Rate matrix Q, shape [2, 2]</span>
-<span class="code-comment"># Q[y, x] = rate of jumping from state x to state y</span>
-<span class="code-comment"># (column = source state, row = destination state)</span>
+<span class="code-comment"># Q[x, y] = rate of jumping from state x to state y</span>
+<span class="code-comment"># (row = current/source state, column = destination state —</span>
+<span class="code-comment">#  this layout makes rows sum to zero and matches p @ (I + h*Q))</span>
 Q = torch.tensor([
-    [-lambda_,  lambda_],   <span class="code-comment"># row a: jump INTO a from each source</span>
-    [ lambda_, -lambda_],   <span class="code-comment"># row b: jump INTO b from each source</span>
+    [-lambda_,  lambda_],   <span class="code-comment"># row a: rates OUT of a (stay: -λ, jump to b: λ)</span>
+    [ lambda_, -lambda_],   <span class="code-comment"># row b: rates OUT of b (jump to a: λ, stay: -λ)</span>
 ])   <span class="code-comment"># shape [2, 2]</span>
 
 <span class="code-comment"># p is a ROW vector: p[i] = P(X_t = state_i)</span>
@@ -250,12 +251,12 @@ for step in range(n + 1):
         <span class="code-comment"># Euler step on the distribution (tau-leaping in distribution space)</span>
         p = p @ (I + h * Q)   <span class="code-comment"># shape [1, 2] @ [2, 2] = [1, 2]</span>
 
-<span class="code-comment"># Expected output (approximate):</span>
+<span class="code-comment"># Expected output (exact solution p_t(a) = (1+e^{-2λt})/2 in parentheses):</span>
 <span class="code-comment"># t=0.000  p(a)=1.0000  p(b)=0.0000</span>
-<span class="code-comment"># t=0.100  p(a)=0.8187  p(b)=0.1813   (still remembers it started at a)</span>
-<span class="code-comment"># t=0.300  p(a)=0.6703  p(b)=0.3297</span>
-<span class="code-comment"># t=0.600  p(a)=0.5878  p(b)=0.4122</span>
-<span class="code-comment"># t=1.000  p(a)=0.5084  p(b)=0.4916   (nearly uniform — converged)</span>
+<span class="code-comment"># t=0.100  p(a)=0.8349  p(b)=0.1651   (exact 0.8352 — still remembers it started at a)</span>
+<span class="code-comment"># t=0.300  p(a)=0.6502  p(b)=0.3498   (exact 0.6506)</span>
+<span class="code-comment"># t=0.600  p(a)=0.5451  p(b)=0.4549   (exact 0.5454)</span>
+<span class="code-comment"># t=1.000  p(a)=0.5091  p(b)=0.4909   (exact 0.5092; nearly uniform — converged)</span>
 <span class="code-comment"># At t->inf: p = [0.5, 0.5]  (stationary / uniform distribution)</span>
 </code></pre>
 
